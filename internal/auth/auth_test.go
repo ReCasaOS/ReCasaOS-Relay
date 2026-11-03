@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -229,5 +230,50 @@ func TestSweepIsAmortisedAndExpires(t *testing.T) {
 	}
 	if _, err := VerifyBox(r, edge); !errors.Is(err, errReplay) {
 		t.Fatalf("entry pruned while still valid: %v", err)
+	}
+}
+
+// The 8 small-order points of edwards25519 (canonical encodings), listed independently of auth.go.
+var weakKeyHex = []string{
+	"0100000000000000000000000000000000000000000000000000000000000000",
+	"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+	"0000000000000000000000000000000000000000000000000000000000000000",
+	"0000000000000000000000000000000000000000000000000000000000000080",
+	"c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+	"c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+	"26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+	"26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+}
+
+// With a small-order key A, the signature (R = identity, S = 0) verifies whenever [k]A is the
+// identity, i.e. for a fraction of messages; since the message embeds the box time, an attacker
+// just walks the ±120 s window. Without the key check this mints valid signatures with no secret.
+func TestVerifyBoxRejectsSmallOrderKeys(t *testing.T) {
+	forgedSig := make([]byte, ed25519.SignatureSize)
+	forgedSig[0] = 1 // R = identity point, S = 0
+	for _, h := range weakKeyHex {
+		pub, err := hex.DecodeString(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		forgeable := 0
+		for dt := -120; dt <= 120; dt++ {
+			ts := strconv.FormatInt(t0.Add(time.Duration(dt)*time.Second).Unix(), 10)
+			if !ed25519.Verify(pub, []byte("POST /v1/fleets\n"+ts), forgedSig) {
+				continue
+			}
+			forgeable++
+			resetSeen()
+			r := httptest.NewRequest(http.MethodPost, "/v1/fleets", nil)
+			r.Header.Set("X-Box-Key", enc.EncodeToString(pub))
+			r.Header.Set("X-Box-Time", ts)
+			r.Header.Set("X-Box-Signature", enc.EncodeToString(forgedSig))
+			if _, err := VerifyBox(r, t0); !errors.Is(err, errWeakKey) {
+				t.Fatalf("key %s accepted a forged signature: %v", h, err)
+			}
+		}
+		if forgeable == 0 {
+			t.Fatalf("key %s: no forgeable time found; is it really small-order?", h)
+		}
 	}
 }

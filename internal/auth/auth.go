@@ -2,6 +2,7 @@
 package auth
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -23,6 +24,7 @@ var (
 	errSkew       = errors.New("auth: box time outside accepted window")
 	errBadSig     = errors.New("auth: bad box signature")
 	errReplay     = errors.New("auth: signature already used")
+	errWeakKey    = errors.New("auth: small-order box key")
 
 	// Strict rejects non-canonical spellings (non-zero trailing bits), which would
 	// otherwise let one signature be replayed under 15 alternate encodings.
@@ -37,6 +39,27 @@ var (
 	lastSweep time.Time
 	sweeps    int // test hook: number of full sweeps run
 )
+
+// smallOrderKeys are the encodings of the edwards25519 points of small order. A box key equal to one
+// of them lets anyone forge signatures without a secret (identity point: R = identity, S = 0 verifies
+// for a fraction of messages), so they are refused before verification.
+var smallOrderKeys = func() [][]byte {
+	var out [][]byte
+	for _, h := range []string{
+		"0100000000000000000000000000000000000000000000000000000000000000",
+		"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+		"0000000000000000000000000000000000000000000000000000000000000000",
+		"0000000000000000000000000000000000000000000000000000000000000080",
+		"c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+		"c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+		"26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+		"26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+	} {
+		b, _ := hex.DecodeString(h)
+		out = append(out, b)
+	}
+	return out
+}()
 
 // sweepEvery bounds how often seen is scanned, keeping verification amortised O(1).
 const sweepEvery = time.Second
@@ -60,6 +83,11 @@ func VerifyBox(r *http.Request, now time.Time) (ed25519.PublicKey, error) {
 	pub, err := enc.DecodeString(r.Header.Get("X-Box-Key"))
 	if err != nil || len(pub) != ed25519.PublicKeySize {
 		return nil, errBadHeaders
+	}
+	for _, weak := range smallOrderKeys {
+		if bytes.Equal(pub, weak) {
+			return nil, errWeakKey
+		}
 	}
 	sig, err := enc.DecodeString(r.Header.Get("X-Box-Signature"))
 	if err != nil || len(sig) != ed25519.SignatureSize {
