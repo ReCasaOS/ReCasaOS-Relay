@@ -105,6 +105,36 @@ func TestFleetDeletionAndCleanup(t *testing.T) {
 		t.Fatalf("wrong secret = %d, want 401", code)
 	}
 
+	// Hostnames are not unique in Headscale: two nodes of one fleet registered as "dup" are two
+	// nodes (ids differ), and the node endpoint removes both.
+	r.startNodeAs("A", "dup", "dupA1", r.joinKey(idA, secA))
+	r.startNodeAs("A", "dup", "dupA2", r.joinKey(idA, secA))
+	if got := strings.Join(r.nodeNames(userA), ","); strings.Count(got, "dup") != 2 {
+		t.Fatalf("nodes of A with two dups = %q", got)
+	}
+	if code := r.deleteCall("/v1/fleets/"+idA+"/nodes/dup", secA); code != http.StatusNoContent {
+		t.Fatalf("remove dup = %d, want 204", code)
+	}
+	if got := r.nodeNames(userA); len(got) != 1 || got[0] != "a1" {
+		t.Fatalf("nodes of A after removing both dups = %v", got)
+	}
+	// An unknown node id is a success for the client too (a 404 from Headscale is swallowed).
+	if err := r.hs.DeleteNodeByID(context.Background(), "99999"); err != nil {
+		t.Fatalf("DeleteNodeByID of an unknown id: %v", err)
+	}
+
+	// A fleet with two same-named nodes is deleted whole: the nodes go by id, then the user.
+	idD, secD := r.createFleet("D")
+	userD := r.fleetUser["D"]
+	r.startNodeAs("D", "dup", "dupD1", r.joinKey(idD, secD))
+	r.startNodeAs("D", "dup", "dupD2", r.joinKey(idD, secD))
+	if code := r.deleteCall("/v1/fleets/"+idD, secD); code != http.StatusNoContent {
+		t.Fatalf("delete D (two nodes named dup) = %d, want 204", code)
+	}
+	if r.userExists(userD) || len(r.nodeNames(userD)) != 0 {
+		t.Fatal("D's user or nodes are still in Headscale")
+	}
+
 	// DELETE a whole fleet that still has a live node and an unused key.
 	idB, secB := r.createFleet("B")
 	userB := r.fleetUser["B"]

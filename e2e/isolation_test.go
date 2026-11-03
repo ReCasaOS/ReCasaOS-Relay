@@ -272,8 +272,14 @@ func (r *rig) usedKeys(user string) (used, unused int) {
 
 // startNode runs a tailscaled container for fleet, registers it with key and waits for its address.
 func (r *rig) startNode(fleet, name, key string) *node {
+	return r.startNodeAs(fleet, name, name, key)
+}
+
+// startNodeAs is startNode with a container name (suffix) that differs from the hostname, so two
+// nodes can share a hostname.
+func (r *rig) startNodeAs(fleet, name, ctr, key string) *node {
 	t := r.t
-	n := &node{name: name, container: r.proj + "-" + name, fleet: fleet}
+	n := &node{name: ctr, container: r.proj + "-" + ctr, fleet: fleet}
 	out, err := sh("docker", "create", "--name", n.container, "--hostname", name,
 		"--label", "rre2e.project="+r.proj, "--network", r.proj+"_default",
 		"--cap-add", "NET_ADMIN", "--cap-add", "NET_RAW", "--device", "/dev/net/tun:/dev/net/tun",
@@ -302,7 +308,7 @@ func (r *rig) startNode(fleet, name, key string) *node {
 		"while true; do nc -l -p "+probePort+" >/dev/null 2>&1; done"); err != nil {
 		t.Fatalf("listener %s: %v\n%s", name, err, out)
 	}
-	r.ts[name] = n
+	r.ts[ctr] = n
 	return n
 }
 
