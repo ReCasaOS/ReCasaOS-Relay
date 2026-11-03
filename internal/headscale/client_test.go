@@ -151,13 +151,44 @@ func TestListPreAuthKeysFiltersByUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []PreAuthKey{
-		{Used: false, Expiration: time.Date(2026, 11, 4, 17, 4, 9, 0, time.UTC)},
-		{Used: true, Expiration: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)},
+		{ID: "1", User: "f-abc", Used: false, Expiration: time.Date(2026, 11, 4, 17, 4, 9, 0, time.UTC)},
+		{ID: "2", User: "f-abc", Used: true, Expiration: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)},
 	}
 	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("got %+v, want %+v", got, want)
 	}
 	f.want(t, `GET /api/v1/preauthkey?`) // no filter parameter exists: filtering is ours
+}
+
+func TestListAllPreAuthKeys(t *testing.T) {
+	c, f := newFake(t, map[string]reply{"GET /api/v1/preauthkey": {200, preAuthKeysJSON}})
+	got, err := c.ListAllPreAuthKeys(ctx)
+	if err != nil || len(got) != 3 || got[2].ID != "3" || got[2].User != "f-other" {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	f.want(t, `GET /api/v1/preauthkey?`)
+}
+
+// Verified live on v0.29.7: DELETE /api/v1/preauthkey?id=N -> 200 {}; an unknown id is also 200 {}.
+func TestDeletePreAuthKey(t *testing.T) {
+	c, f := newFake(t, map[string]reply{"DELETE /api/v1/preauthkey": {200, `{}`}})
+	if err := c.DeletePreAuthKey(ctx, "12"); err != nil {
+		t.Fatal(err)
+	}
+	f.want(t, `DELETE /api/v1/preauthkey?id=12`)
+}
+
+func TestResponseTooLargeIsAnExplicitError(t *testing.T) {
+	c, _ := newFake(t, map[string]reply{"GET /api/v1/preauthkey": {200, `{"preAuthKeys":[` + strings.Repeat(`{"id":"1"},`, 20) + `{"id":"2"}]}`}})
+	c.maxBody = 100
+	_, err := c.ListAllPreAuthKeys(ctx)
+	if err == nil || !strings.Contains(err.Error(), "response too large") {
+		t.Fatalf("got %v", err)
+	}
+	c.maxBody = 1 << 20 // the same answer fits under a larger cap: the limit is the cause
+	if _, err := c.ListAllPreAuthKeys(ctx); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestListPreAuthKeysEmpty(t *testing.T) {

@@ -25,6 +25,10 @@
 // its pre-auth keys; deleting a user that still owns nodes is refused (500 "user not empty:
 // node(s) found") and keeps the keys; after the nodes are deleted the user and its keys go.
 //
+// Checked live in Task 7: DELETE /api/v1/preauthkey?id=N -> 200 {} (id is a query parameter, a
+// decimal string; an unknown id is also 200 {}; non-numeric -> 400); keys list their "id"; deleting
+// a user removes its keys even when none was deleted first.
+//
 // Not exercised live: that a second registration with a used key is refused (Headscale's own
 // semantics for reusable=false) and DELETE /api/v1/node/{id} for an unknown id (expected 404
 // {"code":5,"message":"node not found"}).
@@ -51,6 +55,8 @@ type Node struct {
 
 // PreAuthKey is a join key as Headscale lists it (the key text itself is masked there).
 type PreAuthKey struct {
+	ID   string // Headscale's numeric id, a decimal string
+	User string // name of the owning user
 	Used bool
 	// Expiration is the zero time for a key that never expires.
 	Expiration time.Time
@@ -65,6 +71,10 @@ type API interface {
 	CreatePreAuthKey(ctx context.Context, user string, ttl time.Duration) (key string, err error)
 	// ListPreAuthKeys returns the user's pre-auth keys, used and expired ones included.
 	ListPreAuthKeys(ctx context.Context, user string) ([]PreAuthKey, error)
+	// ListAllPreAuthKeys returns every user's keys in one request (Headscale cannot filter).
+	ListAllPreAuthKeys(ctx context.Context) ([]PreAuthKey, error)
+	// DeletePreAuthKey removes a key by id; an unknown id is not an error.
+	DeletePreAuthKey(ctx context.Context, id string) error
 	ListNodes(ctx context.Context, user string) ([]Node, error)
 	// DeleteNode removes the user's node with that hostname; an unknown node is not an error.
 	DeleteNode(ctx context.Context, user, hostname string) error
@@ -91,6 +101,7 @@ type Client struct {
 	baseURL, apiKey string
 	hc              *http.Client
 	now             func() time.Time
+	maxBody         int64 // largest accepted response
 }
 
 // New returns a client for the Headscale at baseURL (e.g. http://headscale:8080). A nil hc gets a
@@ -99,7 +110,7 @@ func New(baseURL, apiKey string, hc *http.Client) *Client {
 	if hc == nil {
 		hc = &http.Client{Timeout: 15 * time.Second}
 	}
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), apiKey: apiKey, hc: hc, now: time.Now}
+	return &Client{baseURL: strings.TrimRight(baseURL, "/"), apiKey: apiKey, hc: hc, now: time.Now, maxBody: 32 << 20}
 }
 
 var _ API = (*Client)(nil)
@@ -133,9 +144,12 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	}
 	defer resp.Body.Close()
 	// Generous: the pre-auth key list covers every fleet and grows with the number of keys ever issued.
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, c.maxBody+1))
 	if err != nil {
 		return fmt.Errorf("headscale: %s %s: %w", method, path, err)
+	}
+	if int64(len(raw)) > c.maxBody {
+		return fmt.Errorf("headscale: %s %s: response too large (over %d bytes)", method, path, c.maxBody)
 	}
 	if resp.StatusCode/100 != 2 {
 		msg := strings.TrimSpace(string(raw))
@@ -210,9 +224,10 @@ func (c *Client) CreatePreAuthKey(ctx context.Context, user string, ttl time.Dur
 	return res.PreAuthKey.Key, nil
 }
 
-func (c *Client) ListPreAuthKeys(ctx context.Context, user string) ([]PreAuthKey, error) {
+func (c *Client) ListAllPreAuthKeys(ctx context.Context) ([]PreAuthKey, error) {
 	var res struct {
 		PreAuthKeys []struct {
+			ID         string
 			User       hsUser
 			Used       bool
 			Expiration time.Time // absent or null: stays zero
@@ -221,13 +236,29 @@ func (c *Client) ListPreAuthKeys(ctx context.Context, user string) ([]PreAuthKey
 	if err := c.do(ctx, http.MethodGet, "/api/v1/preauthkey", nil, nil, &res); err != nil {
 		return nil, err
 	}
-	var out []PreAuthKey
+	out := make([]PreAuthKey, 0, len(res.PreAuthKeys))
 	for _, k := range res.PreAuthKeys {
-		if k.User.Name == user { // the endpoint lists every user's keys
-			out = append(out, PreAuthKey{Used: k.Used, Expiration: k.Expiration})
+		out = append(out, PreAuthKey{ID: k.ID, User: k.User.Name, Used: k.Used, Expiration: k.Expiration})
+	}
+	return out, nil
+}
+
+func (c *Client) ListPreAuthKeys(ctx context.Context, user string) ([]PreAuthKey, error) {
+	all, err := c.ListAllPreAuthKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []PreAuthKey
+	for _, k := range all {
+		if k.User == user { // the endpoint lists every user's keys
+			out = append(out, k)
 		}
 	}
 	return out, nil
+}
+
+func (c *Client) DeletePreAuthKey(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodDelete, "/api/v1/preauthkey", url.Values{"id": {id}}, nil, nil)
 }
 
 type hsNode struct {
