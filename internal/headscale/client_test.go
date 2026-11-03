@@ -137,6 +137,37 @@ func TestCreatePreAuthKeyUnknownUser(t *testing.T) {
 	}
 }
 
+// Shape taken from the live v0.29.7 answer: the endpoint takes no filter and lists every user's
+// keys, and the key text is masked.
+const preAuthKeysJSON = `{"preAuthKeys":[
+ {"user":` + userJSON + `, "id":"1", "key":"hskey-auth-aaaa-***", "reusable":false, "ephemeral":false, "used":false, "expiration":"2026-11-04T17:04:09Z", "createdAt":"2026-11-03T17:04:10.571593400Z", "aclTags":[]},
+ {"user":` + userJSON + `, "id":"2", "key":"hskey-auth-bbbb-***", "reusable":false, "ephemeral":false, "used":true, "expiration":"2020-01-01T00:00:00Z", "createdAt":"2026-11-03T17:04:11.433705600Z", "aclTags":[]},
+ {"user":{"id":"9","name":"f-other"}, "id":"3", "key":"hskey-auth-cccc-***", "reusable":true, "ephemeral":false, "used":false, "expiration":"2030-01-01T00:00:00Z", "aclTags":[]}]}`
+
+func TestListPreAuthKeysFiltersByUser(t *testing.T) {
+	c, f := newFake(t, map[string]reply{"GET /api/v1/preauthkey": {200, preAuthKeysJSON}})
+	got, err := c.ListPreAuthKeys(ctx, "f-abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []PreAuthKey{
+		{Used: false, Expiration: time.Date(2026, 11, 4, 17, 4, 9, 0, time.UTC)},
+		{Used: true, Expiration: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)},
+	}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+	f.want(t, `GET /api/v1/preauthkey?`) // no filter parameter exists: filtering is ours
+}
+
+func TestListPreAuthKeysEmpty(t *testing.T) {
+	c, _ := newFake(t, map[string]reply{"GET /api/v1/preauthkey": {200, `{}`}})
+	got, err := c.ListPreAuthKeys(ctx, "f-abc")
+	if err != nil || len(got) != 0 {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+}
+
 const nodesJSON = `{"nodes":[
  {"id":"3","name":"box-a","givenName":"box-a","user":` + userJSON + `,"ipAddresses":["100.64.0.1","fd7a:115c:a1e0::1"],"online":true},
  {"id":"4","name":"box-b","givenName":"box-b-2","user":` + userJSON + `,"ipAddresses":[],"online":false},

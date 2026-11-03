@@ -15,8 +15,14 @@
 //   - PUT /api/v1/policy {"policy":"<json text>"} -> 200 {"policy":...,"updatedAt":...}; invalid
 //     policy -> 500 {"message":"setting policy: parsing policy: ..."}. Mode "database" starts with
 //     no policy (GET gives 500 "acl policy not found" until the first PUT).
+//   - GET /api/v1/preauthkey -> 200 {"preAuthKeys":[{"user":{"id","name"},"id":"1","key":"hskey-auth-xxxx-***",
+//     "reusable":false,"ephemeral":false,"used":false,"expiration":RFC3339,...}]}. It takes NO
+//     parameter (the swagger lists none and ?user= was seen to be ignored): it returns the keys of
+//     every user, with the key text masked, so the caller filters by user.name.
 //
-// Not exercised live (no node could be registered): the fields of a real node in the node list
+// Not exercised live (no node could be registered, a tailscale client could not reach the server
+// from the test network): that "used" turns true once a key registers a node and that a second
+// registration with it is refused (both are Headscale's own semantics for reusable=false), the fields of a real node in the node list
 // (taken from the OpenAPI definition v1Node: id, name, ipAddresses, online, user.name) and
 // DELETE /api/v1/node/{id} (unknown id -> 404 {"code":5,"message":"node not found"}). Headscale
 // is also expected to refuse deleting a user that still owns nodes; delete the nodes first.
@@ -41,6 +47,13 @@ type Node struct {
 	Online       bool
 }
 
+// PreAuthKey is a join key as Headscale lists it (the key text itself is masked there).
+type PreAuthKey struct {
+	Used bool
+	// Expiration is the zero time for a key that never expires.
+	Expiration time.Time
+}
+
 // API is what the enrolment service needs from Headscale.
 type API interface {
 	CreateUser(ctx context.Context, name string) error
@@ -48,6 +61,8 @@ type API interface {
 	DeleteUser(ctx context.Context, name string) error
 	// CreatePreAuthKey returns a single-use key for the user, valid for ttl.
 	CreatePreAuthKey(ctx context.Context, user string, ttl time.Duration) (key string, err error)
+	// ListPreAuthKeys returns the user's pre-auth keys, used and expired ones included.
+	ListPreAuthKeys(ctx context.Context, user string) ([]PreAuthKey, error)
 	ListNodes(ctx context.Context, user string) ([]Node, error)
 	// DeleteNode removes the user's node with that hostname; an unknown node is not an error.
 	DeleteNode(ctx context.Context, user, hostname string) error
@@ -115,7 +130,8 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		return fmt.Errorf("headscale: %s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// Generous: the pre-auth key list covers every fleet and grows with the number of keys ever issued.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
 		return fmt.Errorf("headscale: %s %s: %w", method, path, err)
 	}
@@ -190,6 +206,26 @@ func (c *Client) CreatePreAuthKey(ctx context.Context, user string, ttl time.Dur
 		return "", errors.New("headscale: pre-auth key missing from response")
 	}
 	return res.PreAuthKey.Key, nil
+}
+
+func (c *Client) ListPreAuthKeys(ctx context.Context, user string) ([]PreAuthKey, error) {
+	var res struct {
+		PreAuthKeys []struct {
+			User       hsUser
+			Used       bool
+			Expiration time.Time // absent or null: stays zero
+		}
+	}
+	if err := c.do(ctx, http.MethodGet, "/api/v1/preauthkey", nil, nil, &res); err != nil {
+		return nil, err
+	}
+	var out []PreAuthKey
+	for _, k := range res.PreAuthKeys {
+		if k.User.Name == user { // the endpoint lists every user's keys
+			out = append(out, PreAuthKey{Used: k.Used, Expiration: k.Expiration})
+		}
+	}
+	return out, nil
 }
 
 type hsNode struct {
