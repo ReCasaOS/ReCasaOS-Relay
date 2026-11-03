@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -373,6 +374,21 @@ func (r *rig) peers(from *node) []string {
 	return names
 }
 
+// mustSeePeers waits until n's network map holds exactly the named peers. The netmap is computed by
+// Headscale from the policy, so unlike a failed probe this cannot pass because of a broken data plane.
+func (r *rig) mustSeePeers(n *node, want ...string) {
+	r.t.Helper()
+	sort.Strings(want)
+	eventually(r.t, n.name+" netmap", 30*time.Second, func() error {
+		got := r.peers(n)
+		sort.Strings(got)
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			return fmt.Errorf("peers = %v, want %v", got, want)
+		}
+		return nil
+	})
+}
+
 func (r *rig) neutralise() {
 	var p string
 	switch os.Getenv("E2E_NEUTRALISE_POLICY") {
@@ -434,18 +450,16 @@ func TestFleetsAreIsolated(t *testing.T) {
 	run("within a fleet nodes reach each other", func(t *testing.T) {
 		r.mustReach(a1, a2)
 		r.mustReach(a2, a1)
-		if got := r.peers(a1); len(got) != 1 || got[0] != "a2" {
-			t.Errorf("a1 peers = %v, want [a2]", got)
-		}
+		r.mustSeePeers(a1, "a2")
+		r.mustSeePeers(a2, "a1")
 	})
 
 	r.neutralise() // no-op unless E2E_NEUTRALISE_POLICY is set (teeth check)
 
 	run("across fleets nothing reaches", func(t *testing.T) {
 		r.mustNotReach([2]*node{a1, b1}, [2]*node{a2, b1}, [2]*node{b1, a1}, [2]*node{b1, a2})
-		if got := r.peers(b1); len(got) != 0 {
-			t.Errorf("b1 (alone in its fleet) sees peers %v", got)
-		}
+		r.mustSeePeers(b1) // alone in its fleet
+		r.mustSeePeers(a1, "a2")
 	})
 
 	// A node re-registers: new container, fresh key, the old Headscale node removed first.
@@ -458,20 +472,66 @@ func TestFleetsAreIsolated(t *testing.T) {
 		}
 		b1 = r.startNode("B", "b1", r.joinKey(idB, secB))
 		r.mustNotReach([2]*node{a1, b1}, [2]*node{b1, a1}, [2]*node{b1, a2})
+		r.mustSeePeers(b1)
+		r.mustSeePeers(a1, "a2")
 	})
 
 	// A third fleet is a second (and third) policy sync; the earlier fleets must keep working and
 	// stay apart.
+	var c1 *node
 	run("after a second policy sync", func(t *testing.T) {
 		idC, secC := r.createFleet("C")
-		c1 := r.startNode("C", "c1", r.joinKey(idC, secC))
+		c1 = r.startNode("C", "c1", r.joinKey(idC, secC))
 		r.mustReach(a1, a2)
 		r.mustReach(a2, a1)
 		r.mustNotReach([2]*node{a1, b1}, [2]*node{b1, a1}, [2]*node{a1, c1}, [2]*node{c1, a1},
 			[2]*node{b1, c1}, [2]*node{c1, b1}, [2]*node{c1, a2})
+		r.mustSeePeers(a1, "a2")
+		r.mustSeePeers(a2, "a1")
+		r.mustSeePeers(b1)
+		r.mustSeePeers(c1)
 		if used, unused := r.usedKeys(userA); used != 2 || unused != 0 {
 			t.Errorf("fleet A keys: used=%d unused=%d, want 2 and 0", used, unused)
 		}
+	})
+
+	// Positive control, run every time: the "unreachable" results above would also come out of a
+	// broken data plane or a failed docker exec. Open the policy wide and require the very same
+	// probes to succeed from b1 and c1 (alone in their fleets, so nothing else shows they carry
+	// traffic), then restore the policy and require isolation again.
+	run("control: probes succeed when the policy allows, isolation returns when restored", func(t *testing.T) {
+		saved := r.policy()
+		restore := func() {
+			if err := r.hs.SetPolicy(context.Background(), []byte(saved)); err != nil {
+				t.Errorf("restoring the policy: %v", err)
+			}
+		}
+		restored := false
+		defer func() {
+			if !restored {
+				restore()
+			}
+		}()
+		if err := r.hs.SetPolicy(context.Background(), []byte(`{"acls":[{"action":"accept","src":["*"],"dst":["*:*"]}]}`)); err != nil {
+			t.Fatal(err)
+		}
+		r.mustSeePeers(a1, "a2", "b1", "c1") // polls until the new netmap has arrived
+		r.mustReach(a1, b1)
+		r.mustReach(b1, a1)
+		r.mustReach(c1, a1)
+
+		restore()
+		restored = true
+		if got := r.policy(); got != saved {
+			t.Fatalf("policy after restore differs: got %s, want %s", got, saved)
+		}
+		r.mustSeePeers(a1, "a2")
+		r.mustSeePeers(a2, "a1")
+		r.mustSeePeers(b1)
+		r.mustSeePeers(c1)
+		r.mustNotReach([2]*node{a1, b1}, [2]*node{b1, a1}, [2]*node{c1, a1}, [2]*node{a1, c1},
+			[2]*node{b1, c1}, [2]*node{c1, b1})
+		r.mustReach(a1, a2)
 	})
 
 	run("findings on deleting a Headscale user", func(t *testing.T) { deletionFindings(t, r) })
