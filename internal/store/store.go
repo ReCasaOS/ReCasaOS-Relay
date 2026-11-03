@@ -33,6 +33,7 @@ type Store interface {
 	IdleFleets(ctx context.Context, before time.Time) ([]string, error)
 	// ListFleets returns every fleet ordered by id, without secret hashes (for building the access policy).
 	ListFleets(ctx context.Context) ([]Fleet, error)
+	CountFleets(ctx context.Context) (int, error)
 	Close() error
 }
 
@@ -187,4 +188,12 @@ func (s *sqlStore) ListFleets(ctx context.Context) ([]Fleet, error) {
 		out = append(out, f)
 	}
 	return out, rows.Err()
+}
+
+func (s *sqlStore) CountFleets(ctx context.Context) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fleets`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count fleets: %w", err)
+	}
+	return n, nil
 }

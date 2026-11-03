@@ -17,7 +17,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestConfigFromEnvDefaults(t *testing.T) {
-	for _, k := range []string{"NODES_PER_FLEET", "CREATE_RATE_PER_HOUR", "KEY_RATE_PER_HOUR", "AUTH_RATE_PER_HOUR", "JOIN_KEY_TTL", "IDLE_AFTER", "GC_INTERVAL", "LOGIN_SERVER", "TRUSTED_PROXY_HEADER"} {
+	for _, k := range []string{"NODES_PER_FLEET", "CREATE_RATE_PER_HOUR", "KEY_RATE_PER_HOUR", "AUTH_RATE_PER_HOUR", "JOIN_KEY_TTL", "IDLE_AFTER", "GC_INTERVAL", "LOGIN_SERVER", "TRUSTED_PROXY_HEADER", "MAX_FLEETS"} {
 		t.Setenv(k, "")
 	}
 	got, err := ConfigFromEnv()
@@ -32,6 +32,7 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 		JoinKeyTTL:        24 * time.Hour,
 		IdleAfter:         720 * time.Hour,
 		GCEvery:           10 * time.Minute,
+		MaxFleets:         1000,
 		LoginServer:       "",
 	}
 	if got != want {
@@ -49,12 +50,13 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 	t.Setenv("GC_INTERVAL", "90s")
 	t.Setenv("LOGIN_SERVER", "https://relay.example")
 	t.Setenv("TRUSTED_PROXY_HEADER", "X-Forwarded-For")
+	t.Setenv("MAX_FLEETS", "3")
 	got, err := ConfigFromEnv()
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := Config{NodesPerFleet: 10, CreateRatePerHour: 2, KeyRatePerHour: 7, AuthRatePerHour: 9, JoinKeyTTL: time.Hour,
-		IdleAfter: 48 * time.Hour, GCEvery: 90 * time.Second, LoginServer: "https://relay.example", TrustedProxyHeader: "X-Forwarded-For"}
+		IdleAfter: 48 * time.Hour, GCEvery: 90 * time.Second, LoginServer: "https://relay.example", TrustedProxyHeader: "X-Forwarded-For", MaxFleets: 3}
 	if got != want {
 		t.Fatalf("overrides = %+v, want %+v", got, want)
 	}
@@ -68,6 +70,7 @@ func TestConfigFromEnvInvalid(t *testing.T) {
 		"JOIN_KEY_TTL":       "soon",
 		"IDLE_AFTER":         "-1h",
 		"GC_INTERVAL":        "0s",
+		"MAX_FLEETS":         "0",
 	} {
 		t.Run(k, func(t *testing.T) {
 			t.Setenv(k, v)

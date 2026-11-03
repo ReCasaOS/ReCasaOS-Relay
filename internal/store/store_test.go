@@ -181,3 +181,20 @@ func TestListFleets(t *testing.T) {
 		t.Fatal("ListFleets must not load secret hashes")
 	}
 }
+
+func TestCountFleets(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, filepath.Join(t.TempDir(), "relay.db"))
+	now := time.Now().UTC()
+	for _, id := range []string{"a", "b", "c"} {
+		if err := s.CreateFleet(ctx, fleet(id, now)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.DeleteFleet(ctx, "b"); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.CountFleets(ctx); err != nil || n != 2 {
+		t.Fatalf("CountFleets = %d, %v; want 2", n, err)
+	}
+}

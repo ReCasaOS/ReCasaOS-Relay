@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/auth"
@@ -34,6 +35,26 @@ type fleetsHandler struct {
 	authLimiter *ratelimit.Limiter // fleet requests, per IP, before the secret is checked
 	keyLimiter  *ratelimit.Limiter // join keys, per fleet, after the secret is verified
 	locks       *fleets.Locks      // serialises "count nodes and pending keys, then create a key" per fleet; shared with deletion
+
+	capMu    sync.Mutex // guards the "count fleets, reserve a slot" step of creation
+	creating int        // creations past that step and not yet finished
+}
+
+// reserveFleet takes one of the MaxFleets slots, counting the creations still in flight, so that
+// concurrent requests cannot all see the last free slot. ok false: the relay is full. Deletions
+// running meanwhile can only make the count err high (a refusal that a retry would not get).
+func (h *fleetsHandler) reserveFleet(ctx context.Context) (release func(), ok bool, err error) {
+	h.capMu.Lock()
+	defer h.capMu.Unlock()
+	n, err := h.deps.Store.CountFleets(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	if n+h.creating >= h.cfg.MaxFleets {
+		return nil, false, nil
+	}
+	h.creating++
+	return func() { h.capMu.Lock(); h.creating--; h.capMu.Unlock() }, true, nil
 }
 
 // checkSecret is a variable so tests can observe that every request pays one comparison.
@@ -84,6 +105,19 @@ func (h *fleetsHandler) createFleet(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), opTimeout)
 	defer cancel()
+
+	// Before any Headscale call: the policy and the key list Headscale returns grow with the fleets.
+	release, ok, err := h.reserveFleet(ctx)
+	if err != nil {
+		log.Printf("create fleet: count fleets: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "relay full, retry later")
+		return
+	}
+	defer release()
 
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {

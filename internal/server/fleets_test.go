@@ -32,12 +32,14 @@ type fakeHS struct {
 	users         map[string]bool
 	calls         []string
 	createErr     error
+	createDelay   time.Duration
 	deleteCtxErr  []error // ctx.Err() seen by each DeleteUser
 }
 
 func newFakeHS() *fakeHS { return &fakeHS{users: map[string]bool{}} }
 
 func (f *fakeHS) CreateUser(_ context.Context, name string) error {
+	time.Sleep(f.createDelay) // outside the lock: concurrent creations overlap here
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "create "+name)
@@ -92,7 +94,7 @@ func setup(t *testing.T, mutate func(*Config, *Deps)) env {
 	}
 	t.Cleanup(func() { st.Close() })
 	hs := newFakeHS()
-	cfg := Config{CreateRatePerHour: 5, IdleAfter: 720 * time.Hour, LoginServer: "https://relay.example"}
+	cfg := Config{CreateRatePerHour: 5, MaxFleets: 1000, IdleAfter: 720 * time.Hour, LoginServer: "https://relay.example"}
 	deps := Deps{Store: st, Headscale: hs, Now: func() time.Time { return now0 }}
 	if mutate != nil {
 		mutate(&cfg, &deps)
@@ -188,6 +190,54 @@ func TestCreateFleetRateLimited(t *testing.T) {
 	}
 	if rec := e.post(t, "192.0.2.2:4000", nil); rec.Code != http.StatusCreated {
 		t.Fatalf("other IP = %d, want 201", rec.Code)
+	}
+}
+
+func TestCreateFleetRefusedAtMaxFleets(t *testing.T) {
+	e := setup(t, func(c *Config, _ *Deps) { c.MaxFleets = 2 })
+	for i := 0; i < 2; i++ {
+		if rec := e.post(t, "192.0.2."+strconv.Itoa(i+1)+":1", nil); rec.Code != http.StatusCreated {
+			t.Fatalf("call %d: %d %s", i+1, rec.Code, rec.Body)
+		}
+	}
+	before := e.hs.callCount()
+	rec := e.post(t, "192.0.2.9:1", nil)
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "retry later") {
+		t.Fatalf("at the cap: %d %s, want 503", rec.Code, rec.Body)
+	}
+	if e.hs.callCount() != before {
+		t.Fatal("a creation refused at the cap reached Headscale")
+	}
+	if n, _ := e.st.CountFleets(context.Background()); n != 2 {
+		t.Fatalf("%d fleets stored, want 2", n)
+	}
+}
+
+// The count and the creation are one decision: creations in flight count, so concurrent requests
+// cannot all read "one slot left" and overshoot.
+func TestMaxFleetsHoldsUnderConcurrentCreations(t *testing.T) {
+	e := setup(t, func(c *Config, _ *Deps) { c.MaxFleets = 1 })
+	e.hs.createDelay = 50 * time.Millisecond
+	var wg sync.WaitGroup
+	codes := make([]int, 8)
+	for i := range codes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			codes[i] = e.post(t, "192.0.2."+strconv.Itoa(i+1)+":1", nil).Code
+		}()
+	}
+	wg.Wait()
+	created := 0
+	for _, c := range codes {
+		if c == http.StatusCreated {
+			created++
+		} else if c != http.StatusServiceUnavailable {
+			t.Fatalf("codes %v", codes)
+		}
+	}
+	if n, _ := e.st.CountFleets(context.Background()); created != 1 || n != 1 {
+		t.Fatalf("created %d (store %d), want 1: %v", created, n, codes)
 	}
 }
 

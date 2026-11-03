@@ -65,6 +65,7 @@ Fleet creation is limited per client IP (per /64 for IPv6, and in addition per /
 | Variable | Default | Meaning |
 |---|---|---|
 | `NODES_PER_FLEET` | `50` | max boxes per fleet; a join key is refused (409) when enrolled nodes plus unused, unexpired join keys reach it |
+| `MAX_FLEETS` | `1000` | fleets the relay holds at most; beyond it fleet creation answers `503` without calling Headscale (sizing: see "Capacity" below) |
 | `CREATE_RATE_PER_HOUR` | `5` | fleet creations per hour per IP (IPv6: per /64); an IPv6 /48 also gets at most 10 times this in all (fixed factor) |
 | `KEY_RATE_PER_HOUR` | `30` | join-key requests per hour per fleet (counted once the fleet secret is verified) |
 | `AUTH_RATE_PER_HOUR` | `60` | authenticated fleet requests (join key and status) per hour per client IP, counted BEFORE the secret is checked, wrong or right; boxes behind one NAT share it |
