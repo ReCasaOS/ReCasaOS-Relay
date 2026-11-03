@@ -49,6 +49,13 @@ func TestStateSurvivesRestart(t *testing.T) {
 	if got.SecretHash != "hash-f1" || got.HeadscaleUser != "u-f1" || !got.CreatedAt.Equal(now) {
 		t.Fatalf("fleet not preserved: %+v", got)
 	}
+	var exp int64
+	if err := s2.(*sqlStore).db.QueryRow(`SELECT expires FROM keys WHERE fleet_id=? AND key_id=?`, "f1", "k1").Scan(&exp); err != nil {
+		t.Fatalf("key not preserved: %v", err)
+	}
+	if !time.Unix(0, exp).Equal(now.Add(time.Hour)) {
+		t.Fatalf("key expiry = %v, want %v", time.Unix(0, exp).UTC(), now.Add(time.Hour))
+	}
 }
 
 func TestIdleFleets(t *testing.T) {
@@ -103,12 +110,28 @@ func TestDeleteTwiceIsNotAnError(t *testing.T) {
 	if _, err := s.Fleet(ctx, "f"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("fleet still there: %v", err)
 	}
-	// keys are removed with the fleet: re-creating the fleet must not hit a stale key.
+	var n int
+	if err := s.(*sqlStore).db.QueryRow(`SELECT COUNT(*) FROM keys WHERE fleet_id=?`, "f").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("keys left after delete: n=%d err=%v", n, err)
+	}
+}
+
+func TestRecordKeyDuplicate(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, filepath.Join(t.TempDir(), "relay.db"))
+	exp := time.Now().Add(time.Hour)
 	if err := s.CreateFleet(ctx, fleet("f", time.Now())); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RecordKey(ctx, "f", "k", time.Now().Add(time.Hour)); err != nil {
-		t.Fatalf("stale key survived delete: %v", err)
+	if err := s.RecordKey(ctx, "f", "k", exp); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordKey(ctx, "f", "k", exp.Add(time.Hour)); !errors.Is(err, ErrExists) {
+		t.Fatalf("got %v, want ErrExists", err)
+	}
+	var got int64
+	if err := s.(*sqlStore).db.QueryRow(`SELECT expires FROM keys WHERE fleet_id='f' AND key_id='k'`).Scan(&got); err != nil || got != exp.UnixNano() {
+		t.Fatalf("expiry changed by duplicate: %d %v", got, err)
 	}
 }
 

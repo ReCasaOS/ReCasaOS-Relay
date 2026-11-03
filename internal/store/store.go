@@ -109,16 +109,29 @@ func (s *sqlStore) DeleteFleet(ctx context.Context, id string) error {
 }
 
 func (s *sqlStore) RecordKey(ctx context.Context, fleetID, keyID string, expires time.Time) error {
-	// INSERT..SELECT so an unknown fleet yields zero rows (-> ErrNotFound) rather than a driver-specific FK error.
+	// INSERT..SELECT so an unknown fleet yields zero rows rather than a driver-specific FK error.
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO keys (fleet_id, key_id, expires)
 		 SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM fleets WHERE id = ?)
-		 ON CONFLICT(fleet_id, key_id) DO UPDATE SET expires = excluded.expires`,
+		 ON CONFLICT(fleet_id, key_id) DO NOTHING`,
 		fleetID, keyID, ts(expires), fleetID)
 	if err != nil {
 		return fmt.Errorf("store: record key: %w", err)
 	}
-	return requireRow(res, ErrNotFound)
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("store: record key: %w", err)
+	} else if n > 0 {
+		return nil
+	}
+	// Zero rows: unknown fleet or duplicate key id.
+	var fleetExists bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM fleets WHERE id = ?)`, fleetID).Scan(&fleetExists); err != nil {
+		return fmt.Errorf("store: record key: %w", err)
+	}
+	if fleetExists {
+		return ErrExists
+	}
+	return ErrNotFound
 }
 
 func (s *sqlStore) Touch(ctx context.Context, fleetID string, at time.Time) error {
