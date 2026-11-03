@@ -1,0 +1,39 @@
+name: release
+
+# Builds the `enrolment` image and pushes it to GHCR when a version tag is pushed.
+# Image: ghcr.io/<owner>/<repository>-enrolment, lowercased (for this repository
+# ghcr.io/recasaos/recasaos-relay-enrolment), tagged with the git tag and, for a final release, `latest`.
+# Only the built-in GITHUB_TOKEN is used; the only actions are actions/checkout@v4 and
+# actions/setup-go@v5 (first-party, pinned by major version tag, like ci.yml); the image is built with plain `docker`.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+      - name: Build and push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}-enrolment"
+          tags=(-t "$image:$VERSION")
+          # A pre-release tag (v1.2.0-rc1) must not move `latest`.
+          case "$VERSION" in *-*) ;; *) tags+=(-t "$image:latest") ;; esac
+          echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.version=$VERSION" "${tags[@]}" .
+          docker push --all-tags "$image"

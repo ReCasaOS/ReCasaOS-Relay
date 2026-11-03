@@ -29,6 +29,7 @@ services:
 
   enrolment:
     build: .
+    # To run the published image instead of building: see "Using the published image" in docs/self-hosting.md.
     restart: unless-stopped
     depends_on:
       - headscale

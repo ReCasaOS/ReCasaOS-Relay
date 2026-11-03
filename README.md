@@ -6,13 +6,16 @@ Licence: Apache 2.0.
 
 ## Run
 
+Full guide for an operator (requirements, TLS, settings, upgrades, backups, pointing boxes at it): **[docs/self-hosting.md](docs/self-hosting.md)**. The server must be reachable by the member boxes from the Internet; a relay behind CGNAT cannot be self-hosted.
+
 ```
 docker compose up -d
+curl -fs localhost:8080/health      # Headscale's health endpoint, through `front`: {"status":"pass"}
 ```
 
 Set `server_url` in `headscale/config.yaml` to your public https URL. Port 8080 is served by the `front` Caddy service, which forwards to Headscale but answers 404 on `/api/` (Headscale's admin REST API shares its control-plane port); the gRPC API (50443) is never published. Only the enrolment service reaches the admin APIs, directly on the compose network.
 
-`front` (8080) speaks plain HTTP and serves both Headscale and the enrolment API (`/v1/*`): put a TLS reverse proxy in front of it (the enrolment service's own port 8081 is not published). Keep `/api/` unreachable from outside if you route to Headscale some other way.
+`front` (8080) speaks plain HTTP and serves both Headscale and the enrolment API (`/v1/*`): put a TLS reverse proxy in front of it (the enrolment service's own port 8081 is not published), or let `front` do TLS itself with Caddy automatic HTTPS (a validated Caddyfile and Compose override are in [docs/self-hosting.md](docs/self-hosting.md#3-tls)). Keep `/api/` unreachable from outside if you route to Headscale some other way.
 
 ### Headscale API key
 
@@ -93,6 +96,10 @@ Each fleet is a Headscale user `f-<fleet id>`. The enrolment service owns Headsc
 ## Relayed traffic and quotas
 
 Metering of relayed (DERP) traffic was investigated in [docs/metering.md](docs/metering.md): the embedded DERP cannot be metered; a per-fleet monthly quota needs a standalone `derper`, planned as a follow-up.
+
+## Releases
+
+Pushing a tag `v*` runs `.github/workflows/release.yml`: `go vet` and `go test`, then the `enrolment` image is built and pushed to `ghcr.io/<owner>/<repository>-enrolment` (lowercased; `ghcr.io/recasaos/recasaos-relay-enrolment` here) tagged with the version and, unless the tag has a `-` suffix (a pre-release), `latest`. It uses only the built-in `GITHUB_TOKEN`. To run the published image instead of building it, see [docs/self-hosting.md](docs/self-hosting.md#using-the-published-image).
 
 ## Development
 
