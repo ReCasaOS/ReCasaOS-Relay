@@ -233,16 +233,41 @@ func TestSweepIsAmortisedAndExpires(t *testing.T) {
 	}
 }
 
-// The 8 small-order points of edwards25519 (canonical encodings), listed independently of auth.go.
-var weakKeyHex = []string{
-	"0100000000000000000000000000000000000000000000000000000000000000",
-	"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
-	"0000000000000000000000000000000000000000000000000000000000000000",
-	"0000000000000000000000000000000000000000000000000000000000000080",
-	"c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
-	"c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
-	"26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
-	"26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+// weakKeys returns every spelling of a small-order point that a decoder may accept: the 8
+// canonical encodings, both sign bits of each, and the non-canonical y = p, p+1 spellings
+// (y = p-1 is canonical, the sign-bit variants cover its non-canonical form).
+func weakKeys() [][]byte {
+	canonical := []string{
+		"0100000000000000000000000000000000000000000000000000000000000000",
+		"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+		"0000000000000000000000000000000000000000000000000000000000000000",
+		"0000000000000000000000000000000000000000000000000000000000000080",
+		"c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+		"c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+		"26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+		"26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+		"edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", // y = p  (= 0)
+		"eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", // y = p+1 (= 1)
+	}
+	seen := map[string]bool{}
+	var out [][]byte
+	add := func(b []byte) {
+		if !seen[string(b)] {
+			seen[string(b)] = true
+			out = append(out, b)
+		}
+	}
+	for _, h := range canonical {
+		b, err := hex.DecodeString(h)
+		if err != nil {
+			panic(err)
+		}
+		add(b)
+		flipped := append([]byte{}, b...)
+		flipped[31] ^= 0x80
+		add(flipped)
+	}
+	return out
 }
 
 // With a small-order key A, the signature (R = identity, S = 0) verifies whenever [k]A is the
@@ -251,29 +276,59 @@ var weakKeyHex = []string{
 func TestVerifyBoxRejectsSmallOrderKeys(t *testing.T) {
 	forgedSig := make([]byte, ed25519.SignatureSize)
 	forgedSig[0] = 1 // R = identity point, S = 0
-	for _, h := range weakKeyHex {
-		pub, err := hex.DecodeString(h)
-		if err != nil {
-			t.Fatal(err)
-		}
-		forgeable := 0
+	forgeries := 0
+	for _, pub := range weakKeys() {
+		// Whether or not Go's verifier would accept this spelling, VerifyBox must refuse it.
 		for dt := -120; dt <= 120; dt++ {
 			ts := strconv.FormatInt(t0.Add(time.Duration(dt)*time.Second).Unix(), 10)
-			if !ed25519.Verify(pub, []byte("POST /v1/fleets\n"+ts), forgedSig) {
-				continue
-			}
-			forgeable++
 			resetSeen()
 			r := httptest.NewRequest(http.MethodPost, "/v1/fleets", nil)
 			r.Header.Set("X-Box-Key", enc.EncodeToString(pub))
 			r.Header.Set("X-Box-Time", ts)
 			r.Header.Set("X-Box-Signature", enc.EncodeToString(forgedSig))
-			if _, err := VerifyBox(r, t0); !errors.Is(err, errWeakKey) {
-				t.Fatalf("key %s accepted a forged signature: %v", h, err)
+			if ed25519.Verify(pub, []byte("POST /v1/fleets\n"+ts), forgedSig) {
+				forgeries++
+			}
+			if _, err := VerifyBox(r, t0); err == nil {
+				t.Fatalf("key %x accepted at %s", pub, ts)
 			}
 		}
-		if forgeable == 0 {
-			t.Fatalf("key %s: no forgeable time found; is it really small-order?", h)
+	}
+	if forgeries == 0 {
+		t.Fatal("no forgeable (key, time) pair: the test proves nothing")
+	}
+}
+
+// Every spelling the review named verifies a forged signature under Go's own verifier; make sure
+// that is still true so the test above keeps its teeth.
+func TestNonCanonicalWeakKeysReallyForge(t *testing.T) {
+	forgedSig := make([]byte, ed25519.SignatureSize)
+	forgedSig[0] = 1
+	for _, h := range []string{
+		"0100000000000000000000000000000000000000000000000000000000000080",
+		"eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+		"eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		"edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+	} {
+		pub, _ := hex.DecodeString(h)
+		ok := false
+		for dt := -120; dt <= 120 && !ok; dt++ {
+			ts := strconv.FormatInt(t0.Add(time.Duration(dt)*time.Second).Unix(), 10)
+			ok = ed25519.Verify(pub, []byte("POST /v1/fleets\n"+ts), forgedSig)
+		}
+		if !ok {
+			t.Fatalf("%s: Go no longer accepts the forgery; drop it from this list", h)
+		}
+	}
+}
+
+func TestVerifyBoxAcceptsHonestKeys(t *testing.T) {
+	resetSeen()
+	for i := 0; i < 50; i++ {
+		pub, priv := keys(t)
+		if _, err := VerifyBox(signed(t, pub, priv, t0), t0); err != nil {
+			t.Fatalf("honest key refused: %v", err)
 		}
 	}
 }

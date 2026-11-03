@@ -2,7 +2,6 @@
 package auth
 
 import (
-	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -14,6 +13,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"filippo.io/edwards25519"
 )
 
 const skew = 120 * time.Second
@@ -40,27 +41,6 @@ var (
 	sweeps    int // test hook: number of full sweeps run
 )
 
-// smallOrderKeys are the encodings of the edwards25519 points of small order. A box key equal to one
-// of them lets anyone forge signatures without a secret (identity point: R = identity, S = 0 verifies
-// for a fraction of messages), so they are refused before verification.
-var smallOrderKeys = func() [][]byte {
-	var out [][]byte
-	for _, h := range []string{
-		"0100000000000000000000000000000000000000000000000000000000000000",
-		"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
-		"0000000000000000000000000000000000000000000000000000000000000000",
-		"0000000000000000000000000000000000000000000000000000000000000080",
-		"c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
-		"c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
-		"26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
-		"26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
-	} {
-		b, _ := hex.DecodeString(h)
-		out = append(out, b)
-	}
-	return out
-}()
-
 // sweepEvery bounds how often seen is scanned, keeping verification amortised O(1).
 const sweepEvery = time.Second
 
@@ -84,10 +64,8 @@ func VerifyBox(r *http.Request, now time.Time) (ed25519.PublicKey, error) {
 	if err != nil || len(pub) != ed25519.PublicKeySize {
 		return nil, errBadHeaders
 	}
-	for _, weak := range smallOrderKeys {
-		if bytes.Equal(pub, weak) {
-			return nil, errWeakKey
-		}
+	if err := rejectSmallOrder(pub); err != nil {
+		return nil, err
 	}
 	sig, err := enc.DecodeString(r.Header.Get("X-Box-Signature"))
 	if err != nil || len(sig) != ed25519.SignatureSize {
@@ -145,4 +123,20 @@ func CheckSecret(secret, hash string) bool {
 func hashOf(secret string) string {
 	h := sha256.Sum256([]byte(secret))
 	return hex.EncodeToString(h[:])
+}
+
+// rejectSmallOrder refuses a key that is not a curve point or whose order divides 8 (cofactor times
+// the point is the identity). Such a key lets anyone forge signatures without a secret: with
+// R = identity and S = 0 the check [S]B = R + [k]A holds whenever [k]A is the identity. Go's
+// decoder accepts non-canonical encodings (y >= p, sign bit on x = 0), so testing the decoded
+// point is the only complete check; a list of encodings is not.
+func rejectSmallOrder(pub []byte) error {
+	p, err := new(edwards25519.Point).SetBytes(pub)
+	if err != nil {
+		return errBadHeaders
+	}
+	if new(edwards25519.Point).MultByCofactor(p).Equal(edwards25519.NewIdentityPoint()) == 1 {
+		return errWeakKey
+	}
+	return nil
 }

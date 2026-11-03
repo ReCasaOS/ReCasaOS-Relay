@@ -2,7 +2,10 @@ module github.com/ReCasaOS/recasaos-relay
 
 go 1.26.0
 
-require modernc.org/sqlite v1.61.1
+require (
+	filippo.io/edwards25519 v1.1.0
+	modernc.org/sqlite v1.61.1
+)
 
 require (
 	github.com/dustin/go-humanize v1.1.0 // indirect
