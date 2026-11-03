@@ -10,8 +10,8 @@ services:
       - ./headscale/config.yaml:/etc/headscale/config.yaml:ro
       - headscale-data:/var/lib/headscale
     # Only STUN (embedded DERP) is published. The control plane on 8080 is published through `front`, which
-    # hides the admin REST API (/api/); the gRPC API (50443) is never published. `enrolment` reaches both
-    # directly on the compose network.
+    # hides the admin REST API (/api/); the gRPC API (50443) is never published. `enrolment` reaches the REST API
+    # directly on the compose network (HEADSCALE_URL).
     ports:
       - "3478:3478/udp"
 
@@ -32,15 +32,23 @@ services:
     depends_on:
       - headscale
     environment:
-      HEADSCALE_GRPC_ADDR: headscale:50443
+      HEADSCALE_URL: http://headscale:8080
+      # Required: create it with `docker compose exec headscale headscale apikeys create`, then put it in .env.
+      HEADSCALE_API_KEY: ${HEADSCALE_API_KEY:-}
+      STORE_PATH: /data/relay.db
+      # The reverse proxy in front of this port appends the client IP to this header (see README).
+      TRUSTED_PROXY_HEADER: ${TRUSTED_PROXY_HEADER-X-Forwarded-For}
       LOGIN_SERVER: ${LOGIN_SERVER:-}
       NODES_PER_FLEET: ${NODES_PER_FLEET:-50}
       CREATE_RATE_PER_HOUR: ${CREATE_RATE_PER_HOUR:-5}
       KEY_RATE_PER_HOUR: ${KEY_RATE_PER_HOUR:-30}
       JOIN_KEY_TTL: ${JOIN_KEY_TTL:-24h}
       IDLE_AFTER: ${IDLE_AFTER:-720h}
+    volumes:
+      - enrolment-data:/data
     ports:
       - "8081:8081"
 
 volumes:
   headscale-data:
+  enrolment-data:
