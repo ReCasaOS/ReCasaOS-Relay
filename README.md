@@ -30,7 +30,7 @@ Put the printed key in a `.env` file next to `compose.yaml` as `HEADSCALE_API_KE
 
 ### Rate limits and the proxy header
 
-Fleet creation is limited per client IP (per /64 for IPv6). The enrolment service (port 8081) is **never published**: the `front` Caddy forwards `/v1/*` to it and sets `X-Client-IP` from its own view of the connection (`header_up` replaces whatever the client sent), and compose sets `TRUSTED_PROXY_HEADER=X-Client-IP`. A client can therefore neither choose its own bucket nor fill someone else's. Do not add a `ports:` entry for `enrolment`, and do not route to it any other way, unless that route also sets the header.
+Fleet creation is limited per client IP (per /64 for IPv6, and in addition per /48 at 10 times `CREATE_RATE_PER_HOUR`, so a subscriber holding many /64s cannot multiply the limit freely). The enrolment service (port 8081) is **never published**: the `front` Caddy forwards `/v1/*` to it and sets `X-Client-IP` from its own view of the connection (`header_up` replaces whatever the client sent), and compose sets `TRUSTED_PROXY_HEADER=X-Client-IP`. A client can therefore neither choose its own bucket nor fill someone else's. Do not add a `ports:` entry for `enrolment`, and do not route to it any other way, unless that route also sets the header.
 
 - With `TRUSTED_PROXY_HEADER` empty the TCP peer address is used, which is safe from spoofing but only right when clients connect directly.
 - If you put **another** TLS proxy in front of Caddy, Caddy sees that proxy's address for everybody until you tell it to trust it, and trusting it is only safe if the client cannot choose the address. Checked with Caddy 2.10.0 (throwaway container, `{client_ip}` echoed back):
@@ -65,7 +65,7 @@ Fleet creation is limited per client IP (per /64 for IPv6). The enrolment servic
 | Variable | Default | Meaning |
 |---|---|---|
 | `NODES_PER_FLEET` | `50` | max boxes per fleet; a join key is refused (409) when enrolled nodes plus unused, unexpired join keys reach it |
-| `CREATE_RATE_PER_HOUR` | `5` | fleet creations per hour per IP |
+| `CREATE_RATE_PER_HOUR` | `5` | fleet creations per hour per IP (IPv6: per /64); an IPv6 /48 also gets at most 10 times this in all (fixed factor) |
 | `KEY_RATE_PER_HOUR` | `30` | join-key requests per hour per fleet (counted once the fleet secret is verified) |
 | `AUTH_RATE_PER_HOUR` | `60` | authenticated fleet requests (join key and status) per hour per client IP, counted BEFORE the secret is checked, wrong or right; boxes behind one NAT share it |
 | `JOIN_KEY_TTL` | `24h` | validity of a join key |

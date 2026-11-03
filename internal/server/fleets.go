@@ -29,7 +29,8 @@ const opTimeout = 20 * time.Second
 type fleetsHandler struct {
 	cfg         Config
 	deps        Deps
-	limiter     *ratelimit.Limiter // create-fleet, per IP
+	limiter     *ratelimit.Limiter // create-fleet, per IP (IPv6: per /64)
+	limiter48   *ratelimit.Limiter // create-fleet, per IP (IPv6: per /48), prefix48Factor times the rate
 	authLimiter *ratelimit.Limiter // fleet requests, per IP, before the secret is checked
 	keyLimiter  *ratelimit.Limiter // join keys, per fleet, after the secret is verified
 	locks       *fleets.Locks      // serialises "count nodes and pending keys, then create a key" per fleet; shared with deletion
@@ -61,8 +62,13 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // createFleet handles POST /v1/fleets. Errors are logged without request headers, the secret or
 // signatures; response bodies never carry upstream error text.
 func (h *fleetsHandler) createFleet(w http.ResponseWriter, r *http.Request) {
-	// The limiter runs first and is keyed by client IP: box keys are free to mint.
-	if ok, retry := h.limiter.Allow(clientKey(r, h.cfg.TrustedProxyHeader)); !ok {
+	// The limiters run first and are keyed by client IP: box keys are free to mint. The /64 one goes
+	// first, so a single /64 hammering past its own limit does not use up its /48's budget.
+	if ok, retry := h.limiter.Allow(clientKey(r, h.cfg.TrustedProxyHeader, 64)); !ok {
+		tooMany(w, retry)
+		return
+	}
+	if ok, retry := h.limiter48.Allow(clientKey(r, h.cfg.TrustedProxyHeader, 48)); !ok {
 		tooMany(w, retry)
 		return
 	}
@@ -129,7 +135,7 @@ func (h *fleetsHandler) createFleet(w http.ResponseWriter, r *http.Request) {
 // answered the request and returns false unless the caller is the fleet's owner. The IP throttle runs
 // first so the secret cannot be hammered and fleet ids chosen by the caller never become limiter keys.
 func (h *fleetsHandler) authenticate(w http.ResponseWriter, r *http.Request) (store.Fleet, bool) {
-	if ok, retry := h.authLimiter.Allow(clientKey(r, h.cfg.TrustedProxyHeader)); !ok {
+	if ok, retry := h.authLimiter.Allow(clientKey(r, h.cfg.TrustedProxyHeader, 64)); !ok {
 		tooMany(w, retry)
 		return store.Fleet{}, false
 	}
@@ -274,14 +280,15 @@ func (h *fleetsHandler) rollback(ctx context.Context, id, user string, storeRow 
 	}
 }
 
-// clientKey returns the rate-limit key of a request: the client IP, or its /64 for IPv6 (a single
-// subscriber typically owns a whole /64, so per-address keys would be free to mint).
+// clientKey returns the rate-limit key of a request: the client IP, or for IPv6 its prefix of the
+// given length (a single subscriber typically owns a whole /64, often a /48 or /56, so per-address
+// keys would be free to mint).
 //
 // With header empty the TCP peer is used. Otherwise the LAST value of that header is used: it is
 // the one appended by the trusted proxy in front of us, whereas earlier values are client-supplied.
 // If the header is absent or unparsable the peer address is used (conservative: every client then
 // shares the proxy's bucket).
-func clientKey(r *http.Request, header string) string {
+func clientKey(r *http.Request, header string, v6bits int) string {
 	addr, ok := netip.Addr{}, false
 	if header != "" {
 		addr, ok = lastHop(r.Header.Values(header))
@@ -299,7 +306,7 @@ func clientKey(r *http.Request, header string) string {
 	}
 	addr = addr.Unmap().WithZone("")
 	if addr.Is6() {
-		p, _ := addr.Prefix(64)
+		p, _ := addr.Prefix(v6bits)
 		return p.String()
 	}
 	return addr.String()

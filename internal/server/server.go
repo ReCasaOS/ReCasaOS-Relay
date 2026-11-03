@@ -29,6 +29,10 @@ type Config struct {
 	TrustedProxyHeader string
 }
 
+// prefix48Factor: an IPv6 /48 may create this many times CREATE_RATE_PER_HOUR fleets per hour in
+// all, across its /64s (IPv4: the same address, so the per-address limit is the one that binds).
+const prefix48Factor = 10
+
 // Deps carries the collaborators of the handlers. Store and Headscale are required for /v1/fleets.
 type Deps struct {
 	Store     store.Store
@@ -58,6 +62,7 @@ func New(cfg Config, deps Deps) http.Handler {
 		h := &fleetsHandler{
 			cfg: cfg, deps: deps,
 			limiter:     ratelimit.New(cfg.CreateRatePerHour, deps.Now),
+			limiter48:   ratelimit.New(prefix48Factor*cfg.CreateRatePerHour, deps.Now),
 			authLimiter: ratelimit.New(cfg.AuthRatePerHour, deps.Now),
 			keyLimiter:  ratelimit.New(cfg.KeyRatePerHour, deps.Now),
 			locks:       deps.Remover.Locks,

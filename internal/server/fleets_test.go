@@ -351,6 +351,26 @@ func TestClientIPKeying(t *testing.T) {
 		want(t, got, 201, 201, 429, 201)
 	})
 
+	t.Run("IPv6: one /48 gets at most 10x the per-/64 rate, however many /64s it uses", func(t *testing.T) {
+		e := setup(t, func(c *Config, _ *Deps) { c.CreateRatePerHour = 1 })
+		var got []int
+		for i := 0; i < 11; i++ { // 11 distinct /64s of 2001:db8:5::/48
+			got = append(got, e.post(t, "[2001:db8:5:"+strconv.Itoa(i+1)+"::1]:1", nil).Code)
+		}
+		want(t, got, 201, 201, 201, 201, 201, 201, 201, 201, 201, 201, 429)
+		if c := e.post(t, "[2001:db8:6:1::1]:1", nil).Code; c != 201 {
+			t.Fatalf("another /48 = %d", c)
+		}
+		// A /64 over its own limit is refused there and does not use up its /48's budget.
+		e = setup(t, func(c *Config, _ *Deps) { c.CreateRatePerHour = 1 })
+		for i := 0; i < 20; i++ {
+			e.post(t, "[2001:db8:7:1::1]:1", nil)
+		}
+		if c := e.post(t, "[2001:db8:7:2::1]:1", nil).Code; c != 201 {
+			t.Fatalf("neighbouring /64 = %d after one /64 was throttled", c)
+		}
+	})
+
 	t.Run("trusted header, IPv6 client", func(t *testing.T) {
 		e := setup(t, trusted)
 		got := codes(e, 3, same("172.18.0.5:1"), func(i int) map[string]string {

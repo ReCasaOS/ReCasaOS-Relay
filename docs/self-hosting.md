@@ -105,7 +105,7 @@ Put them in a `.env` file next to `compose.yaml` (Compose substitutes them). An 
 | `HEADSCALE_API_KEY` | none, **required** | yes | the service exits without it (section 5) |
 | `LOGIN_SERVER` | empty | yes | **set it to your public URL**, the same as `server_url`: it is the `login_server` returned to boxes when a fleet is created. The e2e override sets both to the same URL. Left empty, boxes receive an empty value |
 | `NODES_PER_FLEET` | `50` | yes | boxes per fleet |
-| `CREATE_RATE_PER_HOUR` | `5` | yes | fleet creations per hour per client IP |
+| `CREATE_RATE_PER_HOUR` | `5` | yes | fleet creations per hour per client IP (IPv6: per /64, plus 10 times this per /48) |
 | `KEY_RATE_PER_HOUR` | `30` | yes | join keys per hour per fleet |
 | `AUTH_RATE_PER_HOUR` | `60` | yes | authenticated fleet requests per hour per client IP (boxes behind one NAT share it) |
 | `JOIN_KEY_TTL` | `24h` | yes | validity of a join key |
