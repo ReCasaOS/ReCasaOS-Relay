@@ -341,3 +341,28 @@ func TestUnreachableServer(t *testing.T) {
 		t.Fatal("want error")
 	}
 }
+
+// A node must name its user to be handed out: a missing user is never taken for the fleet's.
+func TestListNodesSkipsNodesWithoutAUser(t *testing.T) {
+	c, _ := newFake(t, map[string]reply{
+		"GET /api/v1/user": {200, oneUser("f-abc")},
+		"GET /api/v1/node": {200, `{"nodes":[{"id":"3","name":"box-a","user":` + userJSON + `},{"id":"6","name":"anon","user":{}},{"id":"7","name":"none"}]}`},
+	})
+	got, err := c.ListNodes(ctx, "f-abc")
+	if err != nil || len(got) != 1 || got[0].ID != "3" {
+		t.Fatalf("got %+v, %v; want only node 3", got, err)
+	}
+}
+
+// Error text from Headscale ends up in logs: keep it short whatever the server sends.
+func TestAPIErrorMessageIsTruncated(t *testing.T) {
+	long := strings.Repeat("x", 4000)
+	for name, body := range map[string]string{"raw": long, "json": `{"code":2,"message":"` + long + `"}`} {
+		c, _ := newFake(t, map[string]reply{"POST /api/v1/user": {500, body}})
+		err := c.CreateUser(ctx, "f-abc")
+		var ae *APIError
+		if !errors.As(err, &ae) || len(ae.Message) > 512+len("...") || !strings.HasPrefix(ae.Message, "xxx") {
+			t.Fatalf("%s: message of %d bytes: %v", name, len(ae.Message), err)
+		}
+	}
+}

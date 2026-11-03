@@ -165,6 +165,9 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		if json.Unmarshal(raw, &e) == nil && e.Message != "" {
 			msg = e.Message
 		}
+		if len(msg) > 512 { // it is logged: a misbehaving server must not flood the logs
+			msg = strings.ToValidUTF8(msg[:512], "") + "..."
+		}
 		return &APIError{Method: method, Path: path, Status: resp.StatusCode, Message: msg}
 	}
 	if out != nil {
@@ -288,7 +291,7 @@ func (c *Client) nodes(ctx context.Context, user string) ([]hsNode, error) {
 	}
 	var own []hsNode
 	for _, n := range res.Nodes {
-		if n.User.Name == "" || n.User.Name == user { // never hand out another fleet's node
+		if n.User.Name == user { // never hand out another fleet's node, nor one that names no user
 			own = append(own, n)
 		}
 	}
