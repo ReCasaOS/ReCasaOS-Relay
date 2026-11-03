@@ -17,7 +17,8 @@ import (
 type Config struct {
 	NodesPerFleet     int
 	CreateRatePerHour int // create-fleet requests per hour, per IP
-	KeyRatePerHour    int // join-key requests per hour, per fleet
+	KeyRatePerHour    int // join-key requests per hour, per fleet (counted once the secret is verified)
+	AuthRatePerHour   int // fleet requests (join key, status) per hour, per IP, counted before the secret is checked
 	JoinKeyTTL        time.Duration
 	IdleAfter         time.Duration // a fleet idle this long is deleted
 	LoginServer       string        // no default: must be set by the operator
@@ -43,8 +44,15 @@ func New(cfg Config, deps Deps) http.Handler {
 	}
 	mux := http.NewServeMux()
 	if deps.Store != nil && deps.Headscale != nil {
-		h := &fleetsHandler{cfg: cfg, deps: deps, limiter: ratelimit.New(cfg.CreateRatePerHour, deps.Now)}
+		h := &fleetsHandler{
+			cfg: cfg, deps: deps,
+			limiter:     ratelimit.New(cfg.CreateRatePerHour, deps.Now),
+			authLimiter: ratelimit.New(cfg.AuthRatePerHour, deps.Now),
+			keyLimiter:  ratelimit.New(cfg.KeyRatePerHour, deps.Now),
+		}
 		mux.HandleFunc("POST /v1/fleets", h.createFleet)
+		mux.HandleFunc("POST /v1/fleets/{id}/keys", h.createKey)
+		mux.HandleFunc("GET /v1/fleets/{id}", h.fleetStatus)
 	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -65,6 +73,9 @@ func ConfigFromEnv() (Config, error) {
 		return c, err
 	}
 	if c.KeyRatePerHour, err = envInt("KEY_RATE_PER_HOUR", 30); err != nil {
+		return c, err
+	}
+	if c.AuthRatePerHour, err = envInt("AUTH_RATE_PER_HOUR", 60); err != nil {
 		return c, err
 	}
 	if c.JoinKeyTTL, err = envDuration("JOIN_KEY_TTL", 24*time.Hour); err != nil {

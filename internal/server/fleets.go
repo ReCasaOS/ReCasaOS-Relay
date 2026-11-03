@@ -3,17 +3,21 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/auth"
+	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
 	"github.com/ReCasaOS/recasaos-relay/internal/ratelimit"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
 )
@@ -23,16 +27,31 @@ import (
 const opTimeout = 20 * time.Second
 
 type fleetsHandler struct {
-	cfg     Config
-	deps    Deps
-	limiter *ratelimit.Limiter
+	cfg         Config
+	deps        Deps
+	limiter     *ratelimit.Limiter // create-fleet, per IP
+	authLimiter *ratelimit.Limiter // fleet requests, per IP, before the secret is checked
+	keyLimiter  *ratelimit.Limiter // join keys, per fleet, after the secret is verified
+	locks       keyedLock          // serialises "count nodes and pending keys, then create a key" per fleet
 }
+
+// checkSecret is a variable so tests can observe that every request pays one comparison.
+var checkSecret = auth.CheckSecret
+
+// dummyHash is compared against when the fleet is unknown, so that path costs what a wrong secret does.
+const dummyHash = "0000000000000000000000000000000000000000000000000000000000000000"
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func tooMany(w http.ResponseWriter, retry time.Duration) {
+	secs := int((retry + time.Second - 1) / time.Second)
+	w.Header().Set("Retry-After", strconv.Itoa(max(secs, 1)))
+	writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
@@ -44,9 +63,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 func (h *fleetsHandler) createFleet(w http.ResponseWriter, r *http.Request) {
 	// The limiter runs first and is keyed by client IP: box keys are free to mint.
 	if ok, retry := h.limiter.Allow(clientKey(r, h.cfg.TrustedProxyHeader)); !ok {
-		secs := int((retry + time.Second - 1) / time.Second)
-		w.Header().Set("Retry-After", strconv.Itoa(max(secs, 1)))
-		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+		tooMany(w, retry)
 		return
 	}
 	// No body is expected; refuse a large one without ever buffering it.
@@ -106,6 +123,174 @@ func (h *fleetsHandler) createFleet(w http.ResponseWriter, r *http.Request) {
 		"login_server":         h.cfg.LoginServer,
 		"expires_in_days_idle": int(h.cfg.IdleAfter / (24 * time.Hour)),
 	})
+}
+
+// authenticate throttles by client IP, then checks the fleet secret (Authorization: Bearer). It has
+// answered the request and returns false unless the caller is the fleet's owner. The IP throttle runs
+// first so the secret cannot be hammered and fleet ids chosen by the caller never become limiter keys.
+func (h *fleetsHandler) authenticate(w http.ResponseWriter, r *http.Request) (store.Fleet, bool) {
+	if ok, retry := h.authLimiter.Allow(clientKey(r, h.cfg.TrustedProxyHeader)); !ok {
+		tooMany(w, retry)
+		return store.Fleet{}, false
+	}
+	secret := ""
+	if scheme, tok, found := strings.Cut(r.Header.Get("Authorization"), " "); found && strings.EqualFold(scheme, "Bearer") {
+		secret = strings.TrimSpace(tok)
+	}
+	f, err := h.deps.Store.Fleet(r.Context(), r.PathValue("id"))
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		checkSecret(secret, dummyHash) // same work as a wrong secret: nothing to time
+		writeError(w, http.StatusNotFound, "fleet not found")
+		return store.Fleet{}, false
+	case err != nil:
+		log.Printf("fleet lookup: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return store.Fleet{}, false
+	}
+	if !checkSecret(secret, f.SecretHash) {
+		writeError(w, http.StatusUnauthorized, "unauthorized") // generic: says nothing about why
+		return store.Fleet{}, false
+	}
+	return f, true
+}
+
+// quotaUsage returns the fleet's nodes and whether one more node would exceed the quota. Unused,
+// unexpired join keys count as nodes-to-be: without that a fleet could stockpile keys (the key rate
+// limit allows many per day) and enrol beyond the quota. Used keys are not counted: their node is.
+func (h *fleetsHandler) quotaUsage(ctx context.Context, user string) (nodes []headscale.Node, full bool, err error) {
+	if nodes, err = h.deps.Headscale.ListNodes(ctx, user); err != nil {
+		return nil, false, err
+	}
+	keys, err := h.deps.Headscale.ListPreAuthKeys(ctx, user)
+	if err != nil {
+		return nil, false, err
+	}
+	now, pending := h.deps.Now(), 0
+	for _, k := range keys {
+		if !k.Used && (k.Expiration.IsZero() || k.Expiration.After(now)) {
+			pending++
+		}
+	}
+	return nodes, len(nodes)+pending >= h.cfg.NodesPerFleet, nil
+}
+
+// createKey handles POST /v1/fleets/{id}/keys: a single-use join key for one more box.
+func (h *fleetsHandler) createKey(w http.ResponseWriter, r *http.Request) {
+	f, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	// Keyed by fleet id, which is only now known to be real; the secret holder is who we limit.
+	if ok, retry := h.keyLimiter.Allow(f.ID); !ok {
+		tooMany(w, retry)
+		return
+	}
+	// Detached like createFleet: a key created for a client that hung up would still use up quota.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), opTimeout)
+	defer cancel()
+	unlock, err := h.locks.lock(ctx, f.ID)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "busy, retry later")
+		return
+	}
+	defer unlock()
+
+	_, full, err := h.quotaUsage(ctx, f.HeadscaleUser)
+	if err != nil {
+		log.Printf("fleet %s: key quota: %v", f.ID, err)
+		writeError(w, http.StatusBadGateway, "upstream error")
+		return
+	}
+	if full {
+		writeError(w, http.StatusConflict, "node quota reached")
+		return
+	}
+	expires := h.deps.Now().Add(h.cfg.JoinKeyTTL).UTC()
+	key, err := h.deps.Headscale.CreatePreAuthKey(ctx, f.HeadscaleUser, h.cfg.JoinKeyTTL)
+	if err != nil {
+		log.Printf("fleet %s: create key: %v", f.ID, err)
+		writeError(w, http.StatusBadGateway, "upstream error")
+		return
+	}
+	// Keep only a digest, never the key. Bookkeeping only: the quota reads Headscale, so a failure
+	// here must not lose a key that exists.
+	sum := sha256.Sum256([]byte(key))
+	if err := h.deps.Store.RecordKey(ctx, f.ID, hex.EncodeToString(sum[:]), expires); err != nil {
+		log.Printf("fleet %s: record key: %v", f.ID, err)
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"key": key, "expires_at": expires.Format(time.RFC3339)})
+}
+
+// fleetStatus handles GET /v1/fleets/{id}.
+func (h *fleetsHandler) fleetStatus(w http.ResponseWriter, r *http.Request) {
+	f, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), opTimeout)
+	defer cancel()
+	nodes, full, err := h.quotaUsage(ctx, f.HeadscaleUser)
+	if err != nil {
+		log.Printf("fleet %s: status: %v", f.ID, err)
+		writeError(w, http.StatusBadGateway, "upstream error")
+		return
+	}
+	type node struct {
+		Hostname string `json:"hostname"`
+		IP       string `json:"ip"`
+		Online   bool   `json:"online"`
+	}
+	out := make([]node, 0, len(nodes)) // [] rather than null for an empty fleet
+	for _, n := range nodes {
+		out = append(out, node{n.Hostname, n.IP, n.Online})
+	}
+	state := "ok"
+	if full {
+		state = "quota"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"nodes": out, "nodes_max": h.cfg.NodesPerFleet, "state": state})
+}
+
+// keyedLock is a set of per-key mutexes whose entries exist only while held or awaited, so the map
+// stays as small as the number of requests in flight.
+type keyedLock struct {
+	mu sync.Mutex
+	m  map[string]*lockEntry
+}
+
+type lockEntry struct {
+	sem  chan struct{} // capacity 1: a token in it means held
+	refs int
+}
+
+// lock waits for the key's lock or ctx; the returned func releases it.
+func (k *keyedLock) lock(ctx context.Context, key string) (func(), error) {
+	k.mu.Lock()
+	if k.m == nil {
+		k.m = map[string]*lockEntry{}
+	}
+	e := k.m[key]
+	if e == nil {
+		e = &lockEntry{sem: make(chan struct{}, 1)}
+		k.m[key] = e
+	}
+	e.refs++
+	k.mu.Unlock()
+	release := func() {
+		k.mu.Lock()
+		if e.refs--; e.refs == 0 {
+			delete(k.m, key)
+		}
+		k.mu.Unlock()
+	}
+	select {
+	case e.sem <- struct{}{}:
+		return func() { <-e.sem; release() }, nil
+	case <-ctx.Done():
+		release()
+		return nil, ctx.Err()
+	}
 }
 
 // rollback undoes a partly created fleet; failures are logged, nothing more can be done here.

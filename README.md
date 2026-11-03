@@ -61,9 +61,10 @@ Fleet creation is limited per client IP (per /64 for IPv6). The enrolment servic
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NODES_PER_FLEET` | `50` | max boxes per fleet |
+| `NODES_PER_FLEET` | `50` | max boxes per fleet; a join key is refused (409) when enrolled nodes plus unused, unexpired join keys reach it |
 | `CREATE_RATE_PER_HOUR` | `5` | fleet creations per hour per IP |
-| `KEY_RATE_PER_HOUR` | `30` | join-key requests per hour per fleet |
+| `KEY_RATE_PER_HOUR` | `30` | join-key requests per hour per fleet (counted once the fleet secret is verified) |
+| `AUTH_RATE_PER_HOUR` | `60` | authenticated fleet requests (join key and status) per hour per client IP, counted BEFORE the secret is checked, wrong or right; boxes behind one NAT share it |
 | `JOIN_KEY_TTL` | `24h` | validity of a join key |
 | `IDLE_AFTER` | `720h` | an idle fleet is deleted after this long |
 | `LOGIN_SERVER` | empty | login server URL handed to boxes |
