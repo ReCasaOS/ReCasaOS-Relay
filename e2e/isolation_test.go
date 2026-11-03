@@ -53,6 +53,7 @@ type rig struct {
 	caFile    string
 	ts        map[string]*node
 	fleetUser map[string]string // fleet name -> Headscale user
+	env       []string          // extra variables for docker compose (compose.yaml interpolates them)
 }
 
 type node struct {
@@ -72,7 +73,7 @@ func (r *rig) compose(args ...string) (string, error) {
 		"-f", filepath.Join(r.root, "compose.yaml"), "-f", filepath.Join(r.root, "e2e", "compose.e2e.yaml")}, args...)
 	cmd := exec.Command("docker", full...)
 	cmd.Dir = r.root
-	cmd.Env = append(os.Environ(), "HEADSCALE_API_KEY="+r.apiKey)
+	cmd.Env = append(append(os.Environ(), "HEADSCALE_API_KEY="+r.apiKey), r.env...)
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	err := cmd.Run()
