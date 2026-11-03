@@ -31,6 +31,8 @@ type Store interface {
 	Touch(ctx context.Context, fleetID string, at time.Time) error
 	// IdleFleets returns the IDs of fleets whose LastOnline is before the cut.
 	IdleFleets(ctx context.Context, before time.Time) ([]string, error)
+	// ListFleets returns every fleet ordered by id, without secret hashes (for building the access policy).
+	ListFleets(ctx context.Context) ([]Fleet, error)
 	Close() error
 }
 
@@ -166,4 +168,23 @@ func requireRow(res sql.Result, missing error) error {
 		return missing
 	}
 	return nil
+}
+
+func (s *sqlStore) ListFleets(ctx context.Context) ([]Fleet, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, headscale_user, created_at, last_online FROM fleets ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list fleets: %w", err)
+	}
+	defer rows.Close()
+	var out []Fleet
+	for rows.Next() {
+		var f Fleet
+		var created, online int64
+		if err := rows.Scan(&f.ID, &f.HeadscaleUser, &created, &online); err != nil {
+			return nil, fmt.Errorf("store: list fleets: %w", err)
+		}
+		f.CreatedAt, f.LastOnline = time.Unix(0, created).UTC(), time.Unix(0, online).UTC()
+		out = append(out, f)
+	}
+	return out, rows.Err()
 }

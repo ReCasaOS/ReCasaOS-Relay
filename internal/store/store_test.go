@@ -154,3 +154,30 @@ func TestWALEnabled(t *testing.T) {
 		t.Fatalf("journal_mode = %q, %v", mode, err)
 	}
 }
+
+func TestListFleets(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, filepath.Join(t.TempDir(), "relay.db"))
+	if got, err := s.ListFleets(ctx); err != nil || len(got) != 0 {
+		t.Fatalf("empty store: %v, %v", got, err)
+	}
+	now := time.Now().UTC()
+	for _, id := range []string{"c", "a", "b"} {
+		if err := s.CreateFleet(ctx, fleet(id, now)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.DeleteFleet(ctx, "b"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ListFleets(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].ID != "a" || got[1].ID != "c" || got[0].HeadscaleUser != "u-a" {
+		t.Fatalf("ListFleets = %+v, want a then c with their users", got)
+	}
+	if got[0].SecretHash != "" {
+		t.Fatal("ListFleets must not load secret hashes")
+	}
+}

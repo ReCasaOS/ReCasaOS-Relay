@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
+	"github.com/ReCasaOS/recasaos-relay/internal/policy"
 	"github.com/ReCasaOS/recasaos-relay/internal/server"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
 )
@@ -45,9 +47,10 @@ func run() error {
 	defer st.Close()
 
 	hs := headscale.New(getenv("HEADSCALE_URL", "http://headscale:8080"), apiKey, nil)
+	pol := policy.NewWriter(st, hs)
 	srv := &http.Server{
 		Addr:              getenv("LISTEN_ADDR", ":8081"),
-		Handler:           server.New(cfg, server.Deps{Store: st, Headscale: hs}),
+		Handler:           server.New(cfg, server.Deps{Store: st, Headscale: hs, PolicyHook: pol.Hook}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      45 * time.Second, // a create-fleet call may wait on Headscale (20 s) and its rollback
@@ -69,12 +72,27 @@ func run() error {
 			log.Printf("shutdown: %v", err)
 		}
 	}()
-	log.Printf("enrolment listening on %s", srv.Addr)
-	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+	// Headscale allows everything until it has a policy: apply the deny-by-default one first, and
+	// refuse to start (exit non-zero) if that cannot be done.
+	err = serveAfterPolicy(ctx, func(ctx context.Context) error { return pol.SyncWithRetry(ctx, 8, time.Second) },
+		func() error {
+			log.Printf("enrolment listening on %s", srv.Addr)
+			return srv.ListenAndServe()
+		})
+	if !errors.Is(err, http.ErrServerClosed) {
 		stop() // listen failed: let the goroutine finish instead of leaking
 		<-done
 		return err
 	}
 	<-done
 	return nil
+}
+
+// serveAfterPolicy runs applyPolicy and only then serve; if the policy cannot be applied, serve is
+// never called.
+func serveAfterPolicy(ctx context.Context, applyPolicy func(context.Context) error, serve func() error) error {
+	if err := applyPolicy(ctx); err != nil {
+		return fmt.Errorf("applying the access policy (refusing to serve without it): %w", err)
+	}
+	return serve()
 }
