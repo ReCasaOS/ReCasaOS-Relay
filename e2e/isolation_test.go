@@ -497,8 +497,9 @@ func TestFleetsAreIsolated(t *testing.T) {
 		r.mustSeePeers(a2, "a1")
 		r.mustSeePeers(b1)
 		r.mustSeePeers(c1)
-		if used, unused := r.usedKeys(userA); used != 2 || unused != 0 {
-			t.Errorf("fleet A keys: used=%d unused=%d, want 2 and 0", used, unused)
+		// a1's key was used, then deleted by the key request for a2 (requests prune spent keys).
+		if used, unused := r.usedKeys(userA); used != 1 || unused != 0 {
+			t.Errorf("fleet A keys: used=%d unused=%d, want 1 (a2's) and 0", used, unused)
 		}
 	})
 
