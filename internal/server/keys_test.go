@@ -396,30 +396,6 @@ func TestConcurrentKeyRequestsRespectQuota(t *testing.T) {
 	}
 }
 
-func TestFleetLocksAreReleased(t *testing.T) {
-	var l keyedLock
-	for i := 0; i < 100; i++ {
-		unlock, err := l.lock(context.Background(), "fleet"+strconv.Itoa(i))
-		if err != nil {
-			t.Fatal(err)
-		}
-		unlock()
-	}
-	if len(l.m) != 0 {
-		t.Fatalf("%d lock entries left behind", len(l.m))
-	}
-	unlock, _ := l.lock(context.Background(), "a")
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	if _, err := l.lock(ctx, "a"); err == nil {
-		t.Fatal("second lock on a held fleet must wait and give up with the context")
-	}
-	unlock()
-	if len(l.m) != 0 {
-		t.Fatalf("%d lock entries left behind after a cancelled wait", len(l.m))
-	}
-}
-
 func TestKeyUpstreamErrorsAreGeneric(t *testing.T) {
 	e := setupKeys(t, nil)
 	e.q.listErr = &headscale.APIError{Method: "GET", Path: "/api/v1/node", Status: 500, Message: "db password is hunter2"}

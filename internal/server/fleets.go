@@ -13,10 +13,10 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/auth"
+	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
 	"github.com/ReCasaOS/recasaos-relay/internal/ratelimit"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
@@ -32,7 +32,7 @@ type fleetsHandler struct {
 	limiter     *ratelimit.Limiter // create-fleet, per IP
 	authLimiter *ratelimit.Limiter // fleet requests, per IP, before the secret is checked
 	keyLimiter  *ratelimit.Limiter // join keys, per fleet, after the secret is verified
-	locks       keyedLock          // serialises "count nodes and pending keys, then create a key" per fleet
+	locks       *fleets.Locks      // serialises "count nodes and pending keys, then create a key" per fleet; shared with deletion
 }
 
 // checkSecret is a variable so tests can observe that every request pays one comparison.
@@ -159,11 +159,14 @@ func (h *fleetsHandler) authenticate(w http.ResponseWriter, r *http.Request) (st
 // unexpired join keys count as nodes-to-be: without that a fleet could stockpile keys (the key rate
 // limit allows many per day) and enrol beyond the quota. Used keys are not counted: their node is.
 func (h *fleetsHandler) quotaUsage(ctx context.Context, user string) (nodes []headscale.Node, full bool, err error) {
-	if nodes, err = h.deps.Headscale.ListNodes(ctx, user); err != nil {
-		return nil, false, err
-	}
+	// Keys first, nodes second: a box that registers between the two reads is then counted twice
+	// (its key is still pending in the first read, its node shows in the second), which only errs on
+	// the safe side. The other order would miss it entirely.
 	keys, err := h.deps.Headscale.ListPreAuthKeys(ctx, user)
 	if err != nil {
+		return nil, false, err
+	}
+	if nodes, err = h.deps.Headscale.ListNodes(ctx, user); err != nil {
 		return nil, false, err
 	}
 	now, pending := h.deps.Now(), 0
@@ -189,7 +192,7 @@ func (h *fleetsHandler) createKey(w http.ResponseWriter, r *http.Request) {
 	// Detached like createFleet: a key created for a client that hung up would still use up quota.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), opTimeout)
 	defer cancel()
-	unlock, err := h.locks.lock(ctx, f.ID)
+	unlock, err := h.locks.Lock(ctx, f.ID)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "busy, retry later")
 		return
@@ -250,47 +253,6 @@ func (h *fleetsHandler) fleetStatus(w http.ResponseWriter, r *http.Request) {
 		state = "quota"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"nodes": out, "nodes_max": h.cfg.NodesPerFleet, "state": state})
-}
-
-// keyedLock is a set of per-key mutexes whose entries exist only while held or awaited, so the map
-// stays as small as the number of requests in flight.
-type keyedLock struct {
-	mu sync.Mutex
-	m  map[string]*lockEntry
-}
-
-type lockEntry struct {
-	sem  chan struct{} // capacity 1: a token in it means held
-	refs int
-}
-
-// lock waits for the key's lock or ctx; the returned func releases it.
-func (k *keyedLock) lock(ctx context.Context, key string) (func(), error) {
-	k.mu.Lock()
-	if k.m == nil {
-		k.m = map[string]*lockEntry{}
-	}
-	e := k.m[key]
-	if e == nil {
-		e = &lockEntry{sem: make(chan struct{}, 1)}
-		k.m[key] = e
-	}
-	e.refs++
-	k.mu.Unlock()
-	release := func() {
-		k.mu.Lock()
-		if e.refs--; e.refs == 0 {
-			delete(k.m, key)
-		}
-		k.mu.Unlock()
-	}
-	select {
-	case e.sem <- struct{}{}:
-		return func() { <-e.sem; release() }, nil
-	case <-ctx.Done():
-		release()
-		return nil, ctx.Err()
-	}
 }
 
 // rollback undoes a partly created fleet; failures are logged, nothing more can be done here.

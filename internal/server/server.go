@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
 	"github.com/ReCasaOS/recasaos-relay/internal/ratelimit"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
@@ -21,6 +22,7 @@ type Config struct {
 	AuthRatePerHour   int // fleet requests (join key, status) per hour, per IP, counted before the secret is checked
 	JoinKeyTTL        time.Duration
 	IdleAfter         time.Duration // a fleet idle this long is deleted
+	GCEvery           time.Duration // interval of the idle-fleet janitor
 	LoginServer       string        // no default: must be set by the operator
 	// TrustedProxyHeader names the header (e.g. X-Forwarded-For) in which a trusted reverse proxy
 	// appends the client address; its LAST value is then the client IP. Empty: use the TCP peer.
@@ -34,7 +36,10 @@ type Deps struct {
 	// PolicyHook is called with the Headscale users involved after a fleet is created and must
 	// make the access policy cover them; an error rolls the creation back. Nil: no-op.
 	PolicyHook func(users []string) error
-	Now        func() time.Time // default time.Now
+	// Remover deletes fleets and owns the per-fleet locks; share it with the janitor so both take
+	// the same locks. Nil: one is built from Store and Headscale (no policy sync, private locks).
+	Remover *fleets.Remover
+	Now     func() time.Time // default time.Now
 }
 
 // New returns the service's HTTP handler.
@@ -44,15 +49,24 @@ func New(cfg Config, deps Deps) http.Handler {
 	}
 	mux := http.NewServeMux()
 	if deps.Store != nil && deps.Headscale != nil {
+		if deps.Remover == nil {
+			deps.Remover = &fleets.Remover{Store: deps.Store, Headscale: deps.Headscale}
+		}
+		if deps.Remover.Locks == nil {
+			deps.Remover.Locks = &fleets.Locks{}
+		}
 		h := &fleetsHandler{
 			cfg: cfg, deps: deps,
 			limiter:     ratelimit.New(cfg.CreateRatePerHour, deps.Now),
 			authLimiter: ratelimit.New(cfg.AuthRatePerHour, deps.Now),
 			keyLimiter:  ratelimit.New(cfg.KeyRatePerHour, deps.Now),
+			locks:       deps.Remover.Locks,
 		}
 		mux.HandleFunc("POST /v1/fleets", h.createFleet)
 		mux.HandleFunc("POST /v1/fleets/{id}/keys", h.createKey)
 		mux.HandleFunc("GET /v1/fleets/{id}", h.fleetStatus)
+		mux.HandleFunc("DELETE /v1/fleets/{id}/nodes/{hostname}", h.removeNode)
+		mux.HandleFunc("DELETE /v1/fleets/{id}", h.deleteFleet)
 	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -82,6 +96,9 @@ func ConfigFromEnv() (Config, error) {
 		return c, err
 	}
 	if c.IdleAfter, err = envDuration("IDLE_AFTER", 720*time.Hour); err != nil {
+		return c, err
+	}
+	if c.GCEvery, err = envDuration("GC_INTERVAL", 10*time.Minute); err != nil {
 		return c, err
 	}
 	c.LoginServer = os.Getenv("LOGIN_SERVER")
