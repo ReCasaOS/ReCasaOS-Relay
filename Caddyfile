@@ -1,11 +1,26 @@
-# Public front for Headscale: forwards everything except the admin REST API (/api/), which Headscale
-# serves on the same port as the box control plane and which must only be reachable by `enrolment`.
+# Public front. Headscale's admin REST API (/api/) shares its port with the box control plane and must
+# only be reachable by `enrolment`, so it is answered 404 here. /v1/* goes to the enrolment service,
+# which is NOT published: this proxy is its only way in, so the client address it receives is one we set.
+# (enrolment's own /healthz stays internal.)
 {
 	auto_https off
 }
 
 :8080 {
 	@api path /api /api/*
-	respond @api 404
-	reverse_proxy headscale:8080
+	handle @api {
+		respond 404
+	}
+
+	handle /v1/* {
+		reverse_proxy enrolment:8081 {
+			# header_up replaces any value sent by the client; {client_ip} is the TCP peer, or the real
+			# client when `trusted_proxies` lists the proxy in front of this one (see README).
+			header_up X-Client-IP {client_ip}
+		}
+	}
+
+	handle {
+		reverse_proxy headscale:8080
+	}
 }
