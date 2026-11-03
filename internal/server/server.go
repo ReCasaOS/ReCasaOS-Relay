@@ -7,6 +7,10 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
+	"github.com/ReCasaOS/recasaos-relay/internal/ratelimit"
+	"github.com/ReCasaOS/recasaos-relay/internal/store"
 )
 
 // Config holds the tunables of the service; see ConfigFromEnv for defaults.
@@ -17,14 +21,31 @@ type Config struct {
 	JoinKeyTTL        time.Duration
 	IdleAfter         time.Duration // a fleet idle this long is deleted
 	LoginServer       string        // no default: must be set by the operator
+	// TrustedProxyHeader names the header (e.g. X-Forwarded-For) in which a trusted reverse proxy
+	// appends the client address; its LAST value is then the client IP. Empty: use the TCP peer.
+	TrustedProxyHeader string
 }
 
-// Deps carries the collaborators of the handlers (store, Headscale client...), added by later tasks.
-type Deps struct{}
+// Deps carries the collaborators of the handlers. Store and Headscale are required for /v1/fleets.
+type Deps struct {
+	Store     store.Store
+	Headscale headscale.API
+	// PolicyHook is called with the Headscale users involved after a fleet is created and must
+	// make the access policy cover them; an error rolls the creation back. Nil: no-op.
+	PolicyHook func(users []string) error
+	Now        func() time.Time // default time.Now
+}
 
 // New returns the service's HTTP handler.
 func New(cfg Config, deps Deps) http.Handler {
+	if deps.Now == nil {
+		deps.Now = time.Now
+	}
 	mux := http.NewServeMux()
+	if deps.Store != nil && deps.Headscale != nil {
+		h := &fleetsHandler{cfg: cfg, deps: deps, limiter: ratelimit.New(cfg.CreateRatePerHour, deps.Now)}
+		mux.HandleFunc("POST /v1/fleets", h.createFleet)
+	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -53,6 +74,7 @@ func ConfigFromEnv() (Config, error) {
 		return c, err
 	}
 	c.LoginServer = os.Getenv("LOGIN_SERVER")
+	c.TrustedProxyHeader = os.Getenv("TRUSTED_PROXY_HEADER")
 	return c, nil
 }
 

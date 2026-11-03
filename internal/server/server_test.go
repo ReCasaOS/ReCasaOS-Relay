@@ -17,7 +17,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestConfigFromEnvDefaults(t *testing.T) {
-	for _, k := range []string{"NODES_PER_FLEET", "CREATE_RATE_PER_HOUR", "KEY_RATE_PER_HOUR", "JOIN_KEY_TTL", "IDLE_AFTER", "LOGIN_SERVER"} {
+	for _, k := range []string{"NODES_PER_FLEET", "CREATE_RATE_PER_HOUR", "KEY_RATE_PER_HOUR", "JOIN_KEY_TTL", "IDLE_AFTER", "LOGIN_SERVER", "TRUSTED_PROXY_HEADER"} {
 		t.Setenv(k, "")
 	}
 	got, err := ConfigFromEnv()
@@ -44,11 +44,12 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 	t.Setenv("JOIN_KEY_TTL", "1h")
 	t.Setenv("IDLE_AFTER", "48h")
 	t.Setenv("LOGIN_SERVER", "https://relay.example")
+	t.Setenv("TRUSTED_PROXY_HEADER", "X-Forwarded-For")
 	got, err := ConfigFromEnv()
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Config{10, 2, 7, time.Hour, 48 * time.Hour, "https://relay.example"}
+	want := Config{10, 2, 7, time.Hour, 48 * time.Hour, "https://relay.example", "X-Forwarded-For"}
 	if got != want {
 		t.Fatalf("overrides = %+v, want %+v", got, want)
 	}
