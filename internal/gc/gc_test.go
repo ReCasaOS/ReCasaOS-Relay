@@ -17,6 +17,7 @@ import (
 var (
 	t0        = time.Unix(1_800_000_000, 0).UTC()
 	idleAfter = 30 * 24 * time.Hour
+	keyTTL    = 24 * time.Hour
 	bg        = context.Background()
 )
 
@@ -42,9 +43,10 @@ func newRig(t *testing.T) *rig {
 	r.sy = &fakes.Syncer{Log: r.log}
 	fst := &fakes.Store{Store: st, Log: r.log}
 	r.d = Deps{
-		Remover:   &fleets.Remover{Store: fst, Headscale: r.hs, Policy: r.sy, Locks: &fleets.Locks{}},
-		IdleAfter: idleAfter,
-		Now:       now,
+		Remover:    &fleets.Remover{Store: fst, Headscale: r.hs, Policy: r.sy, Locks: &fleets.Locks{}},
+		IdleAfter:  idleAfter,
+		JoinKeyTTL: keyTTL,
+		Now:        now,
 	}
 	return r
 }
@@ -82,7 +84,8 @@ func TestGCDeletesOnlyIdleFleets(t *testing.T) {
 	r.hs.AddNode(online, "box-off", false)
 	under := r.fleet(t, "b-under", idleAfter-time.Second)
 	r.hs.AddNode(under, "box-u", false)
-	r.fleet(t, "c-edge", idleAfter) // exactly at the threshold: not longer than it
+	edge := r.fleet(t, "c-edge", idleAfter) // exactly at the threshold: not longer than it
+	r.hs.AddNode(edge, "box-e", false)      // (a node: an empty fleet this old goes by the other rule)
 	over := r.fleet(t, "d-over", idleAfter+time.Second)
 	r.hs.AddNode(over, "box-o", false)
 	r.hs.AddKey(over, false, t0.Add(time.Hour))
@@ -118,7 +121,7 @@ func TestGCDeletesOnlyIdleFleets(t *testing.T) {
 	// One read of the nodes per fleet, then for each deleted fleet: nodes, user, keys, row, sync;
 	// then the key sweep and a last sync.
 	want := "nodes,nodes,nodes,nodes,nodes," + // the five fleets, a to e
-		"nodes,node:4,user,keys,row,sync," + // d-over, in order
+		"nodes,node:5,user,keys,row,sync," + // d-over (node 4 is c-edge's), in order
 		"nodes,user,keys,row,sync," + // e-empty
 		"allkeys,sync"
 	if got := r.log.String(); got != want {
@@ -375,4 +378,125 @@ func TestGCDeletesAFleetWithDuplicateHostnames(t *testing.T) {
 	if r.exists("dup") || r.hs.HasUser(u) {
 		t.Fatalf("not deleted: %s", r.log)
 	}
+}
+
+// fleetSeen adds a fleet created `age` before t0 whose row was last touched `seen` before t0.
+func (r *rig) fleetSeen(t *testing.T, id string, age, seen time.Duration) string {
+	t.Helper()
+	user := "f-" + id
+	err := r.st.CreateFleet(bg, store.Fleet{ID: id, SecretHash: "h", HeadscaleUser: user, CreatedAt: t0.Add(-age), LastOnline: t0.Add(-seen)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.hs.AddUser(user)
+	return user
+}
+
+// A fleet that never got a node is deleted once it is older than two join-key lifetimes, however
+// recently its row was touched (each key request touches it), unless a key is still pending: a box
+// may be joining with it.
+func TestGCDeletesEmptyFleetsThatKeepAskingForKeysButNeverJoin(t *testing.T) {
+	r := newRig(t)
+	day := 24 * time.Hour
+	// Asked for a key every day for ten days, the last one 25 h ago: expired an hour ago.
+	never := r.fleetSeen(t, "a-never", 10*day, 25*time.Hour)
+	r.hs.AddKey(never, false, t0.Add(-time.Hour))
+	// Same, but the last key was asked 23 h ago and is still valid.
+	joining := r.fleetSeen(t, "b-joining", 10*day, 23*time.Hour)
+	r.hs.AddKey(joining, false, t0.Add(time.Hour))
+	r.fleetSeen(t, "c-young", 2*keyTTL-time.Minute, 2*keyTTL-time.Minute) // not two key lifetimes old yet
+	withNode := r.fleetSeen(t, "d-node", 10*day, 10*day)
+	r.hs.AddNode(withNode, "box", false)                                   // offline 10 days: the 30-day rule decides, not this one
+	r.fleetSeen(t, "e-silent", 2*keyTTL+time.Minute, 2*keyTTL+time.Minute) // never asked for a key
+
+	Tick(bg, r.d)
+
+	for id, want := range map[string]bool{"a-never": false, "b-joining": true, "c-young": true, "d-node": true, "e-silent": false} {
+		if r.exists(id) != want {
+			t.Errorf("fleet %s: exists = %v, want %v", id, !want, want)
+		}
+	}
+	if r.hs.HasUser(never) || !r.hs.HasUser(joining) {
+		t.Error("Headscale users do not match the store")
+	}
+
+	// The pending key expires and no new one is asked for: the next pass deletes it.
+	r.now = t0.Add(2 * time.Hour)
+	Tick(bg, r.d)
+	if r.exists("b-joining") || r.hs.HasUser(joining) {
+		t.Fatal("an empty fleet whose last key expired was kept")
+	}
+}
+
+// The pass saw no pending key; before the deletion gets the fleet's lock the owner asks for one
+// (which touches the row). The deletion must then back off.
+func TestGCEmptyFleetRechecksTheRowUnderTheLock(t *testing.T) {
+	r := newRig(t)
+	r.fleetSeen(t, "empty", 3*keyTTL, 3*keyTTL)
+	fst := r.d.Remover.Store.(*fakes.Store)
+	var once sync.Once
+	fst.OnFleet = func(id string) {
+		once.Do(func() {
+			if err := r.st.Touch(bg, id, t0); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	Tick(bg, r.d)
+	if !r.exists("empty") || strings.Contains(r.log.String(), "row") {
+		t.Fatalf("an empty fleet touched after the pass read it was deleted: %s", r.log)
+	}
+}
+
+// A node that registers before the deletion gets the lock keeps the fleet, even offline.
+func TestGCEmptyFleetRechecksNodesUnderTheLock(t *testing.T) {
+	r := newRig(t)
+	u := r.fleetSeen(t, "empty", 3*keyTTL, 3*keyTTL)
+	var calls int
+	r.hs.Hook = func(op string) {
+		if op == "nodes" {
+			if calls++; calls == 2 {
+				r.hs.AddNode(u, "box", false)
+			}
+		}
+	}
+	Tick(bg, r.d)
+	if !r.exists("empty") || r.hs.NodeCount(u) != 1 {
+		t.Fatalf("a fleet whose box registered was deleted: %s", r.log)
+	}
+}
+
+// Without the key list nothing says whether a box is joining: no empty fleet is deleted.
+func TestGCKeepsEmptyFleetsWhenKeysCannotBeListed(t *testing.T) {
+	r := newRig(t)
+	r.fleetSeen(t, "empty", 3*keyTTL, 3*keyTTL)
+	r.hs.Fail("allkeys", errors.New("down"))
+	Tick(bg, r.d)
+	if !r.exists("empty") {
+		t.Fatal("deleted without knowing its keys")
+	}
+}
+
+func TestRunSurvivesAPanickingTick(t *testing.T) {
+	r := newRig(t)
+	r.fleet(t, "a", time.Hour)
+	var once sync.Once
+	r.hs.Hook = func(op string) {
+		if op == "nodes" {
+			once.Do(func() { panic("boom") })
+		}
+	}
+	ctx, cancel := context.WithCancel(bg)
+	defer cancel()
+	done := make(chan struct{})
+	go func() { Run(ctx, r.d, 5*time.Millisecond); close(done) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(r.log.String(), "sync") {
+		if time.Now().After(deadline) {
+			t.Fatal("no tick completed after a panicking one")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
 }

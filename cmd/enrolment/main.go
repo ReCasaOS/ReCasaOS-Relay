@@ -91,7 +91,7 @@ func run() error {
 			janitorStarted = true
 			go func() {
 				defer close(janitorDone)
-				gc.Run(ctx, gc.Deps{Remover: remover, IdleAfter: cfg.IdleAfter}, cfg.GCEvery)
+				gc.Run(ctx, gc.Deps{Remover: remover, IdleAfter: cfg.IdleAfter, JoinKeyTTL: cfg.JoinKeyTTL}, cfg.GCEvery)
 			}()
 			log.Printf("enrolment listening on %s", srv.Addr)
 			return srv.ListenAndServe()

@@ -82,7 +82,7 @@ type Remover struct {
 // does not undo a deletion that is complete (the row is gone, and a policy still naming a deleted
 // user lets nobody through); it is logged and the janitor's next tick pushes the policy again.
 func (r *Remover) Remove(ctx context.Context, f store.Fleet) error {
-	_, err := r.remove(ctx, f, nil)
+	_, err := r.remove(ctx, f, nil, false)
 	return err
 }
 
@@ -91,10 +91,17 @@ func (r *Remover) Remove(ctx context.Context, f store.Fleet) error {
 // if any of its nodes is online right now. The janitor's own reading of the fleet may be a whole
 // pass old, and a key request, which waits for this lock, counts as activity.
 func (r *Remover) RemoveIfIdle(ctx context.Context, f store.Fleet, idleBefore time.Time) (removed bool, err error) {
-	return r.remove(ctx, f, &idleBefore)
+	return r.remove(ctx, f, &idleBefore, false)
 }
 
-func (r *Remover) remove(ctx context.Context, f store.Fleet, idleBefore *time.Time) (bool, error) {
+// RemoveIfEmpty is RemoveIfIdle for a fleet that has no node at all: under the lock it does nothing
+// if its row was touched since touchedBefore (a key request touches it: a box may be joining) or if
+// it has any node, online or not.
+func (r *Remover) RemoveIfEmpty(ctx context.Context, f store.Fleet, touchedBefore time.Time) (removed bool, err error) {
+	return r.remove(ctx, f, &touchedBefore, true)
+}
+
+func (r *Remover) remove(ctx context.Context, f store.Fleet, idleBefore *time.Time, noNodes bool) (bool, error) {
 	unlock, err := r.Locks.Lock(ctx, f.ID)
 	if err != nil {
 		return false, err
@@ -116,6 +123,9 @@ func (r *Remover) remove(ctx context.Context, f store.Fleet, idleBefore *time.Ti
 	nodes, err := r.Headscale.ListNodes(ctx, f.HeadscaleUser)
 	if err != nil {
 		return false, fmt.Errorf("list nodes: %w", err)
+	}
+	if noNodes && len(nodes) > 0 {
+		return false, nil
 	}
 	if idleBefore != nil {
 		for _, n := range nodes {
