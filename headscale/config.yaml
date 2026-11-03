@@ -1,0 +1,50 @@
+# Headscale configuration for recasaos-relay. Keys not set here take Headscale's defaults.
+
+# Public URL of the relay as seen by boxes (https is required by the embedded DERP).
+# Replace with your own domain; TLS is terminated by a reverse proxy in front of port 8080.
+server_url: https://relay.example.org
+listen_addr: 0.0.0.0:8080
+
+# Admin gRPC API: plaintext, reachable only on the compose network (the port is never published).
+grpc_listen_addr: 0.0.0.0:50443
+grpc_allow_insecure: true
+
+noise:
+  private_key_path: /var/lib/headscale/noise_private.key
+
+prefixes:
+  v4: 100.64.0.0/10
+  v6: fd7a:115c:a1e0::/48
+
+# DERP: start with Headscale's embedded DERP server; revisit (standalone derper) after the load tests.
+derp:
+  server:
+    enabled: true
+    region_id: 999
+    region_code: relay
+    region_name: ReCasaOS relay
+    stun_listen_addr: 0.0.0.0:3478
+    private_key_path: /var/lib/headscale/derp_server_private.key
+    verify_clients: true
+    automatically_add_embedded_derp_region: true
+  # Only our own relay: no dependency on Tailscale's public DERP map.
+  urls: []
+  paths: []
+  auto_update_enabled: false
+
+database:
+  type: sqlite
+  sqlite:
+    path: /var/lib/headscale/db.sqlite
+
+# Fleet isolation is enforced by the ACL policy that the enrolment service pushes through the API.
+policy:
+  mode: database
+
+dns:
+  magic_dns: false
+  base_domain: relay.internal
+  nameservers:
+    global: []
+
+unix_socket: /var/run/headscale/headscale.sock

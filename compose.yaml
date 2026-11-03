@@ -1,0 +1,35 @@
+# DERP: the "derp" role is Headscale's embedded DERP server (see headscale/config.yaml), so it is
+# not a separate service for now; its STUN port is published below. Revisit with a standalone
+# derper after the load tests.
+services:
+  headscale:
+    image: headscale/headscale:v0.29.7
+    command: serve
+    restart: unless-stopped
+    volumes:
+      - ./headscale/config.yaml:/etc/headscale/config.yaml:ro
+      - headscale-data:/var/lib/headscale
+    # Published: the control plane for boxes (behind a TLS reverse proxy) and STUN for the embedded DERP.
+    # The gRPC API (50443) is deliberately NOT published: only `enrolment` reaches it, on the compose network.
+    ports:
+      - "8080:8080"
+      - "3478:3478/udp"
+
+  enrolment:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - headscale
+    environment:
+      HEADSCALE_GRPC_ADDR: headscale:50443
+      LOGIN_SERVER: ${LOGIN_SERVER:-}
+      NODES_PER_FLEET: ${NODES_PER_FLEET:-50}
+      CREATE_RATE_PER_HOUR: ${CREATE_RATE_PER_HOUR:-5}
+      KEY_RATE_PER_HOUR: ${KEY_RATE_PER_HOUR:-30}
+      JOIN_KEY_TTL: ${JOIN_KEY_TTL:-24h}
+      IDLE_AFTER: ${IDLE_AFTER:-720h}
+    ports:
+      - "8081:8081"
+
+volumes:
+  headscale-data:
