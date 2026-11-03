@@ -49,11 +49,14 @@ func (l *Limiter) Allow(key string) (ok bool, retryAfter time.Duration) {
 	l.trim(key, now)
 	ev, known := l.events[key]
 	if !known && len(l.events) >= l.maxKeys {
-		// Expired keys may still await the periodic sweep; clear them first.
-		for k := range l.events {
-			l.trim(k, now)
+		// Expired keys may still await the periodic sweep; clear them first, but at most once a
+		// second: under a flood of new keys an O(n) sweep per refused request is the attack.
+		if now.Sub(l.lastSweep) >= time.Second {
+			for k := range l.events {
+				l.trim(k, now)
+			}
+			l.lastSweep = now
 		}
-		l.lastSweep = now
 		if len(l.events) >= l.maxKeys {
 			return false, fullRetryAfter
 		}

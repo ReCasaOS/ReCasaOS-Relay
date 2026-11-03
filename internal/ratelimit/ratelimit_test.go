@@ -87,3 +87,26 @@ func TestLimiterCapsKeys(t *testing.T) {
 		t.Fatal("new key refused although old keys expired")
 	}
 }
+
+// At the cap, a refused new key does not pay a full sweep again within a second of the last one.
+func TestLimiterAtCapSweepsAtMostOncePerSecond(t *testing.T) {
+	c := &clock{time.Unix(1_800_000_000, 0)}
+	start := c.t
+	l := New(5, c.now)
+	l.maxKeys = 2
+	l.Allow("a") // first call sweeps: lastSweep = start
+	c.t = start.Add(59 * time.Minute)
+	l.Allow("b") // periodic sweep: lastSweep = start+59m
+	c.t = start.Add(window - 500*time.Millisecond)
+	if ok, _ := l.Allow("c"); ok {
+		t.Fatal("new key admitted at the cap") // at-cap sweep runs, a is still live
+	}
+	c.t = start.Add(window + 100*time.Millisecond) // a has expired, last sweep 0.6 s ago
+	if ok, _ := l.Allow("c"); ok {
+		t.Fatal("at-cap sweep ran again within a second")
+	}
+	c.t = start.Add(window + 600*time.Millisecond) // 1.1 s since the last sweep
+	if ok, _ := l.Allow("c"); !ok {
+		t.Fatal("new key refused although a sweep is due and a key expired")
+	}
+}
