@@ -90,6 +90,10 @@ Every `GC_INTERVAL` the service (1) marks every fleet that has an online node as
 
 Each fleet is a Headscale user `f-<fleet id>`. The enrolment service owns Headscale's access policy and rewrites it from **all** fleets in its store after every fleet creation and deletion and on every janitor pass: one group per fleet holding only that user, and one rule per group, `accept group:u -> group:u:*`. No wildcard, no autogroup, no rule naming two groups. With zero fleets the policy is an explicit empty `acls` list (a missing policy would allow everything). It is applied, with retries, **before** the service starts listening, and the service exits if it cannot. Do not edit the policy in Headscale by hand: the next sync overwrites it.
 
+## Relayed traffic and quotas
+
+Metering of relayed (DERP) traffic was investigated in [docs/metering.md](docs/metering.md): the embedded DERP cannot be metered; a per-fleet monthly quota needs a standalone `derper`, planned as a follow-up.
+
 ## Development
 
 ```

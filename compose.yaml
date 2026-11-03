@@ -1,6 +1,6 @@
 # DERP: the "derp" role is Headscale's embedded DERP server (see headscale/config.yaml), so it is
-# not a separate service for now; its STUN port is published below. Revisit with a standalone
-# derper after the load tests.
+# not a separate service for now; its STUN port is published below. A standalone derper is needed
+# for per-fleet traffic metering and is planned as a follow-up: see docs/metering.md.
 services:
   headscale:
     image: headscale/headscale:v0.29.7
