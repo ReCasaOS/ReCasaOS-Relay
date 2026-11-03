@@ -222,6 +222,10 @@ func (h *fleetsHandler) createKey(w http.ResponseWriter, r *http.Request) {
 	if err := h.deps.Store.RecordKey(ctx, f.ID, hex.EncodeToString(sum[:]), expires); err != nil {
 		log.Printf("fleet %s: record key: %v", f.ID, err)
 	}
+	// The owner is active: a fleet asking for a key must not look idle to the janitor.
+	if err := h.deps.Store.Touch(ctx, f.ID, h.deps.Now()); err != nil {
+		log.Printf("fleet %s: touch: %v", f.ID, err)
+	}
 	writeJSON(w, http.StatusCreated, map[string]string{"key": key, "expires_at": expires.Format(time.RFC3339)})
 }
 

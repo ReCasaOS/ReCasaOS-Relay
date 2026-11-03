@@ -42,7 +42,7 @@ func (l *Log) Reset() {
 
 // HS behaves like Headscale where it matters here: a user that still owns nodes cannot be deleted,
 // deleting a user drops its keys, and unknown nodes, keys and users are accepted silently.
-// Operations are logged as: nodes, node:<host>, user, keys, key:<id>, create-key, policy.
+// Operations are logged as: nodes, node:<id> (DeleteNodeByID), nodes-named:<host> (DeleteNode), user, keys, key:<id>, create-key, policy.
 type HS struct {
 	headscale.API // anything not overridden panics: the code under test must not call it
 	Log           *Log
@@ -55,6 +55,7 @@ type HS struct {
 	fail  map[string]error
 	left  map[string]int // remaining failures for an op failing a limited number of times
 	nextK int
+	nextN int
 
 	// Hook, when set, runs at the start of the named operation, outside any lock; a test uses it to
 	// block an operation. The op names are those of the log, without the argument.
@@ -100,11 +101,27 @@ func (h *HS) enter(op, entry string) error {
 // AddUser registers a user (as CreateUser would).
 func (h *HS) AddUser(u string) { h.mu.Lock(); h.users[u] = true; h.mu.Unlock() }
 
-func (h *HS) AddNode(user, host string, online bool) {
+// AddNode adds a node and returns its id. Like Headscale, it allows several nodes of one user to
+// share a hostname.
+func (h *HS) AddNode(user, host string, online bool) string {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.users[user] = true
-	h.nodes[user] = append(h.nodes[user], headscale.Node{Hostname: host, Online: online})
-	h.mu.Unlock()
+	h.nextN++
+	id := strconv.Itoa(h.nextN)
+	h.nodes[user] = append(h.nodes[user], headscale.Node{ID: id, Hostname: host, Online: online})
+	return id
+}
+
+// SetOnline changes the online flag of every node of the user with that hostname.
+func (h *HS) SetOnline(user, host string, online bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i := range h.nodes[user] {
+		if h.nodes[user][i].Hostname == host {
+			h.nodes[user][i].Online = online
+		}
+	}
 }
 
 // AddKey adds a key owned by user and returns its id.
@@ -135,8 +152,9 @@ func (h *HS) ListNodes(_ context.Context, user string) ([]headscale.Node, error)
 	return append([]headscale.Node(nil), h.nodes[user]...), nil
 }
 
+// DeleteNode removes every node of the user with that hostname.
 func (h *HS) DeleteNode(_ context.Context, user, host string) error {
-	if err := h.enter("node", "node:"+host); err != nil {
+	if err := h.enter("nodes-named", "nodes-named:"+host); err != nil {
 		return err
 	}
 	h.mu.Lock()
@@ -148,6 +166,25 @@ func (h *HS) DeleteNode(_ context.Context, user, host string) error {
 		}
 	}
 	h.nodes[user] = keep
+	return nil
+}
+
+// DeleteNodeByID removes exactly the node with that id.
+func (h *HS) DeleteNodeByID(_ context.Context, id string) error {
+	if err := h.enter("node", "node:"+id); err != nil {
+		return err
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for u, ns := range h.nodes {
+		var keep []headscale.Node
+		for _, n := range ns {
+			if n.ID != id {
+				keep = append(keep, n)
+			}
+		}
+		h.nodes[u] = keep
+	}
 	return nil
 }
 
@@ -226,11 +263,37 @@ type Store struct {
 	store.Store
 	Log *Log
 
-	mu  sync.Mutex
-	err error
+	// OnFleet, when set, runs after each Fleet lookup has read its row, so a test can change the
+	// fleet between that read and whatever the caller does next.
+	OnFleet func(id string)
+
+	mu       sync.Mutex
+	err      error
+	touchErr error
 }
 
 func (s *Store) FailDelete(err error) { s.mu.Lock(); s.err = err; s.mu.Unlock() }
+
+// FailTouch makes Touch return err (nil: works again).
+func (s *Store) FailTouch(err error) { s.mu.Lock(); s.touchErr = err; s.mu.Unlock() }
+
+func (s *Store) Touch(ctx context.Context, id string, at time.Time) error {
+	s.mu.Lock()
+	err := s.touchErr
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return s.Store.Touch(ctx, id, at)
+}
+
+func (s *Store) Fleet(ctx context.Context, id string) (store.Fleet, error) {
+	f, err := s.Store.Fleet(ctx, id)
+	if s.OnFleet != nil {
+		s.OnFleet(id)
+	}
+	return f, err
+}
 
 func (s *Store) DeleteFleet(ctx context.Context, id string) error {
 	s.Log.Add("row")

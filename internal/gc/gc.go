@@ -56,6 +56,7 @@ func Tick(ctx context.Context, d Deps) {
 	}
 	users := make(map[string]bool, len(all))
 	checked := make(map[string]bool, len(all)) // fleets whose nodes were read in this pass
+	online := map[string]bool{}                // fleets with an online node in this pass, touched or not
 	for _, f := range all {
 		users[f.HeadscaleUser] = true
 		nodes, err := hs.ListNodes(ctx, f.HeadscaleUser)
@@ -66,6 +67,7 @@ func Tick(ctx context.Context, d Deps) {
 		checked[f.ID] = true
 		for _, n := range nodes {
 			if n.Online {
+				online[f.ID] = true // even if Touch fails below: the row is stale, the fleet is not idle
 				if err := st.Touch(ctx, f.ID, now); err != nil && !errors.Is(err, store.ErrNotFound) {
 					log.Printf("gc: fleet %s: touch: %v", f.ID, err)
 				}
@@ -74,13 +76,14 @@ func Tick(ctx context.Context, d Deps) {
 		}
 	}
 
-	idle, err := st.IdleFleets(ctx, now.Add(-d.IdleAfter))
+	cutoff := now.Add(-d.IdleAfter)
+	idle, err := st.IdleFleets(ctx, cutoff)
 	if err != nil {
 		log.Printf("gc: idle fleets: %v", err)
 	}
 	for _, id := range idle {
 		// Never delete on a guess: a fleet whose nodes could not be read this pass may well be online.
-		if !checked[id] {
+		if !checked[id] || online[id] {
 			continue
 		}
 		f, err := st.Fleet(ctx, id)
@@ -88,12 +91,16 @@ func Tick(ctx context.Context, d Deps) {
 			log.Printf("gc: fleet %s: %v", id, err)
 			continue
 		}
+		// Decided again under the fleet's lock: this pass's view may be minutes old.
 		rctx, cancel := context.WithTimeout(ctx, fleets.RemoveTimeout)
-		err = d.Remover.Remove(rctx, f)
+		removed, err := d.Remover.RemoveIfIdle(rctx, f, cutoff)
 		cancel()
 		if err != nil {
 			log.Printf("gc: fleet %s: delete: %v", id, err)
 			continue
+		}
+		if !removed {
+			continue // active again since it was read
 		}
 		delete(users, f.HeadscaleUser) // its keys went with it
 		log.Printf("gc: fleet %s deleted after %s idle", id, d.IdleAfter)

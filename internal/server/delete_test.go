@@ -92,7 +92,7 @@ func TestDeleteFleetIsIdempotent(t *testing.T) {
 			t.Fatalf("status %d, body %q", rec.Code, rec.Body)
 		}
 		// Nodes, then the user, then the leftover keys, then the store row, then the policy.
-		if got, want := d.log.String(), "nodes,node:box-a,node:box-b,user,keys,row,sync"; got != want {
+		if got, want := d.log.String(), "nodes,node:1,node:2,user,keys,row,sync"; got != want {
 			t.Fatalf("calls = %s, want %s", got, want)
 		}
 		if d.fleetExists(t) || d.hs.HasUser(d.user) || d.hs.NodeCount(d.user) != 0 {
@@ -258,7 +258,7 @@ func TestRemoveNodeHostnameValidation(t *testing.T) {
 func TestRemoveNodeUpstreamErrorIsGeneric(t *testing.T) {
 	d := setupDel(t, nil)
 	d.hs.AddNode(d.user, "box-a", true)
-	d.hs.Fail("node", &headscale.APIError{Status: 500, Message: "db password is hunter2"})
+	d.hs.Fail("nodes-named", &headscale.APIError{Status: 500, Message: "db password is hunter2"})
 	rec := d.removeNode(d.secret, "box-a")
 	if rec.Code != http.StatusBadGateway || strings.Contains(rec.Body.String(), "hunter2") {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
@@ -445,5 +445,56 @@ func TestQuotaReadsKeysBeforeNodes(t *testing.T) {
 	}
 	if q.creates != 0 {
 		t.Fatal("a key was created beyond the quota")
+	}
+}
+
+// Headscale lets two nodes of one user share a hostname (live: both listed as "name":"dup").
+func TestDuplicateHostnames(t *testing.T) {
+	t.Run("deleting the fleet removes both, by id", func(t *testing.T) {
+		d := setupDel(t, nil)
+		a := d.hs.AddNode(d.user, "dup", true)
+		b := d.hs.AddNode(d.user, "dup", false)
+		d.log.Reset()
+		if rec := d.deleteFleet(d.secret); rec.Code != http.StatusNoContent {
+			t.Fatalf("status %d", rec.Code)
+		}
+		if got, want := d.log.String(), "nodes,node:"+a+",node:"+b+",user,keys,row,sync"; got != want {
+			t.Fatalf("calls = %s, want %s", got, want)
+		}
+		if d.fleetExists(t) || d.hs.HasUser(d.user) {
+			t.Fatal("fleet not deleted")
+		}
+	})
+	t.Run("the node endpoint removes every node of that name", func(t *testing.T) {
+		d := setupDel(t, nil)
+		d.hs.AddNode(d.user, "dup", true)
+		d.hs.AddNode(d.user, "dup", true)
+		d.hs.AddNode(d.user, "keep", true)
+		if rec := d.removeNode(d.secret, "dup"); rec.Code != http.StatusNoContent {
+			t.Fatalf("status %d", rec.Code)
+		}
+		if d.hs.NodeCount(d.user) != 1 {
+			t.Fatalf("%d nodes left, want only \"keep\"", d.hs.NodeCount(d.user))
+		}
+	})
+}
+
+func TestKeyCreationTouchesTheFleet(t *testing.T) {
+	e := setupKeys(t, nil)
+	old := now0.Add(-100 * 24 * time.Hour)
+	if err := e.st.Touch(context.Background(), e.id, old); err != nil {
+		t.Fatal(err)
+	}
+	if rec := e.key("wrong", ip1); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if f, _ := e.st.Fleet(context.Background(), e.id); !f.LastOnline.Equal(old) {
+		t.Fatalf("a refused request touched the fleet: %v", f.LastOnline)
+	}
+	if rec := e.key(e.secret, ip1); rec.Code != http.StatusCreated {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if f, _ := e.st.Fleet(context.Background(), e.id); !f.LastOnline.Equal(now0) {
+		t.Fatalf("last online = %v, want %v", f.LastOnline, now0)
 	}
 }

@@ -4,6 +4,7 @@ package fleets
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -74,53 +75,80 @@ type Remover struct {
 // Remove deletes the fleet from Headscale and the store while holding the fleet's lock.
 //
 // The order matters because Headscale refuses to delete a user that still owns nodes and because a
-// failure must leave something to retry with: nodes, then the user, then any pre-auth key still
-// listed for it, then the store row (the secret the client retries with) last. Any failure before the
-// row is gone returns an error and keeps the row; every step accepts "already gone", so a retry
-// resumes where the last attempt stopped. A failing policy sync does not undo a deletion that is
-// complete (the row is gone, and a policy still naming a deleted user lets nobody through); it is
-// logged and the janitor's next tick pushes the policy again.
+// failure must leave something to retry with: nodes (by id: hostnames are not unique), then the
+// user, then any pre-auth key still listed for it, then the store row (the secret the client retries
+// with) last. Any failure before the row is gone returns an error and keeps the row; every step
+// accepts "already gone", so a retry resumes where the last attempt stopped. A failing policy sync
+// does not undo a deletion that is complete (the row is gone, and a policy still naming a deleted
+// user lets nobody through); it is logged and the janitor's next tick pushes the policy again.
 func (r *Remover) Remove(ctx context.Context, f store.Fleet) error {
+	_, err := r.remove(ctx, f, nil)
+	return err
+}
+
+// RemoveIfIdle is Remove for the janitor: under the lock it first checks again that the fleet is
+// still idle, and does nothing (removed false, no error) if its row was touched since idleBefore or
+// if any of its nodes is online right now. The janitor's own reading of the fleet may be a whole
+// pass old, and a key request, which waits for this lock, counts as activity.
+func (r *Remover) RemoveIfIdle(ctx context.Context, f store.Fleet, idleBefore time.Time) (removed bool, err error) {
+	return r.remove(ctx, f, &idleBefore)
+}
+
+func (r *Remover) remove(ctx context.Context, f store.Fleet, idleBefore *time.Time) (bool, error) {
 	unlock, err := r.Locks.Lock(ctx, f.ID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer unlock()
 
+	if idleBefore != nil {
+		cur, err := r.Store.Fleet(ctx, f.ID)
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil // deleted meanwhile
+		}
+		if err != nil {
+			return false, fmt.Errorf("re-read fleet: %w", err)
+		}
+		if !cur.LastOnline.Before(*idleBefore) {
+			return false, nil
+		}
+	}
 	nodes, err := r.Headscale.ListNodes(ctx, f.HeadscaleUser)
 	if err != nil {
-		return fmt.Errorf("list nodes: %w", err)
+		return false, fmt.Errorf("list nodes: %w", err)
 	}
-	done := map[string]bool{}
-	for _, n := range nodes {
-		if done[n.Hostname] {
-			continue
+	if idleBefore != nil {
+		for _, n := range nodes {
+			if n.Online {
+				return false, nil
+			}
 		}
-		done[n.Hostname] = true
-		if err := r.Headscale.DeleteNode(ctx, f.HeadscaleUser, n.Hostname); err != nil {
-			return fmt.Errorf("delete node: %w", err)
+	}
+	for _, n := range nodes {
+		if err := r.Headscale.DeleteNodeByID(ctx, n.ID); err != nil {
+			return false, fmt.Errorf("delete node: %w", err)
 		}
 	}
 	if err := r.Headscale.DeleteUser(ctx, f.HeadscaleUser); err != nil {
-		return fmt.Errorf("delete user: %w", err)
+		return false, fmt.Errorf("delete user: %w", err)
 	}
 	// Headscale drops a user's keys with the user (checked live); this catches any it did not.
 	keys, err := r.Headscale.ListPreAuthKeys(ctx, f.HeadscaleUser)
 	if err != nil {
-		return fmt.Errorf("list keys: %w", err)
+		return false, fmt.Errorf("list keys: %w", err)
 	}
 	for _, k := range keys {
 		if err := r.Headscale.DeletePreAuthKey(ctx, k.ID); err != nil {
-			return fmt.Errorf("delete key: %w", err)
+			return false, fmt.Errorf("delete key: %w", err)
 		}
 	}
 	if err := r.Store.DeleteFleet(ctx, f.ID); err != nil {
-		return fmt.Errorf("delete fleet row: %w", err)
+		return false, fmt.Errorf("delete fleet row: %w", err)
 	}
 	if r.Policy != nil {
 		if err := r.Policy.Sync(ctx); err != nil {
 			log.Printf("fleet %s removed, policy sync failed (the next janitor tick retries): %v", f.ID, err)
 		}
 	}
-	return nil
+	return true, nil
 }

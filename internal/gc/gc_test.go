@@ -118,7 +118,7 @@ func TestGCDeletesOnlyIdleFleets(t *testing.T) {
 	// One read of the nodes per fleet, then for each deleted fleet: nodes, user, keys, row, sync;
 	// then the key sweep and a last sync.
 	want := "nodes,nodes,nodes,nodes,nodes," + // the five fleets, a to e
-		"nodes,node:box-o,user,keys,row,sync," + // d-over, in order
+		"nodes,node:4,user,keys,row,sync," + // d-over, in order
 		"nodes,user,keys,row,sync," + // e-empty
 		"allkeys,sync"
 	if got := r.log.String(); got != want {
@@ -302,5 +302,77 @@ func TestRunTicksAndShutdownWaitsForTheTickInFlight(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if strings.Count(r.log.String(), "sync") != n {
 		t.Fatal("ticks continued after Run returned")
+	}
+}
+
+// A box is online but the stale row cannot be refreshed: the fleet is still not idle.
+func TestGCFailedTouchDoesNotMakeAnOnlineFleetIdle(t *testing.T) {
+	r := newRig(t)
+	u := r.fleet(t, "live", idleAfter+time.Hour)
+	r.hs.AddNode(u, "box", true)
+	r.d.Remover.Store.(*fakes.Store).FailTouch(errors.New("disk full"))
+	Tick(bg, r.d)
+	if !r.exists("live") || !r.hs.HasUser(u) || r.hs.NodeCount(u) != 1 {
+		t.Fatalf("a fleet with an online box was deleted: %s", r.log)
+	}
+	if strings.Contains(r.log.String(), "user") {
+		t.Fatalf("calls: %s", r.log)
+	}
+}
+
+// The pass read the fleet as idle; before the deletion gets the lock a box comes online.
+func TestGCRechecksNodesUnderTheLock(t *testing.T) {
+	r := newRig(t)
+	u := r.fleet(t, "idle", idleAfter+time.Hour)
+	r.hs.AddNode(u, "box", false)
+	var calls int
+	r.hs.Hook = func(op string) {
+		if op == "nodes" {
+			if calls++; calls == 2 { // the first read is the pass's, the second is the deletion's
+				r.hs.SetOnline(u, "box", true)
+			}
+		}
+	}
+	Tick(bg, r.d)
+	if !r.exists("idle") || r.hs.NodeCount(u) != 1 || !r.hs.HasUser(u) {
+		t.Fatalf("a fleet whose box came online was deleted: %s", r.log)
+	}
+	if strings.Contains(r.log.String(), "user") || strings.Contains(r.log.String(), "row") {
+		t.Fatalf("calls: %s", r.log)
+	}
+}
+
+// The pass read the fleet as idle; before the deletion gets the lock the owner asks for a join key
+// (which touches the row).
+func TestGCRechecksTheRowUnderTheLock(t *testing.T) {
+	r := newRig(t)
+	r.fleet(t, "idle", idleAfter+time.Hour)
+	fst := r.d.Remover.Store.(*fakes.Store)
+	var once sync.Once
+	fst.OnFleet = func(id string) {
+		// Runs after the janitor's own lookup of the row, before RemoveIfIdle re-reads it.
+		once.Do(func() {
+			if err := r.st.Touch(bg, id, t0); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	Tick(bg, r.d)
+	if !r.exists("idle") {
+		t.Fatalf("a fleet touched after the pass read it was deleted: %s", r.log)
+	}
+	if strings.Contains(r.log.String(), "row") {
+		t.Fatalf("calls: %s", r.log)
+	}
+}
+
+func TestGCDeletesAFleetWithDuplicateHostnames(t *testing.T) {
+	r := newRig(t)
+	u := r.fleet(t, "dup", idleAfter+time.Hour)
+	r.hs.AddNode(u, "same", false)
+	r.hs.AddNode(u, "same", false)
+	Tick(bg, r.d)
+	if r.exists("dup") || r.hs.HasUser(u) {
+		t.Fatalf("not deleted: %s", r.log)
 	}
 }
