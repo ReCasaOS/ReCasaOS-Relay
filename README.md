@@ -74,8 +74,20 @@ Fleet creation is limited per client IP (per /64 for IPv6). The enrolment servic
 | `TRUSTED_PROXY_HEADER` | empty (compose: `X-Client-IP`) | header set by the trusted proxy in front of the service; its last value is the client IP used for rate limits. Empty: the TCP peer address is used |
 | `LISTEN_ADDR` | `:8081` | listen address |
 
+## Fleet isolation
+
+Each fleet is a Headscale user `f-<fleet id>`. The enrolment service owns Headscale's access policy and rewrites it from **all** fleets in its store after every fleet creation (and, in the cleanup task, deletion): one group per fleet holding only that user, and one rule per group, `accept group:u -> group:u:*`. No wildcard, no autogroup, no rule naming two groups. With zero fleets the policy is an explicit empty `acls` list (a missing policy would allow everything). It is applied, with retries, **before** the service starts listening, and the service exits if it cannot. Do not edit the policy in Headscale by hand: the next sync overwrites it.
+
 ## Development
 
 ```
 go vet ./... && go test ./... && docker compose config -q
 ```
+
+The isolation proof needs Docker (it starts the stack from `compose.yaml` plus `e2e/compose.e2e.yaml`, a TLS front for `relay.test`, and one tailscaled container per node) and is not part of `go test ./...`:
+
+```
+go test -tags e2e ./e2e -run TestFleetsAreIsolated -v -timeout 15m
+```
+
+Set `E2E_NEUTRALISE_POLICY=allow-all` to replace the policy mid-test: the test must then fail.

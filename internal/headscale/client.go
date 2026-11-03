@@ -20,12 +20,14 @@
 //     parameter (the swagger lists none and ?user= was seen to be ignored): it returns the keys of
 //     every user, with the key text masked, so the caller filters by user.name.
 //
-// Not exercised live (no node could be registered, a tailscale client could not reach the server
-// from the test network): that "used" turns true once a key registers a node and that a second
-// registration with it is refused (both are Headscale's own semantics for reusable=false), the fields of a real node in the node list
-// (taken from the OpenAPI definition v1Node: id, name, ipAddresses, online, user.name) and
-// DELETE /api/v1/node/{id} (unknown id -> 404 {"code":5,"message":"node not found"}). Headscale
-// is also expected to refuse deleting a user that still owns nodes; delete the nodes first.
+// Verified later against real tailscaled nodes (e2e/isolation_test.go): "used" turns true once a
+// key registers a node (a fresh key lists used=false); deleting a user without nodes also deletes
+// its pre-auth keys; deleting a user that still owns nodes is refused (500 "user not empty:
+// node(s) found") and keeps the keys; after the nodes are deleted the user and its keys go.
+//
+// Not exercised live: that a second registration with a used key is refused (Headscale's own
+// semantics for reusable=false) and DELETE /api/v1/node/{id} for an unknown id (expected 404
+// {"code":5,"message":"node not found"}).
 package headscale
 
 import (
