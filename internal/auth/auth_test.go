@@ -4,9 +4,11 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -46,10 +48,10 @@ func TestCreateFleetRejectsReplayAndSkew(t *testing.T) {
 	resetSeen()
 	pub, priv := keys(t)
 
-	if _, err := VerifyBox(signed(t, pub, priv, t0.Add(-5*time.Minute)), t0); err == nil {
+	if _, err := VerifyBox(signed(t, pub, priv, t0.Add(-5*time.Minute)), t0); !errors.Is(err, errSkew) {
 		t.Fatal("5 min old accepted")
 	}
-	if _, err := VerifyBox(signed(t, pub, priv, t0.Add(5*time.Minute)), t0); err == nil {
+	if _, err := VerifyBox(signed(t, pub, priv, t0.Add(5*time.Minute)), t0); !errors.Is(err, errSkew) {
 		t.Fatal("5 min in the future accepted")
 	}
 	// Boundary: exactly 120 s either way is still fine.
@@ -64,7 +66,7 @@ func TestCreateFleetRejectsReplayAndSkew(t *testing.T) {
 	if _, err := VerifyBox(r, t0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifyBox(r, t0.Add(30*time.Second)); err == nil {
+	if _, err := VerifyBox(r, t0.Add(30*time.Second)); !errors.Is(err, errReplay) {
 		t.Fatal("replay accepted")
 	}
 }
@@ -145,5 +147,87 @@ func TestSecret(t *testing.T) {
 		if CheckSecret(c[0], c[1]) {
 			t.Fatalf("CheckSecret(%q,%q) = true", c[0], c[1])
 		}
+	}
+}
+
+// altSpelling returns a non-canonical spelling of s: same bytes under the lenient
+// decoder, but with the unused trailing bits of the last character set.
+func altSpelling(t *testing.T, s string) string {
+	t.Helper()
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	i := strings.IndexByte(alphabet, s[len(s)-1])
+	alt := s[:len(s)-1] + string(alphabet[i|1])
+	if alt == s {
+		alt = s[:len(s)-1] + string(alphabet[i|2])
+	}
+	a, _ := base64.RawURLEncoding.DecodeString(alt)
+	b, _ := base64.RawURLEncoding.DecodeString(s)
+	if alt == s || string(a) != string(b) {
+		t.Fatal("helper did not produce an equivalent non-canonical spelling")
+	}
+	return alt
+}
+
+func TestNonCanonicalBase64Rejected(t *testing.T) {
+	pub, priv := keys(t)
+	for _, h := range []string{"X-Box-Signature", "X-Box-Key"} {
+		t.Run(h, func(t *testing.T) {
+			resetSeen()
+			r := signed(t, pub, priv, t0)
+			r.Header.Set(h, altSpelling(t, r.Header.Get(h)))
+			if _, err := VerifyBox(r, t0); !errors.Is(err, errBadHeaders) {
+				t.Fatalf("err = %v, want errBadHeaders", err)
+			}
+		})
+	}
+	// Replay path: after the original is accepted, an alternate spelling must not get through.
+	resetSeen()
+	r := signed(t, pub, priv, t0)
+	if _, err := VerifyBox(r, t0); err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("X-Box-Signature", altSpelling(t, r.Header.Get("X-Box-Signature")))
+	if _, err := VerifyBox(r, t0); err == nil {
+		t.Fatal("alternate spelling of a used signature accepted")
+	}
+}
+
+func TestSweepIsAmortisedAndExpires(t *testing.T) {
+	resetSeen()
+	pub, priv := keys(t)
+	size := func() int { mu.Lock(); defer mu.Unlock(); return len(seen) }
+	count := func() int { mu.Lock(); defer mu.Unlock(); return sweeps }
+
+	// Ten distinct signatures (distinct box times) verified within one sweep interval.
+	now := t0.Add(500 * time.Millisecond)
+	for i := 0; i < 10; i++ {
+		if _, err := VerifyBox(signed(t, pub, priv, t0.Add(-time.Duration(i)*time.Second)), now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if size() != 10 || count() != 1 {
+		t.Fatalf("size=%d sweeps=%d, want 10 and 1", size(), count())
+	}
+	// Long after the latest expiry, the next sweep drops them all.
+	later := t0.Add(10 * time.Minute)
+	if _, err := VerifyBox(signed(t, pub, priv, later), later); err != nil {
+		t.Fatal(err)
+	}
+	if size() != 1 || count() != 2 {
+		t.Fatalf("size=%d sweeps=%d, want 1 and 2", size(), count())
+	}
+
+	// Exact expiry rule: at boxTime+120s the entry is still held (a sweep runs here).
+	resetSeen()
+	r := signed(t, pub, priv, t0)
+	if _, err := VerifyBox(r, t0); err != nil {
+		t.Fatal(err)
+	}
+	edge := t0.Add(120 * time.Second)
+	if _, err := VerifyBox(signed(t, pub, priv, edge), edge); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyBox(r, edge); !errors.Is(err, errReplay) {
+		t.Fatalf("entry pruned while still valid: %v", err)
 	}
 }

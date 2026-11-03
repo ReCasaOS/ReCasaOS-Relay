@@ -65,3 +65,25 @@ func TestLimiterNonPositiveAlwaysRefuses(t *testing.T) {
 		t.Fatalf("ok=%v retry=%v", ok, retry)
 	}
 }
+
+func TestLimiterCapsKeys(t *testing.T) {
+	c := &clock{time.Unix(1_800_000_000, 0)}
+	l := New(2, c.now)
+	l.maxKeys = 2
+	l.Allow("a")
+	l.Allow("b")
+	if ok, retry := l.Allow("c"); ok || retry != time.Minute {
+		t.Fatalf("new key admitted when full: ok=%v retry=%v", ok, retry)
+	}
+	if ok, _ := l.Allow("a"); !ok {
+		t.Fatal("existing key refused when full")
+	}
+	if len(l.events) != 2 {
+		t.Fatalf("%d keys, want 2", len(l.events))
+	}
+	// Old keys expire; the cap path sweeps them before refusing, so a new key fits.
+	c.t = c.t.Add(window)
+	if ok, _ := l.Allow("c"); !ok {
+		t.Fatal("new key refused although old keys expired")
+	}
+}

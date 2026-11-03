@@ -6,10 +6,19 @@ import (
 	"time"
 )
 
-const window = time.Hour
+const (
+	window = time.Hour
+	// defaultMaxKeys caps distinct live keys so attacker-chosen keys cannot grow the map without bound.
+	defaultMaxKeys = 100_000
+	fullRetryAfter = time.Minute
+)
 
-// Limiter allows at most perHour events per key in any rolling hour.
+// Limiter allows at most perHour events per key in any rolling hour, over at
+// most maxKeys distinct live keys (a new key is refused when full; existing keys
+// keep working). Callers must key by client IP, NOT by box public key, which is
+// free to mint.
 type Limiter struct {
+	maxKeys   int
 	mu        sync.Mutex
 	perHour   int
 	now       func() time.Time
@@ -19,7 +28,7 @@ type Limiter struct {
 
 // New returns a Limiter. perHour <= 0 means every call is refused (retryAfter 1h).
 func New(perHour int, now func() time.Time) *Limiter {
-	return &Limiter{perHour: perHour, now: now, events: map[string][]time.Time{}}
+	return &Limiter{maxKeys: defaultMaxKeys, perHour: perHour, now: now, events: map[string][]time.Time{}}
 }
 
 // Allow records an event for key if under the limit. When refused, retryAfter is
@@ -38,7 +47,17 @@ func (l *Limiter) Allow(key string) (ok bool, retryAfter time.Duration) {
 		l.lastSweep = now
 	}
 	l.trim(key, now)
-	ev := l.events[key]
+	ev, known := l.events[key]
+	if !known && len(l.events) >= l.maxKeys {
+		// Expired keys may still await the periodic sweep; clear them first.
+		for k := range l.events {
+			l.trim(k, now)
+		}
+		l.lastSweep = now
+		if len(l.events) >= l.maxKeys {
+			return false, fullRetryAfter
+		}
+	}
 	if len(ev) >= l.perHour {
 		return false, (ev[0].Add(window).Sub(now) + time.Second - 1).Truncate(time.Second)
 	}

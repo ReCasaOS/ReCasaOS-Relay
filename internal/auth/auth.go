@@ -24,21 +24,35 @@ var (
 	errBadSig     = errors.New("auth: bad box signature")
 	errReplay     = errors.New("auth: signature already used")
 
-	enc = base64.RawURLEncoding
+	// Strict rejects non-canonical spellings (non-zero trailing bits), which would
+	// otherwise let one signature be replayed under 15 alternate encodings.
+	enc = base64.RawURLEncoding.Strict()
 
-	// seen maps a used signature to the moment it can no longer pass the time check.
-	mu   sync.Mutex
-	seen = map[string]time.Time{}
+	// seen maps a used signature (decoded bytes, not the header text) to the moment
+	// it can no longer pass the time check. TLS is mandatory in front of this
+	// service (a signature is bearer-like within the window) and a restart empties
+	// seen, so a replay is possible for up to 120 s after one.
+	mu        sync.Mutex
+	seen      = map[string]time.Time{}
+	lastSweep time.Time
+	sweeps    int // test hook: number of full sweeps run
 )
+
+// sweepEvery bounds how often seen is scanned, keeping verification amortised O(1).
+const sweepEvery = time.Second
 
 func resetSeen() {
 	mu.Lock()
 	seen = map[string]time.Time{}
+	lastSweep = time.Time{}
+	sweeps = 0
 	mu.Unlock()
 }
 
 // VerifyBox authenticates a POST /v1/fleets request signed by a box and returns
 // the box's public key. A signature is accepted once, within ±120 s of now.
+// Callers that key anything by box identity must use the returned decoded key
+// bytes, never the X-Box-Key header text.
 func VerifyBox(r *http.Request, now time.Time) (ed25519.PublicKey, error) {
 	if r.Method != http.MethodPost || r.URL.Path != "/v1/fleets" {
 		return nil, errBadRequest
@@ -47,8 +61,7 @@ func VerifyBox(r *http.Request, now time.Time) (ed25519.PublicKey, error) {
 	if err != nil || len(pub) != ed25519.PublicKeySize {
 		return nil, errBadHeaders
 	}
-	sigStr := r.Header.Get("X-Box-Signature")
-	sig, err := enc.DecodeString(sigStr)
+	sig, err := enc.DecodeString(r.Header.Get("X-Box-Signature"))
 	if err != nil || len(sig) != ed25519.SignatureSize {
 		return nil, errBadHeaders
 	}
@@ -67,15 +80,19 @@ func VerifyBox(r *http.Request, now time.Time) (ed25519.PublicKey, error) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	for k, exp := range seen {
-		if now.After(exp) {
-			delete(seen, k)
+	if now.Sub(lastSweep) >= sweepEvery {
+		for k, exp := range seen {
+			if now.After(exp) {
+				delete(seen, k)
+			}
 		}
+		lastSweep = now
+		sweeps++
 	}
-	if _, dup := seen[sigStr]; dup {
+	if _, dup := seen[string(sig)]; dup {
 		return nil, errReplay
 	}
-	seen[sigStr] = boxTime.Add(skew)
+	seen[string(sig)] = boxTime.Add(skew)
 	return ed25519.PublicKey(pub), nil
 }
 
