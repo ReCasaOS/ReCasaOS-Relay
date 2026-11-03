@@ -29,9 +29,13 @@
 // decimal string; an unknown id is also 200 {}; non-numeric -> 400); keys list their "id"; deleting
 // a user removes its keys even when none was deleted first.
 //
+// Checked live (Task 7 fix round): "name" is NOT unique per user. Two tailscaled with the same
+// --hostname register as two nodes with "name":"dup" and ids "1" and "2" (givenName "dup" and
+// "dup-1"), so nodes are deleted by id.
+//
 // Not exercised live: that a second registration with a used key is refused (Headscale's own
-// semantics for reusable=false) and DELETE /api/v1/node/{id} for an unknown id (expected 404
-// {"code":5,"message":"node not found"}).
+// semantics for reusable=false). DELETE /api/v1/node/{id} for an unknown id is expected to be 404
+// {"code":5,"message":"node not found"}: DeleteNodeByID treats a 404 as success (see the e2e test).
 package headscale
 
 import (
@@ -49,6 +53,7 @@ import (
 
 // Node is a machine of a fleet, as the dashboard shows it.
 type Node struct {
+	ID           string // Headscale's numeric id (a decimal string); hostnames are NOT unique
 	Hostname, IP string
 	Online       bool
 }
@@ -76,8 +81,11 @@ type API interface {
 	// DeletePreAuthKey removes a key by id; an unknown id is not an error.
 	DeletePreAuthKey(ctx context.Context, id string) error
 	ListNodes(ctx context.Context, user string) ([]Node, error)
-	// DeleteNode removes the user's node with that hostname; an unknown node is not an error.
+	// DeleteNode removes EVERY node of the user with that hostname (Headscale lets two nodes of
+	// one user share a name); an unknown hostname is not an error.
 	DeleteNode(ctx context.Context, user, hostname string) error
+	// DeleteNodeByID removes one node by its id; an unknown id is not an error.
+	DeleteNodeByID(ctx context.Context, id string) error
 	SetPolicy(ctx context.Context, policyJSON []byte) error
 }
 
@@ -294,7 +302,7 @@ func (c *Client) ListNodes(ctx context.Context, user string) ([]Node, error) {
 	}
 	out := make([]Node, 0, len(ns))
 	for _, n := range ns {
-		node := Node{Hostname: n.Name, Online: n.Online}
+		node := Node{ID: n.ID, Hostname: n.Name, Online: n.Online}
 		if len(n.IPAddresses) > 0 {
 			node.IP = n.IPAddresses[0]
 		}
@@ -310,10 +318,21 @@ func (c *Client) DeleteNode(ctx context.Context, user, hostname string) error {
 	}
 	for _, n := range ns {
 		if n.Name == hostname {
-			return c.do(ctx, http.MethodDelete, "/api/v1/node/"+url.PathEscape(n.ID), nil, nil, nil)
+			if err := c.DeleteNodeByID(ctx, n.ID); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+func (c *Client) DeleteNodeByID(ctx context.Context, id string) error {
+	err := c.do(ctx, http.MethodDelete, "/api/v1/node/"+url.PathEscape(id), nil, nil, nil)
+	var ae *APIError
+	if errors.As(err, &ae) && ae.Status == http.StatusNotFound {
+		return nil // already gone
+	}
+	return err
 }
 
 func (c *Client) SetPolicy(ctx context.Context, policyJSON []byte) error {

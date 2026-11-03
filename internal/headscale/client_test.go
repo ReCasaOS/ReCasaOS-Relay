@@ -213,7 +213,7 @@ func TestListNodes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []Node{{"box-a", "100.64.0.1", true}, {"box-b", "", false}}
+	want := []Node{{"3", "box-a", "100.64.0.1", true}, {"4", "box-b", "", false}}
 	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("got %+v, want %+v", got, want)
 	}
@@ -238,6 +238,56 @@ func TestDeleteNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.want(t, `GET /api/v1/user?name=f-abc`, `GET /api/v1/node?user=f-abc`, `DELETE /api/v1/node/4?`)
+}
+
+// Live on v0.29.7: two nodes of one user registered with the same hostname both come back with
+// "name":"dup" (ids 1 and 2); only givenName differs ("dup", "dup-1").
+const dupNodesJSON = `{"nodes":[
+ {"id":"1","name":"dup","givenName":"dup","user":` + userJSON + `,"ipAddresses":["100.64.0.1"],"online":true},
+ {"id":"2","name":"dup","givenName":"dup-1","user":` + userJSON + `,"ipAddresses":["100.64.0.2"],"online":true},
+ {"id":"3","name":"other","givenName":"other","user":` + userJSON + `,"ipAddresses":[],"online":false}]}`
+
+func TestDeleteNodeRemovesEveryNodeWithThatHostname(t *testing.T) {
+	c, f := newFake(t, map[string]reply{
+		"GET /api/v1/user":      {200, oneUser("f-abc")},
+		"GET /api/v1/node":      {200, dupNodesJSON},
+		"DELETE /api/v1/node/1": {200, `{}`},
+		"DELETE /api/v1/node/2": {200, `{}`},
+	})
+	if err := c.DeleteNode(ctx, "f-abc", "dup"); err != nil {
+		t.Fatal(err)
+	}
+	f.want(t, `GET /api/v1/user?name=f-abc`, `GET /api/v1/node?user=f-abc`, `DELETE /api/v1/node/1?`, `DELETE /api/v1/node/2?`)
+}
+
+func TestListNodesKeepsDuplicateHostnamesApartByID(t *testing.T) {
+	c, _ := newFake(t, map[string]reply{
+		"GET /api/v1/user": {200, oneUser("f-abc")},
+		"GET /api/v1/node": {200, dupNodesJSON},
+	})
+	got, err := c.ListNodes(ctx, "f-abc")
+	if err != nil || len(got) != 3 || got[0].ID != "1" || got[1].ID != "2" || got[0].Hostname != "dup" || got[1].Hostname != "dup" {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+}
+
+func TestDeleteNodeByID(t *testing.T) {
+	c, f := newFake(t, map[string]reply{"DELETE /api/v1/node/4": {200, `{}`}})
+	if err := c.DeleteNodeByID(ctx, "4"); err != nil {
+		t.Fatal(err)
+	}
+	f.want(t, `DELETE /api/v1/node/4?`)
+}
+
+func TestDeleteNodeByIDUnknownIsNotAnError(t *testing.T) {
+	c, _ := newFake(t, map[string]reply{"DELETE /api/v1/node/99": {404, `{"code":5,"message":"node not found","details":[]}`}})
+	if err := c.DeleteNodeByID(ctx, "99"); err != nil {
+		t.Fatal(err)
+	}
+	c, _ = newFake(t, map[string]reply{"DELETE /api/v1/node/99": {500, `{"code":13,"message":"boom"}`}})
+	if err := c.DeleteNodeByID(ctx, "99"); err == nil {
+		t.Fatal("a 500 must stay an error")
+	}
 }
 
 func TestDeleteNodeUnknownIsNotAnError(t *testing.T) {
