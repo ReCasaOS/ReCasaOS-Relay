@@ -28,6 +28,7 @@ type quotaHS struct {
 	keys    map[string][]headscale.PreAuthKey
 	ttls    []time.Duration
 	creates int
+	deleted []string // ids passed to DeletePreAuthKey
 	listErr error
 	now     func() time.Time
 }
@@ -58,8 +59,24 @@ func (q *quotaHS) CreatePreAuthKey(_ context.Context, user string, ttl time.Dura
 	defer q.mu.Unlock()
 	q.creates++
 	q.ttls = append(q.ttls, ttl)
-	q.keys[user] = append(q.keys[user], headscale.PreAuthKey{Expiration: q.now().Add(ttl)})
+	q.keys[user] = append(q.keys[user], headscale.PreAuthKey{ID: "c" + strconv.Itoa(q.creates), User: user, Expiration: q.now().Add(ttl)})
 	return "hskey-auth-secret-" + strconv.Itoa(q.creates), nil
+}
+
+func (q *quotaHS) DeletePreAuthKey(_ context.Context, id string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.deleted = append(q.deleted, id)
+	for u, ks := range q.keys {
+		var keep []headscale.PreAuthKey
+		for _, k := range ks {
+			if k.ID != id {
+				keep = append(keep, k)
+			}
+		}
+		q.keys[u] = keep
+	}
+	return nil
 }
 
 func (q *quotaHS) addNodes(user string, n int) {
@@ -73,6 +90,10 @@ func (q *quotaHS) addNodes(user string, n int) {
 func (q *quotaHS) addKey(user string, k headscale.PreAuthKey) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if k.ID == "" {
+		k.ID = "a" + strconv.Itoa(len(q.keys[user])) + user
+	}
+	k.User = user
 	q.keys[user] = append(q.keys[user], k)
 }
 
@@ -231,6 +252,48 @@ func TestKeyRefusedAtNodeQuota(t *testing.T) {
 			t.Fatalf("status %d", rec.Code)
 		}
 	})
+}
+
+// Pending keys have their own cap, whatever room the node quota leaves: it bounds the fleet's share
+// of Headscale's key list, which is listed whole on every quota check.
+func TestKeyRefusedAtMaxPendingKeys(t *testing.T) {
+	e := setupKeys(t, func(c *Config, _ *Deps) { c.NodesPerFleet = 50; c.MaxPendingKeys = 2 })
+	for i := 0; i < 2; i++ {
+		if rec := e.key(e.secret, ip1); rec.Code != http.StatusCreated {
+			t.Fatalf("key %d: %d", i+1, rec.Code)
+		}
+	}
+	rec := e.key(e.secret, ip1)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "unused join keys") {
+		t.Fatalf("3rd pending key = %d %s, want 409", rec.Code, rec.Body)
+	}
+	if e.q.creates != 2 {
+		t.Fatalf("%d keys created, want 2", e.q.creates)
+	}
+	// Once a key is used (its box enrolled) the slot is free again.
+	e.q.mu.Lock()
+	e.q.keys[e.user][0].Used = true
+	e.q.mu.Unlock()
+	e.q.addNodes(e.user, 1)
+	if rec := e.key(e.secret, ip1); rec.Code != http.StatusCreated {
+		t.Fatalf("after a key was used = %d, want 201", rec.Code)
+	}
+}
+
+// A key request prunes the fleet's own used and expired keys, so that between janitor passes the
+// fleet never holds more than MaxPendingKeys keys in Headscale's list.
+func TestKeyRequestPrunesTheFleetsSpentKeys(t *testing.T) {
+	e := setupKeys(t, func(c *Config, _ *Deps) { c.NodesPerFleet = 50 })
+	e.q.addKey(e.user, headscale.PreAuthKey{ID: "used", Used: true, Expiration: now0.Add(time.Hour)})
+	e.q.addKey(e.user, headscale.PreAuthKey{ID: "expired", Expiration: now0})
+	e.q.addKey(e.user, headscale.PreAuthKey{ID: "pending", Expiration: now0.Add(time.Hour)})
+	e.q.addKey("f-other", headscale.PreAuthKey{ID: "other-used", Used: true})
+	if rec := e.key(e.secret, ip1); rec.Code != http.StatusCreated {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if got := strings.Join(e.q.deleted, ","); got != "used,expired" {
+		t.Fatalf("deleted %q, want used,expired", got)
+	}
 }
 
 func TestKeyRequestsNeedTheSecret(t *testing.T) {

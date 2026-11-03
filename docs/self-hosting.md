@@ -106,6 +106,7 @@ Put them in a `.env` file next to `compose.yaml` (Compose substitutes them). An 
 | `LOGIN_SERVER` | empty | yes | **set it to your public URL**, the same as `server_url`: it is the `login_server` returned to boxes when a fleet is created. The e2e override sets both to the same URL. Left empty, boxes receive an empty value |
 | `NODES_PER_FLEET` | `50` | yes | boxes per fleet |
 | `MAX_FLEETS` | `1000` | yes | fleets the relay holds; creation answers 503 beyond. Do not raise it without reading "Capacity" in the README |
+| `MAX_PENDING_KEYS` | `5` | yes | unused join keys per fleet at once (409 beyond). Raising it or `MAX_FLEETS`: README, "Capacity" |
 | `CREATE_RATE_PER_HOUR` | `5` | yes | fleet creations per hour per client IP (IPv6: per /64, plus 10 times this per /48) |
 | `KEY_RATE_PER_HOUR` | `30` | yes | join keys per hour per fleet |
 | `AUTH_RATE_PER_HOUR` | `60` | yes | authenticated fleet requests per hour per client IP (boxes behind one NAT share it) |
@@ -204,7 +205,7 @@ In ReCasaOS, enter your public URL (`https://relay.example.org`, no path) in the
 
 ## 9. Operating notes
 
-- **Quotas and limits** (defaults, section 4): 50 boxes per fleet (a join key is refused with 409 when enrolled nodes plus unused, unexpired keys reach it), 5 fleet creations per hour per IP, 30 join-key requests per hour per fleet, 60 authenticated requests per hour per IP, join keys valid 24 h. Boxes behind one NAT share the per-IP budgets: raise `CREATE_RATE_PER_HOUR` / `AUTH_RATE_PER_HOUR` if one address serves many boxes.
+- **Quotas and limits** (defaults, section 4): 1000 fleets per relay (creation answers 503 beyond), 50 boxes per fleet (a join key is refused with 409 when enrolled nodes plus unused, unexpired keys reach it), at most 5 unused join keys per fleet at once, 5 fleet creations per hour per IP (and 50 per IPv6 /48), 30 join-key requests per hour per fleet, 60 authenticated requests per hour per IP, join keys valid 24 h. Boxes behind one NAT share the per-IP budgets: raise `CREATE_RATE_PER_HOUR` / `AUTH_RATE_PER_HOUR` if one address serves many boxes.
 - **Idle deletion:** every `GC_INTERVAL` the janitor deletes fleets with no online node for `IDLE_AFTER` (30 days by default), deletes used and expired pre-auth keys, and rewrites the access policy (README, "Janitor").
 - **Isolation:** each fleet is its own Headscale user and the service owns the access policy (deny by default, one rule per fleet).
 - **When the relay is down:** new enrolments fail, because the enrolment API and the control plane are both behind `front`. Boxes that already enrolled and have a direct peer-to-peer path do not send that traffic through the server, so those links are expected to keep working for a while; links that go through the relay stop, because the embedded DERP runs inside Headscale. Not verified: no test takes the relay down, so how long existing links last is not measured.

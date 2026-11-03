@@ -195,27 +195,30 @@ func (h *fleetsHandler) authenticate(w http.ResponseWriter, r *http.Request) (st
 	return f, true
 }
 
-// quotaUsage returns the fleet's nodes and whether one more node would exceed the quota. Unused,
-// unexpired join keys count as nodes-to-be: without that a fleet could stockpile keys (the key rate
-// limit allows many per day) and enrol beyond the quota. Used keys are not counted: their node is.
-func (h *fleetsHandler) quotaUsage(ctx context.Context, user string) (nodes []headscale.Node, full bool, err error) {
+// quotaUsage returns the fleet's nodes, its pending join keys (unused, unexpired) and the ids of
+// its spent ones (used or expired). Pending keys count as nodes-to-be against the node quota:
+// without that a fleet could stockpile keys (the key rate limit allows many per day) and enrol
+// beyond it. Used keys are not counted: their node is.
+func (h *fleetsHandler) quotaUsage(ctx context.Context, user string) (nodes []headscale.Node, pending int, spent []string, err error) {
 	// Keys first, nodes second: a box that registers between the two reads is then counted twice
 	// (its key is still pending in the first read, its node shows in the second), which only errs on
 	// the safe side. The other order would miss it entirely.
 	keys, err := h.deps.Headscale.ListPreAuthKeys(ctx, user)
 	if err != nil {
-		return nil, false, err
+		return nil, 0, nil, err
 	}
 	if nodes, err = h.deps.Headscale.ListNodes(ctx, user); err != nil {
-		return nil, false, err
+		return nil, 0, nil, err
 	}
-	now, pending := h.deps.Now(), 0
+	now := h.deps.Now()
 	for _, k := range keys {
 		if !k.Used && (k.Expiration.IsZero() || k.Expiration.After(now)) {
 			pending++
+		} else {
+			spent = append(spent, k.ID)
 		}
 	}
-	return nodes, len(nodes)+pending >= h.cfg.NodesPerFleet, nil
+	return nodes, pending, spent, nil
 }
 
 // createKey handles POST /v1/fleets/{id}/keys: a single-use join key for one more box.
@@ -239,14 +242,26 @@ func (h *fleetsHandler) createKey(w http.ResponseWriter, r *http.Request) {
 	}
 	defer unlock()
 
-	_, full, err := h.quotaUsage(ctx, f.HeadscaleUser)
+	nodes, pending, spent, err := h.quotaUsage(ctx, f.HeadscaleUser)
 	if err != nil {
 		log.Printf("fleet %s: key quota: %v", f.ID, err)
 		writeError(w, http.StatusBadGateway, "upstream error")
 		return
 	}
-	if full {
+	// Not left to the janitor alone: with this, the fleet's share of Headscale's key list (listed
+	// whole on every quota check) stays at most MaxPendingKeys between passes. A failure is retried
+	// by the janitor.
+	for _, id := range spent {
+		if err := h.deps.Headscale.DeletePreAuthKey(ctx, id); err != nil {
+			log.Printf("fleet %s: prune key %s: %v", f.ID, id, err)
+		}
+	}
+	if len(nodes)+pending >= h.cfg.NodesPerFleet {
 		writeError(w, http.StatusConflict, "node quota reached")
+		return
+	}
+	if pending >= h.cfg.MaxPendingKeys {
+		writeError(w, http.StatusConflict, "too many unused join keys, retry when one is used or expired")
 		return
 	}
 	expires := h.deps.Now().Add(h.cfg.JoinKeyTTL).UTC()
@@ -277,7 +292,7 @@ func (h *fleetsHandler) fleetStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), opTimeout)
 	defer cancel()
-	nodes, full, err := h.quotaUsage(ctx, f.HeadscaleUser)
+	nodes, pending, _, err := h.quotaUsage(ctx, f.HeadscaleUser)
 	if err != nil {
 		log.Printf("fleet %s: status: %v", f.ID, err)
 		writeError(w, http.StatusBadGateway, "upstream error")
@@ -293,7 +308,7 @@ func (h *fleetsHandler) fleetStatus(w http.ResponseWriter, r *http.Request) {
 		out = append(out, node{n.Hostname, n.IP, n.Online})
 	}
 	state := "ok"
-	if full {
+	if len(nodes)+pending >= h.cfg.NodesPerFleet {
 		state = "quota"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"nodes": out, "nodes_max": h.cfg.NodesPerFleet, "state": state})

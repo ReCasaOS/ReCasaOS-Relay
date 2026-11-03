@@ -94,7 +94,7 @@ func setup(t *testing.T, mutate func(*Config, *Deps)) env {
 	}
 	t.Cleanup(func() { st.Close() })
 	hs := newFakeHS()
-	cfg := Config{CreateRatePerHour: 5, MaxFleets: 1000, IdleAfter: 720 * time.Hour, LoginServer: "https://relay.example"}
+	cfg := Config{CreateRatePerHour: 5, MaxFleets: 1000, MaxPendingKeys: 1000, IdleAfter: 720 * time.Hour, LoginServer: "https://relay.example"}
 	deps := Deps{Store: st, Headscale: hs, Now: func() time.Time { return now0 }}
 	if mutate != nil {
 		mutate(&cfg, &deps)

@@ -66,6 +66,7 @@ Fleet creation is limited per client IP (per /64 for IPv6, and in addition per /
 |---|---|---|
 | `NODES_PER_FLEET` | `50` | max boxes per fleet; a join key is refused (409) when enrolled nodes plus unused, unexpired join keys reach it |
 | `MAX_FLEETS` | `1000` | fleets the relay holds at most; beyond it fleet creation answers `503` without calling Headscale (sizing: see "Capacity" below) |
+| `MAX_PENDING_KEYS` | `5` | unused, unexpired join keys a fleet may hold at once, whatever `NODES_PER_FLEET` leaves: one more is refused (409). A key request also deletes the fleet's used and expired keys (sizing: see "Capacity") |
 | `CREATE_RATE_PER_HOUR` | `5` | fleet creations per hour per IP (IPv6: per /64); an IPv6 /48 also gets at most 10 times this in all (fixed factor) |
 | `KEY_RATE_PER_HOUR` | `30` | join-key requests per hour per fleet (counted once the fleet secret is verified) |
 | `AUTH_RATE_PER_HOUR` | `60` | authenticated fleet requests (join key and status) per hour per client IP, counted BEFORE the secret is checked, wrong or right; boxes behind one NAT share it |
@@ -78,6 +79,17 @@ Fleet creation is limited per client IP (per /64 for IPv6, and in addition per /
 | `STORE_PATH` | `/data/relay.db` | SQLite file (a volume in compose) |
 | `TRUSTED_PROXY_HEADER` | empty (compose: `X-Client-IP`) | header set by the trusted proxy in front of the service; its last value is the client IP used for rate limits. Empty: the TCP peer address is used |
 | `LISTEN_ADDR` | `:8081` | listen address |
+
+### Capacity
+
+Two things Headscale handles in one piece grow with the number of fleets, and both pass through its gRPC layer, which refuses a message over 4 MiB (measured by the review: a policy for 25,000 fleets was refused; 15,000 fleets made a 3.3 MB policy whose `PUT` took 7.8 s, against a 10 s policy-hook timeout):
+
+- the **pre-auth key list**: `GET /api/v1/preauthkey` has no user filter, so every quota check reads every fleet's keys, about 400 B of JSON each. A fleet holds at most `MAX_PENDING_KEYS` keys in that list: unused unexpired keys are capped there, and each key request deletes the fleet's used and expired ones (the janitor also does every `GC_INTERVAL`). Worst case `MAX_FLEETS` x `MAX_PENDING_KEYS` x 400 B = 1000 x 5 x 400 B = **2,000,000 B (1.9 MiB)** with the defaults;
+- the **access policy**: about 207 B per fleet, 207 kB for 1000 fleets (`TestDefaultsKeepHeadscaleMessagesUnder3MiB` builds it), pushed whole after every creation and deletion.
+
+The defaults keep both under 3 MiB (the test above fails otherwise). They were chosen against the alternatives: 5000 fleets would allow only 1 pending key per fleet (5000 x 1 x 400 B = 2 MB), so a box owner whose join failed once could not add a box for a day; 2000 x 5 x 400 B = 4 MB is over the limit. With 5, an owner adding boxes one at a time (each key is used within minutes, and lives 24 h otherwise) can lose four joins in a day and still go on. If you raise one, lower the other: keep `MAX_FLEETS` x `MAX_PENDING_KEYS` x 400 B well under 4 MiB. Pre-auth keys created by hand for users that are not fleets also count towards that list.
+
+The fleet cap is exact for one enrolment service: creations in flight count against it, so concurrent requests cannot overshoot. Two services sharing one store are not supported.
 
 ## Removing nodes and fleets
 

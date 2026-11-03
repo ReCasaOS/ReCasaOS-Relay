@@ -18,6 +18,7 @@ import (
 type Config struct {
 	NodesPerFleet     int
 	MaxFleets         int // fleets the relay holds at most; creation answers 503 beyond
+	MaxPendingKeys    int // unused, unexpired join keys a fleet may hold at once (409 beyond)
 	CreateRatePerHour int // create-fleet requests per hour, per IP
 	KeyRatePerHour    int // join-key requests per hour, per fleet (counted once the secret is verified)
 	AuthRatePerHour   int // fleet requests (join key, status) per hour, per IP, counted before the secret is checked
@@ -90,6 +91,9 @@ func ConfigFromEnv() (Config, error) {
 		return c, err
 	}
 	if c.MaxFleets, err = envInt("MAX_FLEETS", 1000); err != nil {
+		return c, err
+	}
+	if c.MaxPendingKeys, err = envInt("MAX_PENDING_KEYS", 5); err != nil {
 		return c, err
 	}
 	if c.CreateRatePerHour, err = envInt("CREATE_RATE_PER_HOUR", 5); err != nil {
