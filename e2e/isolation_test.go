@@ -285,7 +285,7 @@ func (r *rig) startNodeAs(fleet, name, ctr, key string) *node {
 		"--cap-add", "NET_ADMIN", "--cap-add", "NET_RAW", "--device", "/dev/net/tun:/dev/net/tun",
 		"-e", "TS_AUTHKEY="+key, "-e", "TS_USERSPACE=false", "-e", "TS_HOSTNAME="+name, "-e", "TS_STATE_DIR=/var/lib/tailscale",
 		"-e", "TS_EXTRA_ARGS=--login-server="+loginServer, "-e", "SSL_CERT_FILE=/relay-ca.crt",
-		"tailscale/tailscale:stable")
+		"tailscale/tailscale:v1.104.4") // pinned: what :stable was when this was last run
 	if err != nil {
 		t.Fatalf("docker create %s: %v\n%s", name, err, out)
 	}
