@@ -151,7 +151,7 @@ Headscale is pinned in `compose.yaml` (`headscale/headscale:v0.29.7`), and the e
 3. Change the tag in `compose.yaml`. If you can, run the e2e isolation test on the new tag first; it starts the stack from `compose.yaml`: `go test -tags e2e ./e2e -run TestFleetsAreIsolated -v -timeout 15m`.
 4. `docker compose pull && docker compose up -d` (with your `-f` options if any).
 
-The enrolment service is built from this repository: `git pull && docker compose up -d --build`, or use the published image below. `front` is pinned to `caddy:2.10.0-alpine`; the README's proxy-header checks were made with that version.
+The enrolment service is built from this repository: `git pull && docker compose up -d --build`, or use the published image below. **Upgrading from a build before the non-root image** (the enrolment image used to run as root, so the `enrolment-data` volume and `relay.db` belong to root): give them to uid 65532 once before starting the new image, `docker compose stop enrolment && docker run --rm --volumes-from "$(docker compose ps -aq enrolment)" alpine chown -R 65532:65532 /data && docker compose up -d --build enrolment` (not run here on an old volume). `front` is pinned to `caddy:2.10.0-alpine`; the README's proxy-header checks were made with that version.
 
 ### Using the published image
 
@@ -165,7 +165,7 @@ services:
     build: !reset null
 ```
 
-and pass it as one more `-f compose.image.yaml`; the default `compose.yaml` still builds locally. Nothing is published yet at the time of writing: check that the tag exists. The first GHCR package is private by default (not verified): set it to public in the package settings before operators can `docker pull` it. Validated with `docker compose -f compose.yaml -f compose.image.yaml config`; pulling the image was not tried.
+and pass it as one more `-f compose.image.yaml`; the default `compose.yaml` still builds locally. The published image is **linux/amd64 only** (the release workflow runs a plain `docker build` on an amd64 runner): on an arm64 host, build locally with the default `compose.yaml`. Nothing is published yet at the time of writing: check that the tag exists. The first GHCR package is private by default (not verified): set it to public in the package settings before operators can `docker pull` it. Validated with `docker compose -f compose.yaml -f compose.image.yaml config`; pulling the image was not tried.
 
 ## 7. Backups and restore
 
@@ -173,6 +173,8 @@ State lives in two named volumes (Compose prefixes them with the project name, b
 
 - `headscale-data` (`/var/lib/headscale`): `db.sqlite` (users, nodes, access policy, API keys), `noise_private.key`, `derp_server_private.key`. Losing the keys or the database means every box must enrol again.
 - `enrolment-data` (`/data`): `relay.db`, the fleets and the hashes of the fleet secrets.
+
+The enrolment image runs as the unprivileged uid/gid `65532` (distroless `:nonroot`) and its `/data` belongs to that user, so a fresh named volume does too. If you mount a host directory on `/data` instead of the named volume, `chown 65532:65532` it first, or the service cannot create `relay.db` and its WAL files. Verified: `docker compose build enrolment`, then a one-shot `docker run` of that image on a fresh named volume created `relay.db` owned by 65532, in WAL mode.
 
 Both SQLite databases run in WAL mode (`*-wal` and `*-shm` files sit next to them), so **stop the services before copying**. This works whatever the project name is, through `--volumes-from`:
 
