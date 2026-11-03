@@ -66,7 +66,8 @@ Fleet creation is limited per client IP (per /64 for IPv6). The enrolment servic
 | `KEY_RATE_PER_HOUR` | `30` | join-key requests per hour per fleet (counted once the fleet secret is verified) |
 | `AUTH_RATE_PER_HOUR` | `60` | authenticated fleet requests (join key and status) per hour per client IP, counted BEFORE the secret is checked, wrong or right; boxes behind one NAT share it |
 | `JOIN_KEY_TTL` | `24h` | validity of a join key |
-| `IDLE_AFTER` | `720h` | an idle fleet is deleted after this long |
+| `IDLE_AFTER` | `720h` | a fleet with no online node for this long is deleted by the janitor |
+| `GC_INTERVAL` | `10m` | how often the janitor runs (see below) |
 | `LOGIN_SERVER` | empty | login server URL handed to boxes |
 | `HEADSCALE_URL` | `http://headscale:8080` | Headscale REST API, reachable only on the compose network |
 | `HEADSCALE_API_KEY` | none, required | Headscale API key (see below) |
@@ -74,9 +75,20 @@ Fleet creation is limited per client IP (per /64 for IPv6). The enrolment servic
 | `TRUSTED_PROXY_HEADER` | empty (compose: `X-Client-IP`) | header set by the trusted proxy in front of the service; its last value is the client IP used for rate limits. Empty: the TCP peer address is used |
 | `LISTEN_ADDR` | `:8081` | listen address |
 
+## Removing nodes and fleets
+
+Both calls take the fleet secret (`Authorization: Bearer ...`) and answer `204` with no body; `401` is a wrong secret, `404` an unknown fleet, `429` the per-IP throttle (`Retry-After`), `502` a Headscale failure.
+
+- `DELETE /v1/fleets/{id}/nodes/{hostname}` removes one node. The hostname is 1 to 63 of `[A-Za-z0-9-]` (else `400`). A hostname that is not a node of the fleet is a success (`204`).
+- `DELETE /v1/fleets/{id}` deletes the fleet: its nodes, its Headscale user and keys, then its row, then the policy is rewritten. The secret is only forgotten at the end, so after a `502` the same call can simply be repeated. Once the deletion has completed there is nothing left to authenticate against and a repeat answers `404`: **treat `404` as "already deleted"**.
+
+### Janitor
+
+Every `GC_INTERVAL` the service (1) marks every fleet that has an online node as seen, (2) deletes, with the routine behind `DELETE /v1/fleets/{id}`, the fleets that have had no online node for longer than `IDLE_AFTER` (a fleet whose nodes could not be read in that pass is never deleted), (3) deletes the used and the expired pre-auth keys of all fleets (Headscale never prunes them, and the key quota reads them all), and (4) rewrites the access policy, which also repairs a hand edit. A failure for one fleet is logged and the pass goes on.
+
 ## Fleet isolation
 
-Each fleet is a Headscale user `f-<fleet id>`. The enrolment service owns Headscale's access policy and rewrites it from **all** fleets in its store after every fleet creation (and, in the cleanup task, deletion): one group per fleet holding only that user, and one rule per group, `accept group:u -> group:u:*`. No wildcard, no autogroup, no rule naming two groups. With zero fleets the policy is an explicit empty `acls` list (a missing policy would allow everything). It is applied, with retries, **before** the service starts listening, and the service exits if it cannot. Do not edit the policy in Headscale by hand: the next sync overwrites it.
+Each fleet is a Headscale user `f-<fleet id>`. The enrolment service owns Headscale's access policy and rewrites it from **all** fleets in its store after every fleet creation and deletion and on every janitor pass: one group per fleet holding only that user, and one rule per group, `accept group:u -> group:u:*`. No wildcard, no autogroup, no rule naming two groups. With zero fleets the policy is an explicit empty `acls` list (a missing policy would allow everything). It is applied, with retries, **before** the service starts listening, and the service exits if it cannot. Do not edit the policy in Headscale by hand: the next sync overwrites it.
 
 ## Development
 

@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
+	"github.com/ReCasaOS/recasaos-relay/internal/gc"
 	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
 	"github.com/ReCasaOS/recasaos-relay/internal/policy"
 	"github.com/ReCasaOS/recasaos-relay/internal/server"
@@ -48,9 +50,11 @@ func run() error {
 
 	hs := headscale.New(getenv("HEADSCALE_URL", "http://headscale:8080"), apiKey, nil)
 	pol := policy.NewWriter(st, hs)
+	// One remover (and so one set of per-fleet locks) for the HTTP handlers and the janitor.
+	remover := &fleets.Remover{Store: st, Headscale: hs, Policy: pol, Locks: &fleets.Locks{}}
 	srv := &http.Server{
 		Addr:              getenv("LISTEN_ADDR", ":8081"),
-		Handler:           server.New(cfg, server.Deps{Store: st, Headscale: hs, PolicyHook: pol.Hook}),
+		Handler:           server.New(cfg, server.Deps{Store: st, Headscale: hs, PolicyHook: pol.Hook, Remover: remover}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      45 * time.Second, // a create-fleet call may wait on Headscale (20 s) and its rollback
@@ -72,19 +76,34 @@ func run() error {
 			log.Printf("shutdown: %v", err)
 		}
 	}()
+	// The janitor starts with the server, after the policy is in place, and Run returns only once its
+	// tick in flight has: the store must not be closed under it.
+	janitorStarted, janitorDone := false, make(chan struct{})
+	waitJanitor := func() {
+		if janitorStarted {
+			<-janitorDone
+		}
+	}
 	// Headscale allows everything until it has a policy: apply the deny-by-default one first, and
 	// refuse to start (exit non-zero) if that cannot be done.
 	err = serveAfterPolicy(ctx, func(ctx context.Context) error { return pol.SyncWithRetry(ctx, 8, time.Second) },
 		func() error {
+			janitorStarted = true
+			go func() {
+				defer close(janitorDone)
+				gc.Run(ctx, gc.Deps{Remover: remover, IdleAfter: cfg.IdleAfter}, cfg.GCEvery)
+			}()
 			log.Printf("enrolment listening on %s", srv.Addr)
 			return srv.ListenAndServe()
 		})
 	if !errors.Is(err, http.ErrServerClosed) {
-		stop() // listen failed: let the goroutine finish instead of leaking
+		stop() // listen failed: let the goroutines finish instead of leaking
 		<-done
+		waitJanitor()
 		return err
 	}
 	<-done
+	waitJanitor()
 	return nil
 }
 

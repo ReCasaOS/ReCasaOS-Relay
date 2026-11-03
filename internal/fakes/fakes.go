@@ -53,6 +53,7 @@ type HS struct {
 	nodes map[string][]headscale.Node
 	keys  []headscale.PreAuthKey
 	fail  map[string]error
+	left  map[string]int // remaining failures for an op failing a limited number of times
 	nextK int
 
 	// Hook, when set, runs at the start of the named operation, outside any lock; a test uses it to
@@ -63,12 +64,19 @@ type HS struct {
 }
 
 func NewHS(log *Log, now func() time.Time) *HS {
-	return &HS{Log: log, Now: now, users: map[string]bool{}, nodes: map[string][]headscale.Node{}, fail: map[string]error{}}
+	return &HS{Log: log, Now: now, users: map[string]bool{}, nodes: map[string][]headscale.Node{}, fail: map[string]error{}, left: map[string]int{}}
 }
 
 // Fail makes the named operation return err until Heal.
 func (h *HS) Fail(op string, err error) { h.mu.Lock(); h.fail[op] = err; h.mu.Unlock() }
-func (h *HS) Heal(op string)            { h.mu.Lock(); delete(h.fail, op); h.mu.Unlock() }
+func (h *HS) Heal(op string)            { h.mu.Lock(); delete(h.fail, op); delete(h.left, op); h.mu.Unlock() }
+
+// FailTimes makes the next n calls of the named operation return err, then heals it.
+func (h *HS) FailTimes(op string, err error, n int) {
+	h.mu.Lock()
+	h.fail[op], h.left[op] = err, n
+	h.mu.Unlock()
+}
 
 func (h *HS) enter(op, entry string) error {
 	if h.Hook != nil {
@@ -77,7 +85,16 @@ func (h *HS) enter(op, entry string) error {
 	h.Log.Add(entry)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.fail[op]
+	err := h.fail[op]
+	if n, limited := h.left[op]; limited {
+		if n--; n <= 0 {
+			delete(h.fail, op)
+			delete(h.left, op)
+		} else {
+			h.left[op] = n
+		}
+	}
+	return err
 }
 
 // AddUser registers a user (as CreateUser would).

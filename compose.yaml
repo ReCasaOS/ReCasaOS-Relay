@@ -46,6 +46,7 @@ services:
       AUTH_RATE_PER_HOUR: ${AUTH_RATE_PER_HOUR:-60}
       JOIN_KEY_TTL: ${JOIN_KEY_TTL:-24h}
       IDLE_AFTER: ${IDLE_AFTER:-720h}
+      GC_INTERVAL: ${GC_INTERVAL:-10m}
     volumes:
       - enrolment-data:/data
     # Reached only through `front` (Caddyfile): never publish this port, the rate limiter trusts X-Client-IP.
