@@ -9,11 +9,13 @@ Licence: Apache 2.0.
 Full guide for an operator (requirements, TLS, settings, upgrades, backups, pointing boxes at it): **[docs/self-hosting.md](docs/self-hosting.md)**. The server must be reachable by the member boxes from the Internet; a relay behind CGNAT cannot be self-hosted.
 
 ```
+docker compose up -d headscale
+docker compose exec headscale headscale apikeys create   # then .env: HEADSCALE_API_KEY=... and LOGIN_SERVER=https://<your domain>
 docker compose up -d
 curl -fs localhost:8080/health      # Headscale's health endpoint, through `front`: {"status":"pass"}
 ```
 
-Set `server_url` in `headscale/config.yaml` to your public https URL. Port 8080 is served by the `front` Caddy service, which forwards to Headscale but answers 404 on `/api/` (Headscale's admin REST API shares its control-plane port); the gRPC API (50443) is never published. Only the enrolment service reaches the admin APIs, directly on the compose network.
+The enrolment service exits until `HEADSCALE_API_KEY` and `LOGIN_SERVER` are set, so create the key first (see "Headscale API key" below); a plain `docker compose up -d` before that leaves `enrolment` restarting until the next `up -d`. Set your public https URL as `HEADSCALE_SERVER_URL` on the `headscale` service in a Compose override rather than editing `server_url` in `headscale/config.yaml` (the variable overrides it and `git pull` stays clean: [docs/self-hosting.md](docs/self-hosting.md#2-first-start)), and the same URL as `LOGIN_SERVER`. Port 8080 is served by the `front` Caddy service, which forwards to Headscale but answers 404 on `/api/` (Headscale's admin REST API shares its control-plane port); the gRPC API (50443) is never published. Only the enrolment service reaches the admin APIs, directly on the compose network.
 
 `front` (8080) speaks plain HTTP and serves both Headscale and the enrolment API (`/v1/*`): put a TLS reverse proxy in front of it (the enrolment service's own port 8081 is not published), or let `front` do TLS itself with Caddy automatic HTTPS (a validated Caddyfile and Compose override are in [docs/self-hosting.md](docs/self-hosting.md#3-tls)). Keep `/api/` unreachable from outside if you route to Headscale some other way.
 
@@ -26,7 +28,7 @@ docker compose up -d headscale
 docker compose exec headscale headscale apikeys create
 ```
 
-Put the printed key in a `.env` file next to `compose.yaml` as `HEADSCALE_API_KEY=...` (keep it secret; Headscale API keys expire after 90 days by default: rotate with `headscale apikeys create` and `apikeys expire`), then `docker compose up -d`.
+Put the printed key in a `.env` file next to `compose.yaml` as `HEADSCALE_API_KEY=...`, with `LOGIN_SERVER=https://<your domain>` (keep the key secret; Headscale API keys expire after 90 days by default: rotate with `headscale apikeys create` and `apikeys expire`), then `docker compose up -d`.
 
 ### Rate limits and the proxy header
 
@@ -69,7 +71,7 @@ Fleet creation is limited per client IP (per /64 for IPv6, and in addition per /
 | `MAX_PENDING_KEYS` | `5` | unused, unexpired join keys a fleet may hold at once, whatever `NODES_PER_FLEET` leaves: one more is refused (409). A key request also deletes the fleet's used and expired keys (sizing: see "Capacity") |
 | `CREATE_RATE_PER_HOUR` | `5` | fleet creations per hour per IP (IPv6: per /64); an IPv6 /48 also gets at most 10 times this in all (fixed factor) |
 | `KEY_RATE_PER_HOUR` | `30` | join-key requests per hour per fleet (counted once the fleet secret is verified) |
-| `AUTH_RATE_PER_HOUR` | `60` | authenticated fleet requests (join key and status) per hour per client IP, counted BEFORE the secret is checked, wrong or right; boxes behind one NAT share it |
+| `AUTH_RATE_PER_HOUR` | `60` | authenticated fleet requests (join key, status, node and fleet deletion) per hour per client IP, counted BEFORE the secret is checked, wrong or right; boxes behind one NAT share it |
 | `JOIN_KEY_TTL` | `24h` | validity of a join key |
 | `IDLE_AFTER` | `720h` | a fleet with no online node for this long is deleted by the janitor |
 | `GC_INTERVAL` | `10m` | how often the janitor runs (see below) |
@@ -93,7 +95,7 @@ The fleet cap is exact for one enrolment service: creations in flight count agai
 
 ## Removing nodes and fleets
 
-Both calls take the fleet secret (`Authorization: Bearer ...`) and answer `204` with no body; `401` is a wrong secret, `404` an unknown fleet, `429` the per-IP throttle (`Retry-After`), `502` a Headscale failure.
+Both calls take the fleet secret (`Authorization: Bearer ...`) and answer `204` with no body; `401` is a wrong secret, `404` an unknown fleet, `429` the per-IP throttle (`Retry-After`), `502` a Headscale failure, `503` (fleet deletion) the deletion did not finish in time, for instance behind a request for the same fleet: retry.
 
 - `DELETE /v1/fleets/{id}/nodes/{hostname}` removes one node. The hostname is 1 to 63 of `[A-Za-z0-9-]` (else `400`). A hostname that is not a node of the fleet is a success (`204`).
 - `DELETE /v1/fleets/{id}` deletes the fleet: its nodes, its Headscale user and keys, then its row, then the policy is rewritten. The secret is only forgotten at the end, so after a `502` the same call can simply be repeated. Once the deletion has completed there is nothing left to authenticate against and a repeat answers `404`: **treat `404` as "already deleted"**.

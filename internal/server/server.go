@@ -22,7 +22,7 @@ type Config struct {
 	MaxPendingKeys    int // unused, unexpired join keys a fleet may hold at once (409 beyond)
 	CreateRatePerHour int // create-fleet requests per hour, per IP
 	KeyRatePerHour    int // join-key requests per hour, per fleet (counted once the secret is verified)
-	AuthRatePerHour   int // fleet requests (join key, status) per hour, per IP, counted before the secret is checked
+	AuthRatePerHour   int // fleet requests (join key, status, deletions) per hour, per IP, counted before the secret is checked
 	JoinKeyTTL        time.Duration
 	IdleAfter         time.Duration // a fleet idle this long is deleted
 	GCEvery           time.Duration // interval of the idle-fleet janitor

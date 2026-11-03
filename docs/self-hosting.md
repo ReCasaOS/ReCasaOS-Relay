@@ -109,7 +109,7 @@ Put them in a `.env` file next to `compose.yaml` (Compose substitutes them). An 
 | `MAX_PENDING_KEYS` | `5` | yes | unused join keys per fleet at once (409 beyond). Raising it or `MAX_FLEETS`: README, "Capacity" |
 | `CREATE_RATE_PER_HOUR` | `5` | yes | fleet creations per hour per client IP (IPv6: per /64, plus 10 times this per /48) |
 | `KEY_RATE_PER_HOUR` | `30` | yes | join keys per hour per fleet |
-| `AUTH_RATE_PER_HOUR` | `60` | yes | authenticated fleet requests per hour per client IP (boxes behind one NAT share it) |
+| `AUTH_RATE_PER_HOUR` | `60` | yes | authenticated fleet requests (join key, status, deletions) per hour per client IP (boxes behind one NAT share it) |
 | `JOIN_KEY_TTL` | `24h` | yes | validity of a join key |
 | `IDLE_AFTER` | `720h` (30 days) | yes | a fleet with no online node for this long is deleted |
 | `GC_INTERVAL` | `10m` | yes | janitor period |
