@@ -10,7 +10,9 @@ Licence: Apache 2.0.
 docker compose up -d
 ```
 
-Set `server_url` in `headscale/config.yaml` to your public https URL (TLS terminated by a reverse proxy in front of port 8080). Headscale's admin API is never published; only the enrolment service reaches it.
+Set `server_url` in `headscale/config.yaml` to your public https URL. Port 8080 is served by the `front` Caddy service, which forwards to Headscale but answers 404 on `/api/` (Headscale's admin REST API shares its control-plane port); the gRPC API (50443) is never published. Only the enrolment service reaches the admin APIs, directly on the compose network.
+
+`front` (8080) and the enrolment service (8081) speak plain HTTP: put a TLS reverse proxy in front of both. Keep `/api/` unreachable from outside if you route to Headscale some other way.
 
 ## Configuration (enrolment service, environment)
 

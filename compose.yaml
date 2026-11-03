@@ -9,11 +9,22 @@ services:
     volumes:
       - ./headscale/config.yaml:/etc/headscale/config.yaml:ro
       - headscale-data:/var/lib/headscale
-    # Published: the control plane for boxes (behind a TLS reverse proxy) and STUN for the embedded DERP.
-    # The gRPC API (50443) is deliberately NOT published: only `enrolment` reaches it, on the compose network.
+    # Only STUN (embedded DERP) is published. The control plane on 8080 is published through `front`, which
+    # hides the admin REST API (/api/); the gRPC API (50443) is never published. `enrolment` reaches both
+    # directly on the compose network.
+    ports:
+      - "3478:3478/udp"
+
+  front:
+    image: caddy:2.10.0-alpine
+    restart: unless-stopped
+    depends_on:
+      - headscale
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    # Plain HTTP: put your TLS reverse proxy in front of this port (and of enrolment's 8081).
     ports:
       - "8080:8080"
-      - "3478:3478/udp"
 
   enrolment:
     build: .
