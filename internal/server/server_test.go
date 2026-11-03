@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,9 +21,10 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestConfigFromEnvDefaults(t *testing.T) {
-	for _, k := range []string{"NODES_PER_FLEET", "CREATE_RATE_PER_HOUR", "KEY_RATE_PER_HOUR", "AUTH_RATE_PER_HOUR", "JOIN_KEY_TTL", "IDLE_AFTER", "GC_INTERVAL", "LOGIN_SERVER", "TRUSTED_PROXY_HEADER", "MAX_FLEETS", "MAX_PENDING_KEYS"} {
+	for _, k := range []string{"NODES_PER_FLEET", "CREATE_RATE_PER_HOUR", "KEY_RATE_PER_HOUR", "AUTH_RATE_PER_HOUR", "JOIN_KEY_TTL", "IDLE_AFTER", "GC_INTERVAL", "TRUSTED_PROXY_HEADER", "MAX_FLEETS", "MAX_PENDING_KEYS"} {
 		t.Setenv(k, "")
 	}
+	t.Setenv("LOGIN_SERVER", "https://relay.example") // required, no default
 	got, err := ConfigFromEnv()
 	if err != nil {
 		t.Fatal(err)
@@ -37,7 +39,7 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 		GCEvery:           10 * time.Minute,
 		MaxFleets:         1000,
 		MaxPendingKeys:    5,
-		LoginServer:       "",
+		LoginServer:       "https://relay.example",
 	}
 	if got != want {
 		t.Fatalf("defaults = %+v, want %+v", got, want)
@@ -79,11 +81,30 @@ func TestConfigFromEnvInvalid(t *testing.T) {
 		"MAX_PENDING_KEYS":   "-1",
 	} {
 		t.Run(k, func(t *testing.T) {
+			t.Setenv("LOGIN_SERVER", "https://relay.example") // valid: the error must come from k
 			t.Setenv(k, v)
 			if _, err := ConfigFromEnv(); err == nil {
 				t.Fatalf("%s=%q: want error", k, v)
 			}
 		})
+	}
+}
+
+// LOGIN_SERVER is handed to every box as its control server: refuse to start without a usable one.
+func TestConfigFromEnvLoginServer(t *testing.T) {
+	for _, v := range []string{"", "relay.example", "http://relay.example", "https://", "ftp://relay.example", "https://relay.example/path", "https://relay.example?x=1"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv("LOGIN_SERVER", v)
+			if _, err := ConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "LOGIN_SERVER") {
+				t.Fatalf("LOGIN_SERVER=%q: err = %v, want a LOGIN_SERVER error", v, err)
+			}
+		})
+	}
+	for _, v := range []string{"https://relay.example", "https://relay.example/", "https://relay.test:8443"} {
+		t.Setenv("LOGIN_SERVER", v)
+		if _, err := ConfigFromEnv(); err != nil {
+			t.Fatalf("LOGIN_SERVER=%q: %v", v, err)
+		}
 	}
 }
 
@@ -95,6 +116,7 @@ func TestDefaultsKeepHeadscaleMessagesUnder3MiB(t *testing.T) {
 	for _, k := range []string{"MAX_FLEETS", "MAX_PENDING_KEYS"} {
 		t.Setenv(k, "")
 	}
+	t.Setenv("LOGIN_SERVER", "https://relay.example")
 	c, err := ConfigFromEnv()
 	if err != nil {
 		t.Fatal(err)

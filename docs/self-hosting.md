@@ -98,12 +98,12 @@ Point it at host port `8080` (plain HTTP) and have it pass WebSocket / HTTP upgr
 
 ## 4. Settings
 
-Put them in a `.env` file next to `compose.yaml` (Compose substitutes them). An unset or empty value takes the default, except `TRUSTED_PROXY_HEADER` (an empty value really is empty); a non-positive number or duration makes the service refuse to start. `.env` is listed in `.gitignore`: never commit it.
+Put them in a `.env` file next to `compose.yaml` (Compose substitutes them). An unset or empty value takes the default, except `TRUSTED_PROXY_HEADER` (an empty value really is empty) and the two required ones; a non-positive number or duration, or a missing or invalid `LOGIN_SERVER`, makes the service refuse to start. `.env` is listed in `.gitignore`: never commit it.
 
 | Variable | Default | In `.env`? | Notes |
 |---|---|---|---|
 | `HEADSCALE_API_KEY` | none, **required** | yes | the service exits without it (section 5) |
-| `LOGIN_SERVER` | empty | yes | **set it to your public URL**, the same as `server_url`: it is the `login_server` returned to boxes when a fleet is created. The e2e override sets both to the same URL. Left empty, boxes receive an empty value |
+| `LOGIN_SERVER` | none, **required** | yes | **your public URL** (`https://relay.example.org`, no path), the same as `server_url`: it is the `login_server` returned to boxes when a fleet is created. The e2e override sets both to the same URL. The service exits at startup if it is empty or not an `https://` URL without a path |
 | `NODES_PER_FLEET` | `50` | yes | boxes per fleet |
 | `MAX_FLEETS` | `1000` | yes | fleets the relay holds; creation answers 503 beyond. Do not raise it without reading "Capacity" in the README |
 | `MAX_PENDING_KEYS` | `5` | yes | unused join keys per fleet at once (409 beyond). Raising it or `MAX_FLEETS`: README, "Capacity" |

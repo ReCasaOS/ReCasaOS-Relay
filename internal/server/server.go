@@ -4,6 +4,7 @@ package server
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -25,7 +26,7 @@ type Config struct {
 	JoinKeyTTL        time.Duration
 	IdleAfter         time.Duration // a fleet idle this long is deleted
 	GCEvery           time.Duration // interval of the idle-fleet janitor
-	LoginServer       string        // no default: must be set by the operator
+	LoginServer       string        // required: an https URL with no path, see loginServer
 	// TrustedProxyHeader names the header (e.g. X-Forwarded-For) in which a trusted reverse proxy
 	// appends the client address; its LAST value is then the client IP. Empty: use the TCP peer.
 	TrustedProxyHeader string
@@ -114,9 +115,21 @@ func ConfigFromEnv() (Config, error) {
 	if c.GCEvery, err = envDuration("GC_INTERVAL", 10*time.Minute); err != nil {
 		return c, err
 	}
-	c.LoginServer = os.Getenv("LOGIN_SERVER")
+	if c.LoginServer, err = loginServer(os.Getenv("LOGIN_SERVER")); err != nil {
+		return c, err
+	}
 	c.TrustedProxyHeader = os.Getenv("TRUSTED_PROXY_HEADER")
 	return c, nil
+}
+
+// loginServer checks the URL handed to every box as its control server: https (the tailscale client
+// insists on TLS, e2e included), a host, nothing after it but an optional "/".
+func loginServer(s string) (string, error) {
+	u, err := url.Parse(s)
+	if err != nil || u.Scheme != "https" || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return "", fmt.Errorf("LOGIN_SERVER: %q is not an https URL without a path (required: the public URL of this relay, the same as Headscale's server_url)", s)
+	}
+	return s, nil
 }
 
 func envInt(key string, def int) (int, error) {

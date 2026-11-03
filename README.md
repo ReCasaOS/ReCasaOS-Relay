@@ -73,7 +73,7 @@ Fleet creation is limited per client IP (per /64 for IPv6, and in addition per /
 | `JOIN_KEY_TTL` | `24h` | validity of a join key |
 | `IDLE_AFTER` | `720h` | a fleet with no online node for this long is deleted by the janitor |
 | `GC_INTERVAL` | `10m` | how often the janitor runs (see below) |
-| `LOGIN_SERVER` | empty | login server URL handed to boxes |
+| `LOGIN_SERVER` | none, **required** | login server URL handed to boxes: your public `https://` URL with no path, the same as Headscale's `server_url`. The service refuses to start if it is empty or not such a URL |
 | `HEADSCALE_URL` | `http://headscale:8080` | Headscale REST API, reachable only on the compose network |
 | `HEADSCALE_API_KEY` | none, required | Headscale API key (see below) |
 | `STORE_PATH` | `/data/relay.db` | SQLite file (a volume in compose) |
