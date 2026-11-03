@@ -18,6 +18,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Tag must be on main
+        env:
+          TAG_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git merge-base --is-ancestor "$TAG_SHA" origin/main || { echo "tagged commit is not on main" >&2; exit 1; }
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod

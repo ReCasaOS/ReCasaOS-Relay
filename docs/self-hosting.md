@@ -4,7 +4,7 @@ This is for an operator who wants to run their own relay and point ReCasaOS boxe
 
 ## 1. What you need
 
-- A host with Docker and Docker Compose v2.24 or later (the examples use `!override` and `!reset`; the repository's own e2e override already uses `!override`).
+- A host with Docker and Docker Compose v2.24.4 or later (not verified; older versions may reject `!override` and `!reset`, which the examples use; the repository's own e2e override already uses `!override`).
 - **A public IP address with a domain name pointing at it, reachable by every member box.** The boxes connect to your server at enrolment time and afterwards (control plane over HTTPS, relayed traffic over the same port). That is the whole point of a relay: it lets boxes that cannot reach each other find each other. A relay that is itself behind CGNAT, or on a connection with no inbound port, **cannot be self-hosted**: the boxes could never reach it.
 - Open to the Internet:
   - `443/tcp` (control plane, enrolment API, embedded DERP relay over HTTPS),
@@ -20,7 +20,7 @@ git clone https://github.com/ReCasaOS/recasaos-relay && cd recasaos-relay
 
 (address taken from the Go module path)
 
-1. Set your public URL in `headscale/config.yaml`: `server_url: https://relay.example.org`. It must be the https URL boxes will use. (The e2e override sets it with the environment variable `HEADSCALE_SERVER_URL` instead; that works too.)
+1. Set your public URL with the environment variable `HEADSCALE_SERVER_URL=https://relay.example.org` on the `headscale` service, in a Compose override you pass with `-f` (section 3a puts it in `compose.tls.yaml`). It must be the https URL boxes will use. The variable overrides `server_url` of `headscale/config.yaml`, as `e2e/compose.e2e.yaml` does (not run here with a real domain), so the tracked file stays untouched and `git pull` does not conflict. Editing `server_url` in that file works too, but then every `git pull` has to merge your change.
 2. Set up TLS (section 3).
 3. Start Headscale, create its API key (section 5) and put it in `.env`, together with `LOGIN_SERVER` (section 4).
 4. `docker compose up -d` (with the TLS override of section 3 if you use it).
@@ -63,11 +63,15 @@ relay.example.org {
 }
 ```
 
-and `compose.tls.yaml`, a Compose override that swaps the Caddyfile, publishes 80 and 443 instead of 8080, and keeps the certificates in a volume so they survive a restart:
+and `compose.tls.yaml`, a Compose override that sets the public URL of Headscale, swaps the Caddyfile, publishes 80 and 443 instead of 8080, and keeps the certificates in a volume so they survive a restart (replace `relay.example.org` here too):
 
 <!-- file: compose.tls.yaml -->
 ```yaml
 services:
+  headscale:
+    environment:
+      HEADSCALE_SERVER_URL: https://relay.example.org
+
   front:
     volumes:
       - ./Caddyfile.tls:/etc/caddy/Caddyfile:ro
@@ -94,7 +98,7 @@ Point it at host port `8080` (plain HTTP) and have it pass WebSocket / HTTP upgr
 
 ## 4. Settings
 
-Put them in a `.env` file next to `compose.yaml` (Compose substitutes them). An unset or empty value takes the default; a non-positive number or duration makes the service refuse to start. `.env` is listed in `.gitignore`: never commit it.
+Put them in a `.env` file next to `compose.yaml` (Compose substitutes them). An unset or empty value takes the default, except `TRUSTED_PROXY_HEADER` (an empty value really is empty); a non-positive number or duration makes the service refuse to start. `.env` is listed in `.gitignore`: never commit it.
 
 | Variable | Default | In `.env`? | Notes |
 |---|---|---|---|
@@ -159,7 +163,7 @@ services:
     build: !reset null
 ```
 
-and pass it as one more `-f compose.image.yaml`; the default `compose.yaml` still builds locally. Nothing is published yet at the time of writing: check that the tag exists. Validated with `docker compose -f compose.yaml -f compose.image.yaml config`; pulling the image was not tried.
+and pass it as one more `-f compose.image.yaml`; the default `compose.yaml` still builds locally. Nothing is published yet at the time of writing: check that the tag exists. The first GHCR package is private by default (not verified): set it to public in the package settings before operators can `docker pull` it. Validated with `docker compose -f compose.yaml -f compose.image.yaml config`; pulling the image was not tried.
 
 ## 7. Backups and restore
 
@@ -171,22 +175,27 @@ State lives in two named volumes (Compose prefixes them with the project name, b
 Both SQLite databases run in WAL mode (`*-wal` and `*-shm` files sit next to them), so **stop the services before copying**. This works whatever the project name is, through `--volumes-from`:
 
 ```
+mkdir -p "$HOME/relay-backup" && chmod 700 "$HOME/relay-backup"      # outside the repository checkout
 docker compose stop
-docker run --rm --volumes-from "$(docker compose ps -aq headscale)" -v "$PWD:/backup" alpine tar czf /backup/headscale-data.tgz -C /var/lib/headscale .
-docker run --rm --volumes-from "$(docker compose ps -aq enrolment)" -v "$PWD:/backup" alpine tar czf /backup/enrolment-data.tgz -C /data .
+docker run --rm --volumes-from "$(docker compose ps -aq headscale)" -v "$HOME/relay-backup:/backup" alpine tar czf /backup/headscale-data.tgz -C /var/lib/headscale .
+docker run --rm --volumes-from "$(docker compose ps -aq enrolment)" -v "$HOME/relay-backup:/backup" alpine tar czf /backup/enrolment-data.tgz -C /data .
 docker compose start
 ```
+
+(Use your `-f` options with `docker compose` here too, if any.)
 
 Restore on a fresh host (repository cloned, `.env` and `headscale/config.yaml` in place; they are not in the volumes, so back them up too):
 
 ```
 docker compose create
-docker run --rm --volumes-from "$(docker compose ps -aq headscale)" -v "$PWD:/backup" alpine tar xzf /backup/headscale-data.tgz -C /var/lib/headscale
-docker run --rm --volumes-from "$(docker compose ps -aq enrolment)" -v "$PWD:/backup" alpine tar xzf /backup/enrolment-data.tgz -C /data
+docker run --rm --volumes-from "$(docker compose ps -aq headscale)" -v "$HOME/relay-backup:/backup" alpine tar xzf /backup/headscale-data.tgz -C /var/lib/headscale
+docker run --rm --volumes-from "$(docker compose ps -aq enrolment)" -v "$HOME/relay-backup:/backup" alpine tar xzf /backup/enrolment-data.tgz -C /data
 docker compose up -d
 ```
 
-Restore both volumes from the same backup: they describe the same fleets. This cycle was run for real (Docker Desktop, Git Bash): a fleet created through the API, backup, `docker compose down -v`, restore, `up -d`; the fleet's status then answered 200 with its secret and its Headscale user was listed. The backups hold the control plane's private keys: keep them as private as `.env`.
+Run `create` and `up -d` with your `-f` options (e.g. `-f compose.yaml -f compose.tls.yaml`), otherwise `front` is recreated without TLS. Also back up `Caddyfile.tls` and `compose.tls.yaml` if you use them.
+
+Restore both volumes from the same backup: they describe the same fleets. This cycle was run for real (Docker Desktop, Git Bash): a fleet created through the API, backup, `docker compose down -v`, restore, `up -d`; the fleet's status then answered 200 with its secret and its Headscale user was listed. The backups hold the control plane's private keys: keep them as private as `.env`, and keep them out of the repository checkout (`.gitignore` also lists `*.tgz` as a safety net). **`docker compose down -v` destroys both state volumes** (Headscale database and keys, enrolment SQLite): never run it on a relay without a backup.
 
 ## 8. Pointing boxes at it
 
@@ -202,7 +211,7 @@ In ReCasaOS, enter your public URL (`https://relay.example.org`, no path) in the
 
 ## 10. Security checklist
 
-- TLS in front of everything. The enrolment API relies on it: a box signature is replayable for up to 120 s, and a restart forgets which signatures were seen.
+- TLS in front of everything. The enrolment API relies on it: a box signature is bearer-like within its ±120 s validity window. While the service runs, each signature is accepted once (replay is refused); a restart forgets which signatures were seen, so a signature captured on the wire can be replayed within the window after a restart.
 - Do not add a `ports:` entry for `enrolment` (8081) or Headscale's gRPC (50443). The rate limiter trusts `X-Client-IP`, which only `front` sets, and the admin API has no other protection. `/api/` must stay unreachable from outside (`front` answers 404).
 - `X-Client-IP` and `trusted_proxies`: read the README section on the proxy header before putting another proxy in front of `front`.
 - Keep `.env` (the API key) out of version control; rotate the key (section 5).

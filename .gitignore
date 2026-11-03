@@ -1,1 +1,6 @@
 .env
+# operator-created files and backups (docs/self-hosting.md)
+*.tgz
+/Caddyfile.tls
+/compose.tls.yaml
+/compose.image.yaml
