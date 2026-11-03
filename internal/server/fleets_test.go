@@ -32,6 +32,7 @@ type fakeHS struct {
 	users         map[string]bool
 	calls         []string
 	createErr     error
+	deleteCtxErr  []error // ctx.Err() seen by each DeleteUser
 }
 
 func newFakeHS() *fakeHS { return &fakeHS{users: map[string]bool{}} }
@@ -47,10 +48,11 @@ func (f *fakeHS) CreateUser(_ context.Context, name string) error {
 	return nil
 }
 
-func (f *fakeHS) DeleteUser(_ context.Context, name string) error {
+func (f *fakeHS) DeleteUser(ctx context.Context, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "delete "+name)
+	f.deleteCtxErr = append(f.deleteCtxErr, ctx.Err())
 	delete(f.users, name)
 	return nil
 }
@@ -356,4 +358,29 @@ func TestClientIPKeying(t *testing.T) {
 		})
 		want(t, got, 201, 201, 429)
 	})
+}
+
+// ctxStore records the context error seen by DeleteFleet.
+type ctxStore struct {
+	store.Store
+	err *error
+}
+
+func (s ctxStore) DeleteFleet(ctx context.Context, id string) error {
+	*s.err = ctx.Err()
+	return s.Store.DeleteFleet(ctx, id)
+}
+
+// The rollback must not inherit the failed call's deadline: after a slow Headscale call timed out
+// the context is spent, yet the cleanup still has to run.
+func TestRollbackUsesFreshContext(t *testing.T) {
+	e := setup(t, nil)
+	var storeErr error
+	h := &fleetsHandler{deps: Deps{Store: ctxStore{e.st, &storeErr}, Headscale: e.hs}}
+	spent, cancel := context.WithCancel(context.Background())
+	cancel()
+	h.rollback(spent, "abc", "f-abc", true)
+	if storeErr != nil || len(e.hs.deleteCtxErr) != 1 || e.hs.deleteCtxErr[0] != nil {
+		t.Fatalf("rollback ran with a spent context: store=%v headscale=%v", storeErr, e.hs.deleteCtxErr)
+	}
 }

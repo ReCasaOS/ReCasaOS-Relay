@@ -57,15 +57,24 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// ListenAndServe returns as soon as Shutdown starts, not when in-flight handlers finish: wait for
+	// Shutdown itself before the deferred store.Close runs.
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutdown, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(shutdown)
+		if err := srv.Shutdown(shutdown); err != nil {
+			log.Printf("shutdown: %v", err)
+		}
 	}()
 	log.Printf("enrolment listening on %s", srv.Addr)
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		stop() // listen failed: let the goroutine finish instead of leaking
+		<-done
 		return err
 	}
+	<-done
 	return nil
 }

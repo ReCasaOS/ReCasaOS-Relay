@@ -110,6 +110,9 @@ func (h *fleetsHandler) createFleet(w http.ResponseWriter, r *http.Request) {
 
 // rollback undoes a partly created fleet; failures are logged, nothing more can be done here.
 func (h *fleetsHandler) rollback(ctx context.Context, id, user string, storeRow bool) {
+	// Fresh budget: the failed call may have used up (or timed out) ctx.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
 	if storeRow {
 		if err := h.deps.Store.DeleteFleet(ctx, id); err != nil {
 			log.Printf("rollback fleet %s: store: %v", id, err)
