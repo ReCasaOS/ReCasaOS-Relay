@@ -1,0 +1,10 @@
+# TLS terminator for the e2e network only: relay.test with a certificate from Caddy's internal CA.
+{
+	local_certs
+	skip_install_trust
+}
+
+relay.test {
+	tls internal
+	reverse_proxy front:8080
+}

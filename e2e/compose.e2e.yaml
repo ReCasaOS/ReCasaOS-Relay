@@ -1,0 +1,34 @@
+# Test-only override for e2e/isolation_test.go; never use it in production.
+#   docker compose -p <name> -f compose.yaml -f e2e/compose.e2e.yaml up -d
+#
+# The tailscale client insists on a TLS control connection (port 443), so the test network gets a
+# second Caddy, `tlsfront`, that answers to relay.test with a certificate from Caddy's own CA and
+# forwards to the real, unchanged `front`. The test installs that CA in its tailscale containers.
+services:
+  headscale:
+    environment:
+      HEADSCALE_SERVER_URL: https://relay.test # overrides server_url of headscale/config.yaml
+    # Random loopback ports only (no clash with a running relay); the test reads the admin API there.
+    ports: !override
+      - "127.0.0.1::8080"
+
+  front:
+    ports: !override
+      - "127.0.0.1::8080"
+
+  enrolment:
+    environment:
+      LOGIN_SERVER: https://relay.test
+      AUTH_RATE_PER_HOUR: "1000"
+      KEY_RATE_PER_HOUR: "100"
+
+  tlsfront:
+    image: caddy:2.10.0-alpine
+    depends_on:
+      - front
+    volumes:
+      - ./e2e/Caddyfile.tls:/etc/caddy/Caddyfile:ro
+    networks:
+      default:
+        aliases:
+          - relay.test
