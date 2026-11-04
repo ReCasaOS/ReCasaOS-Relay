@@ -68,6 +68,17 @@ func (l *Limiter) Allow(key string) (ok bool, retryAfter time.Duration) {
 	return true, 0
 }
 
+// Blocked reports whether key already has perHour events in the window. It records nothing.
+func (l *Limiter) Blocked(key string) bool {
+	if l.perHour <= 0 {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.trim(key, l.now())
+	return len(l.events[key]) >= l.perHour
+}
+
 // trim drops events that left the window and deletes the key when none remain.
 func (l *Limiter) trim(key string, now time.Time) {
 	ev := l.events[key]

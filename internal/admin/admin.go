@@ -30,7 +30,7 @@ const MinTokenLen = 24
 
 const opTimeout = 20 * time.Second
 
-// requestsPerHour bounds the requests carrying credentials, per client address: a token guess costs one.
+// requestsPerHour bounds failed authentications per client address: a token guess costs one.
 const requestsPerHour = 120
 
 //go:embed page.html
@@ -116,13 +116,16 @@ func (h *handler) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
-		if ok, _ := h.limiter.Allow(h.client(r)); !ok {
+		ip := h.client(r)
+		// Checked before the token, so a correct guess past the limit is not revealed.
+		if h.limiter.Blocked(ip) {
 			http.Error(w, "too many requests", http.StatusTooManyRequests)
 			return
 		}
 		_, pass, ok := r.BasicAuth()
 		got := sha256.Sum256([]byte(pass))
 		if !ok || subtle.ConstantTimeCompare(got[:], h.tokenSum[:]) != 1 {
+			h.limiter.Allow(ip)
 			w.Header().Set("WWW-Authenticate", `Basic realm="relay admin", charset="UTF-8"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return

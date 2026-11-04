@@ -170,3 +170,24 @@ func TestRateLimited(t *testing.T) {
 		t.Fatalf("the right token is not tried once limited: %d", w.Code)
 	}
 }
+
+func TestAuthenticatedRequestsAreNotLimited(t *testing.T) {
+	e := setup(t)
+	for i := 0; i < 300; i++ {
+		if w := e.do("GET", "/admin/", token, nil); w.Code != 200 {
+			t.Fatalf("request %d: %d", i+1, w.Code)
+		}
+	}
+}
+
+func TestFailedAuthIsLimited(t *testing.T) {
+	e := setup(t)
+	for i := 0; i < requestsPerHour; i++ {
+		if w := e.do("GET", "/admin/", "wrong", nil); w.Code != 401 {
+			t.Fatalf("request %d: %d, want 401", i+1, w.Code)
+		}
+	}
+	if w := e.do("GET", "/admin/", token, nil); w.Code != 429 {
+		t.Fatalf("right token after the limit: %d, want 429", w.Code)
+	}
+}
