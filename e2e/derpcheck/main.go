@@ -50,8 +50,9 @@ func main() {
 
 // admit connects with a fresh node key and waits for ServerInfo. Connect alone is not enough: the
 // handshake ends with the client's key, and derper verifies it afterwards, then either sends
-// ServerInfo or closes the connection. A failed Connect never reached derper's verification, so it
-// is reported apart ("unreachable"), never as a refusal.
+// ServerInfo or closes the connection. A failed Connect never reached derper's verification, and a
+// timeout means derper hung or the stream was misread: both are reported apart ("unreachable"),
+// never as a refusal.
 func admit(derpURL string) string {
 	c, err := derphttp.NewClient(key.NewNode(), derpURL, log.Printf, netmon.NewStatic())
 	if err != nil {
@@ -63,11 +64,15 @@ func admit(derpURL string) string {
 	if err := c.Connect(ctx); err != nil {
 		return "unreachable: " + err.Error()
 	}
-	if err := serverInfo(ctx, c); err != nil {
+	if err := serverInfo(ctx, c); errors.Is(err, errTimeout) {
+		return "unreachable: " + err.Error() // a refusal closes the connection; silence is not one
+	} else if err != nil {
 		return "refused: " + err.Error()
 	}
 	return "accepted"
 }
+
+var errTimeout = errors.New("no ServerInfo and no close before the timeout")
 
 func serverInfo(ctx context.Context, c *derphttp.Client) error {
 	done := make(chan error, 1)
@@ -88,7 +93,7 @@ func serverInfo(ctx context.Context, c *derphttp.Client) error {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
-		return errors.New("no ServerInfo before the timeout")
+		return errTimeout
 	}
 }
 

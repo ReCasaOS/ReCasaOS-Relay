@@ -21,7 +21,8 @@ services:
     restart: unless-stopped
     command: -a :8090 -http-port -1 -stun-port 3478 -verify-client-url http://headscale:8080/verify -verify-client-url-fail-open=false
     environment:
-      # /debug/ answers only with ?debugkey=<this file's content>; DERPER_DEBUG_KEY unset: never.
+      # /debug/ answers only with ?debugkey=<this file's content, trimmed>; DERPER_DEBUG_KEY unset: the file
+      # holds a lone newline, which never matches (see the `configs:` entry at the end).
       TS_DEBUG_KEY_PATH: /run/derper-debug-key
     configs:
       - source: derper-debug-key
@@ -88,4 +89,6 @@ volumes:
 
 configs:
   derper-debug-key:
-    content: "${DERPER_DEBUG_KEY:-}"
+    # Never empty: compose turns an empty `content` into a bind mount of its working directory (with .env).
+    # CI checks this renders as content, never as a file.
+    content: "${DERPER_DEBUG_KEY:-}\n"

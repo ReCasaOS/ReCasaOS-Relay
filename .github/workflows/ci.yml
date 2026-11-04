@@ -11,6 +11,12 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
       - run: docker compose config -q
+      # An empty `content` makes compose bind-mount its working directory into derper: never allow it.
+      - name: derper debug key config is never empty nor a file
+        run: |
+          set -o pipefail
+          env -u DERPER_DEBUG_KEY docker compose config --format json |
+            jq -e '.configs["derper-debug-key"] | (.content // "") != "" and .file == null and .environment == null'
   e2e:
     runs-on: ubuntu-latest
     steps:
