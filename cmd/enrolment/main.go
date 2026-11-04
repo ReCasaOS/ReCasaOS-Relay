@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ReCasaOS/recasaos-relay/internal/admin"
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/gc"
 	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
@@ -52,9 +53,18 @@ func run() error {
 	pol := policy.NewWriter(st, hs)
 	// One remover (and so one set of per-fleet locks) for the HTTP handlers and the janitor.
 	remover := &fleets.Remover{Store: st, Headscale: hs, Policy: pol, Locks: &fleets.Locks{}}
+	// The operator page, under /admin, only when ADMIN_TOKEN is set (404 otherwise).
+	var adminH http.Handler
+	if tok := os.Getenv("ADMIN_TOKEN"); tok != "" {
+		adminH, err = admin.New(admin.Config{Token: tok, NodesPerFleet: cfg.NodesPerFleet, MaxFleets: cfg.MaxFleets,
+			ClientHeader: cfg.TrustedProxyHeader}, admin.Deps{Store: st, Headscale: hs, Remover: remover})
+		if err != nil {
+			return err
+		}
+	}
 	srv := &http.Server{
 		Addr:              getenv("LISTEN_ADDR", ":8081"),
-		Handler:           server.New(cfg, server.Deps{Store: st, Headscale: hs, PolicyHook: pol.Hook, Remover: remover}),
+		Handler:           server.New(cfg, server.Deps{Store: st, Headscale: hs, PolicyHook: pol.Hook, Remover: remover, Admin: adminH}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      45 * time.Second, // a create-fleet call may wait on Headscale (20 s) and its rollback

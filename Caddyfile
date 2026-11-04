@@ -12,7 +12,9 @@
 		respond 404
 	}
 
-	handle /v1/* {
+	# /admin is the operator page: the service answers 404 unless ADMIN_TOKEN is set.
+	@enrolment path /v1/* /admin /admin/*
+	handle @enrolment {
 		reverse_proxy enrolment:8081 {
 			# header_up replaces any value sent by the client; {client_ip} is the TCP peer, or the real
 			# client when `trusted_proxies` lists the proxy in front of this one (see README).

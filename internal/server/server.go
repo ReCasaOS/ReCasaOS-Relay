@@ -46,7 +46,9 @@ type Deps struct {
 	// Remover deletes fleets and owns the per-fleet locks; share it with the janitor so both take
 	// the same locks. Nil: one is built from Store and Headscale (no policy sync, private locks).
 	Remover *fleets.Remover
-	Now     func() time.Time // default time.Now
+	// Admin, when not nil, is served under /admin/ (and /admin redirects to it).
+	Admin http.Handler
+	Now   func() time.Time // default time.Now
 }
 
 // New returns the service's HTTP handler.
@@ -75,6 +77,10 @@ func New(cfg Config, deps Deps) http.Handler {
 		mux.HandleFunc("GET /v1/fleets/{id}", h.fleetStatus)
 		mux.HandleFunc("DELETE /v1/fleets/{id}/nodes/{hostname}", h.removeNode)
 		mux.HandleFunc("DELETE /v1/fleets/{id}", h.deleteFleet)
+	}
+	if deps.Admin != nil {
+		mux.Handle("/admin/", deps.Admin)
+		mux.Handle("/admin", http.RedirectHandler("/admin/", http.StatusMovedPermanently))
 	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
