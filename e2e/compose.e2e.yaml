@@ -29,6 +29,7 @@ services:
   enrolment:
     environment:
       LOGIN_SERVER: https://relay.test
+      ADMIN_TOKEN: e2e-admin-token-0123456789abcdef
       AUTH_RATE_PER_HOUR: "1000"
       KEY_RATE_PER_HOUR: "100"
 

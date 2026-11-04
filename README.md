@@ -110,11 +110,11 @@ Each fleet is a Headscale user `f-<fleet id>`. The enrolment service owns Headsc
 
 ## Relayed traffic and quotas
 
-Metering of relayed (DERP) traffic was investigated in [docs/metering.md](docs/metering.md): the embedded DERP cannot be metered; a per-fleet monthly quota needs a standalone `derper`, planned as a follow-up.
+Relayed (DERP) traffic goes through a standalone `derper` and is metered per box and per fleet: set `DERPER_DEBUG_KEY` and read it on `/admin` (observed, not capped). A per-fleet monthly quota that cuts a fleet off is a planned follow-up; the investigation and design are in [docs/metering.md](docs/metering.md).
 
 ## Releases
 
-Pushing a tag `v*` runs `.github/workflows/release.yml`: `go vet` and `go test`, then the `enrolment` image is built and pushed to `ghcr.io/<owner>/<repository>-enrolment` (lowercased; `ghcr.io/recasaos/recasaos-relay-enrolment` here) tagged with the version and, unless the tag has a `-` suffix (a pre-release), `latest`. It uses only the built-in `GITHUB_TOKEN`. To run the published image instead of building it, see [docs/self-hosting.md](docs/self-hosting.md#using-the-published-image).
+Pushing a tag `v*` runs `.github/workflows/release.yml`: `go vet` and `go test`, then the `enrolment` and `derper` images are built and pushed to `ghcr.io/<owner>/<repository>-enrolment` and `-derper` (lowercased; `ghcr.io/recasaos/recasaos-relay-enrolment` here) tagged with the version and, unless the tag has a `-` suffix (a pre-release), `latest`. It uses only the built-in `GITHUB_TOKEN`. To run the published image instead of building it, see [docs/self-hosting.md](docs/self-hosting.md#using-the-published-image).
 
 ## Development
 
