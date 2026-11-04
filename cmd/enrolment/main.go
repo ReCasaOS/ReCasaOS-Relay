@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -155,19 +156,26 @@ func serveAfterPolicy(ctx context.Context, applyPolicy func(context.Context) err
 	return serve()
 }
 
-// parseBytes reads a byte count with an optional decimal K, M, G or T suffix ("100G", "1.5G"); "" is 0.
-func parseBytes(s string) (int64, error) {
+// parseBytes reads a byte count with an optional decimal K, M, G or T suffix, any case, and an optional
+// trailing B ("100G", "1.5 GB", "2t"); blank is 0.
+func parseBytes(in string) (int64, error) {
+	s := strings.TrimSpace(in)
 	if s == "" {
 		return 0, nil
 	}
+	if n := len(s); s[n-1] == 'B' || s[n-1] == 'b' {
+		s = s[:n-1]
+	}
 	mult := 1.0
-	if i := strings.IndexByte("KMGT", s[len(s)-1]); i >= 0 {
-		mult = [...]float64{1e3, 1e6, 1e9, 1e12}[i]
-		s = s[:len(s)-1]
+	if n := len(s); n > 0 {
+		if i := strings.Index("KMGT", strings.ToUpper(s[n-1:])); i >= 0 {
+			mult = [...]float64{1e3, 1e6, 1e9, 1e12}[i]
+			s = s[:n-1]
+		}
 	}
-	f, err := strconv.ParseFloat(s, 64)
+	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
 	if err != nil || !(f >= 0 && f*mult < 9e18) { // negated so NaN fails too; the cap keeps int64 from overflowing
-		return 0, fmt.Errorf("invalid byte count %q", s)
+		return 0, fmt.Errorf("invalid byte count %q", in)
 	}
-	return int64(f * mult), nil
+	return int64(math.Round(f * mult)), nil
 }

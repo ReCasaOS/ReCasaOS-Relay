@@ -73,6 +73,9 @@ CREATE TABLE IF NOT EXISTS usage_hour (
 	CHECK (fleet_id <> '' AND node_id <> ''),
 	PRIMARY KEY (fleet_id, node_id, hour)
 );
+-- Time-range reads and pruning filter on the bucket alone, which the primary keys do not lead with.
+CREATE INDEX IF NOT EXISTS usage_minute_minute ON usage_minute(minute);
+CREATE INDEX IF NOT EXISTS usage_hour_hour ON usage_hour(hour);
 CREATE TABLE IF NOT EXISTS derp_cursor (conn TEXT PRIMARY KEY, rx INTEGER NOT NULL, tx INTEGER NOT NULL);`
 
 type sqlStore struct{ db *sql.DB }
