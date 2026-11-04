@@ -52,6 +52,11 @@ services:
       GC_INTERVAL: ${GC_INTERVAL:-10m}
       # Optional operator page at /admin (24+ characters). Unset: /admin answers 404.
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      # Optional traffic metering from the derper. DERPER_DEBUG_KEY unset: metering is off.
+      DERPER_URL: ${DERPER_URL:-http://derper:8090}
+      DERPER_DEBUG_KEY: ${DERPER_DEBUG_KEY:-}
+      # Monthly traffic budget shown on /admin, e.g. 100G or 2T (K, M, G, T are decimal). Unset: no reference.
+      MONTHLY_TRAFFIC_REFERENCE: ${MONTHLY_TRAFFIC_REFERENCE:-}
     volumes:
       - enrolment-data:/data
     # Reached only through `front` (Caddyfile): never publish this port, the rate limiter trusts X-Client-IP.

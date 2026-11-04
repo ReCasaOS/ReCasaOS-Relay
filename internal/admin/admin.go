@@ -21,6 +21,7 @@ import (
 
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
+	"github.com/ReCasaOS/recasaos-relay/internal/meter"
 	"github.com/ReCasaOS/recasaos-relay/internal/ratelimit"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
 )
@@ -72,6 +73,8 @@ type Config struct {
 	// ClientHeader names the header in which `front` puts the client address (X-Client-IP); empty:
 	// the TCP peer.
 	ClientHeader string
+	// MonthlyReference is the monthly traffic the operator budgets, in bytes; 0: none.
+	MonthlyReference int64
 }
 
 // Deps are the same collaborators the enrolment handlers use.
@@ -80,6 +83,8 @@ type Deps struct {
 	Headscale headscale.API
 	Remover   *fleets.Remover
 	Now       func() time.Time // default time.Now
+	// Meter feeds the traffic figures; a true nil interface when metering is off.
+	Meter interface{ Live() meter.Live }
 }
 
 type handler struct {
