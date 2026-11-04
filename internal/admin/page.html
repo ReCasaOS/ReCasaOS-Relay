@@ -80,9 +80,11 @@ polygon { fill:var(--c); fill-opacity:.8; }
 {{else}}<p class="mut">No fleet yet.</p>{{end}}
 {{if .Deleted}}<p class="mut">deleted fleets: {{bytes .Deleted}} this month</p>{{end}}
 <script>
+// First, so nothing below can stop the reload.
+setInterval(function(){ if (!document.hidden) location.reload() }, 15000)
 // The reload would close every fleet: reopen the ones that were open.
 var openFleets = [];
-try { openFleets = JSON.parse(sessionStorage.getItem('admin-open')) || [] } catch (e) {}
+try { var stored = JSON.parse(sessionStorage.getItem('admin-open')); if (Array.isArray(stored)) openFleets = stored } catch (e) {}
 document.querySelectorAll('details[data-id]').forEach(function (d) {
   if (openFleets.indexOf(d.dataset.id) >= 0) d.open = true
   d.addEventListener('toggle', function () {
@@ -90,7 +92,6 @@ document.querySelectorAll('details[data-id]').forEach(function (d) {
     try { sessionStorage.setItem('admin-open', JSON.stringify(ids)) } catch (e) {}
   })
 })
-setInterval(function(){ if (!document.hidden) location.reload() }, 15000)
 </script>
 </body>
 </html>

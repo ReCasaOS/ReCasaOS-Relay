@@ -131,8 +131,8 @@ func TestDerperAdmission(t *testing.T) {
 		t.Fatal("derper's STUN does not answer")
 	}
 
-	// derper's debug pages never go through the public front, even with the right key.
-	for _, p := range []string{"/debug/clients/", "/debug/varz"} {
+	// derper's debug pages never go through the public front, even with the right key; nor does /internal/*.
+	for _, p := range []string{"/debug/clients/", "/debug/varz", "/internal/x"} {
 		resp, err := http.Get(r.frontURL + p + "?debugkey=" + derperDebugKey)
 		if err != nil {
 			t.Fatal(err)
