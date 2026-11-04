@@ -17,6 +17,12 @@ import (
 // pageSize is derper's maximum page (debugClientsMaxLimit): a shorter page is the last one.
 const pageSize = 1000
 
+// derperTimeout bounds each page request, whatever client is passed: a derper that accepts the
+// connection and never answers must not stall the meter.
+const derperTimeout = 10 * time.Second
+
+var pageTimeout = derperTimeout // a variable so tests can shorten it
+
 // Conn is one derper connection and its byte counters as derper sees them: Rx is what the client
 // sent (its upload), Tx what derper sent it.
 type Conn struct {
@@ -66,6 +72,8 @@ func (d *Derper) Clients(ctx context.Context) ([]Conn, error) {
 }
 
 func (d *Derper) page(ctx context.Context, v url.Values) ([]Conn, error) {
+	ctx, cancel := context.WithTimeout(ctx, pageTimeout)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.base+"/debug/clients/?"+v.Encode(), nil)
 	if err != nil {
 		return nil, errors.New("bad derper URL")

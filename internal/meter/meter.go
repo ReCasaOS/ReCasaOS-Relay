@@ -47,7 +47,7 @@ type Meter struct {
 	refreshed    time.Time
 	prev         map[string]bool // connection identities seen on the previous successful tick
 	prevAt       time.Time
-	unattributed int64 // bytes of connections no fleet node owns, since the last hourly log
+	unattributed int64 // bytes of known keys outside any fleet, since the last hourly log
 	conns        int   // connections on the last successful tick
 }
 
@@ -80,6 +80,11 @@ func (m *Meter) fail(at time.Time, err error) error {
 
 // Tick reads derper once, stores the bytes moved since the stored cursors and updates Live. On
 // error nothing is stored, so the next tick counts those bytes.
+//
+// The cursor table is replaced by the connections whose key Headscale knows. A key it does not
+// know yet gets no cursor, so once it resolves its connection counts in full: each byte counts
+// once, late rather than never. A key known but outside any fleet keeps its cursor and only its
+// deltas count as unattributed.
 func (m *Meter) Tick(ctx context.Context) error {
 	now := m.now()
 	conns, err := m.Source.Clients(ctx)
@@ -108,8 +113,12 @@ func (m *Meter) Tick(ctx context.Context) error {
 			continue
 		}
 		seen[id] = true
+		o, known := m.owners[c.Key]
+		if !known {
+			continue // no cursor: counted in full once the key resolves
+		}
 		next = append(next, store.Cursor{Conn: id, Rx: c.Rx, Tx: c.Tx})
-		d := delta{o: m.owners[c.Key], rx: c.Rx, tx: c.Tx}
+		d := delta{o: o, rx: c.Rx, tx: c.Tx}
 		if p, ok := cursors[id]; ok && c.Rx >= p.Rx && c.Tx >= p.Tx {
 			d.rx, d.tx, d.rated = c.Rx-p.Rx, c.Tx-p.Tx, m.prev[id]
 		}

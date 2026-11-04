@@ -188,6 +188,27 @@ func TestTickUnknownKeyRefreshIsRateLimited(t *testing.T) {
 	}
 }
 
+func TestTickUnknownKeyCountedOnceResolved(t *testing.T) {
+	r := newRig(t)
+	m := r.meter()
+	late := Conn{Key: k2, ConnNum: 5, ConnectedAt: connected, Rx: 1000, Tx: 10}
+	r.tick(m, late)
+	r.now = r.now.Add(15 * time.Second)
+	late.Rx, late.Tx = 3000, 30
+	r.tick(m, late)
+	id := r.hs.AddNode("f-fleet1", "late", true)
+	r.hs.SetNodeKey("f-fleet1", "late", k2)
+	r.now = r.now.Add(45 * time.Second) // 60 s after the first resolve
+	late.Rx, late.Tx = 4000, 40
+	r.tick(m, late)
+	if got := r.rx(id); got != 4000 || r.totals()[0].Tx != 40 {
+		t.Fatalf("totals = %+v, want the full counters 4000/40", r.totals())
+	}
+	if rate, ok := m.Live().Nodes[id]; ok {
+		t.Fatalf("rate without a previous cursor: %+v", rate)
+	}
+}
+
 func TestTickSourceErrorMarksLiveNotOK(t *testing.T) {
 	r := newRig(t)
 	m := r.meter()

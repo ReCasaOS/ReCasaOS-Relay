@@ -76,6 +76,25 @@ func TestDerperClientsFixture(t *testing.T) {
 	}
 }
 
+func TestDerperTimesOut(t *testing.T) {
+	old := pageTimeout
+	pageTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { pageTimeout = old })
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(3 * time.Second):
+			w.Write([]byte(`{"clients":[]}`))
+		}
+	}))
+	defer srv.Close()
+	start := time.Now()
+	_, err := NewDerper(srv.URL, testDebugKey, srv.Client()).Clients(context.Background())
+	if err == nil || strings.Contains(err.Error(), testDebugKey) || time.Since(start) > 2*time.Second {
+		t.Fatalf("err = %v after %s", err, time.Since(start))
+	}
+}
+
 func TestDerperPaginates(t *testing.T) {
 	var queries []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
