@@ -2,7 +2,7 @@
 
 // Package e2e proves the one property the relay exists for: a fleet never reaches another.
 //
-// It needs Docker and runs the real stack (Headscale, the front Caddy, the enrolment service) plus
+// It needs Docker and runs the real stack (Headscale, derper, the front Caddy, the enrolment service) plus
 // one tailscaled container per node, each registered with a join key obtained through the real
 // HTTP API:
 //
@@ -54,6 +54,7 @@ type rig struct {
 	ts        map[string]*node
 	fleetUser map[string]string // fleet name -> Headscale user
 	env       []string          // extra variables for docker compose (compose.yaml interpolates them)
+	nodeEnv   []string          // extra variables for every tailscaled container (docker create -e)
 }
 
 type node struct {
@@ -113,7 +114,7 @@ func newRig(t *testing.T) *rig {
 	var b [4]byte
 	rand.Read(b[:])
 	r := &rig{t: t, proj: "rre2e" + hex.EncodeToString(b[:]), root: filepath.Dir(wd),
-		ts: map[string]*node{}, fleetUser: map[string]string{}}
+		ts: map[string]*node{}, fleetUser: map[string]string{}, env: []string{"DERPER_DEBUG_KEY=" + derperDebugKey}}
 	t.Cleanup(func() {
 		if os.Getenv("E2E_KEEP") != "" { // debugging: leave the stack up (remove it yourself)
 			t.Logf("kept project %s", r.proj)
@@ -141,7 +142,7 @@ func (r *rig) up() {
 		r.apiKey = strings.TrimSpace(lines[len(lines)-1])
 		return nil
 	})
-	r.mustCompose("up", "-d", "--build", "enrolment", "front", "tlsfront")
+	r.mustCompose("up", "-d", "--build", "derper", "enrolment", "front", "tlsfront")
 	r.hsURL = "http://" + r.mustCompose("port", "headscale", "8080")
 	r.frontURL = "http://" + r.mustCompose("port", "front", "8080")
 	r.hs = headscale.New(r.hsURL, r.apiKey, nil)
@@ -280,12 +281,15 @@ func (r *rig) startNode(fleet, name, key string) *node {
 func (r *rig) startNodeAs(fleet, name, ctr, key string) *node {
 	t := r.t
 	n := &node{name: ctr, container: r.proj + "-" + ctr, fleet: fleet}
-	out, err := sh("docker", "create", "--name", n.container, "--hostname", name,
-		"--label", "rre2e.project="+r.proj, "--network", r.proj+"_default",
+	args := []string{"create", "--name", n.container, "--hostname", name,
+		"--label", "rre2e.project=" + r.proj, "--network", r.proj + "_default",
 		"--cap-add", "NET_ADMIN", "--cap-add", "NET_RAW", "--device", "/dev/net/tun:/dev/net/tun",
-		"-e", "TS_AUTHKEY="+key, "-e", "TS_USERSPACE=false", "-e", "TS_HOSTNAME="+name, "-e", "TS_STATE_DIR=/var/lib/tailscale",
-		"-e", "TS_EXTRA_ARGS=--login-server="+loginServer, "-e", "SSL_CERT_FILE=/relay-ca.crt",
-		"tailscale/tailscale:v1.104.4") // pinned: what :stable was when this was last run
+		"-e", "TS_AUTHKEY=" + key, "-e", "TS_USERSPACE=false", "-e", "TS_HOSTNAME=" + name, "-e", "TS_STATE_DIR=/var/lib/tailscale",
+		"-e", "TS_EXTRA_ARGS=--login-server=" + loginServer, "-e", "SSL_CERT_FILE=/relay-ca.crt"}
+	for _, e := range r.nodeEnv {
+		args = append(args, "-e", e)
+	}
+	out, err := sh("docker", append(args, "tailscale/tailscale:v1.104.4")...) // pinned: what :stable was when this was last run
 	if err != nil {
 		t.Fatalf("docker create %s: %v\n%s", name, err, out)
 	}
@@ -318,7 +322,8 @@ func (r *rig) tcpReach(from, to *node) bool {
 }
 
 func (r *rig) pingReach(from, to *node) bool {
-	_, err := sh("docker", "exec", from.container, "tailscale", "ping", "-c", "1", "--timeout", "3s", to.ip)
+	// --until-direct=false: a pong relayed by DERP counts (with -c 1 the default fails on it).
+	_, err := sh("docker", "exec", from.container, "tailscale", "ping", "--until-direct=false", "-c", "1", "--timeout", "3s", to.ip)
 	return err == nil
 }
 

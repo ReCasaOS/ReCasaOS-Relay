@@ -1,6 +1,10 @@
 # Metering relayed (DERP) traffic: spike result
 
-Status: spike, measured on 2026-11-03. It does not block v1. Nothing here is implemented yet except what is stated in "What changed in this repository".
+Status: spike, measured on 2026-11-03. **Observation has shipped (v0.4.0); quota and enforcement are still a follow-up.**
+
+Shipped: a standalone `derper` replaces the embedded DERP (`compose.yaml`, `derper/Dockerfile`, `headscale/derp.yaml`; admission through Headscale's `/verify`, fail-closed); the `enrolment` service scrapes `derper`'s `/debug/clients/` every 15 s and keeps per-node, per-fleet minute and hour buckets in `relay.db` (`internal/meter`); `/admin` shows the relayed rate, the monthly volume and a per-node chart (`MONTHLY_TRAFFIC_REFERENCE` adds a budget bar); the end-to-end test `TestRelayedTrafficIsMetered` sends 20 MiB through DERP and checks the page. Operator documentation: section 12 of [self-hosting.md](self-hosting.md).
+
+Not shipped: the per-fleet quota, the admit endpoint with a quota check, and the cutting of open connections (items 4 to 7 of "Follow-up design" below). The text below is the spike as written; where it says "v1" or "planned", read the shipped state above.
 
 ## Question
 
@@ -83,4 +87,4 @@ The `derper` command line used in the spike is not preserved in the repository (
 
 ## What changed in this repository
 
-The documentation only (this file, a README link, and comments in `compose.yaml` and `headscale/config.yaml` that now point here). The spike rig, its compose override, the derper image and all containers, networks and volumes were removed. No port is published that was not already.
+At the time of the spike, the documentation only (this file, a README link, and comments in `compose.yaml` and `headscale/config.yaml` that now point here). The spike rig, its compose override, the derper image and all containers, networks and volumes were removed. No port is published that was not already.

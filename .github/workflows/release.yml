@@ -1,8 +1,9 @@
 name: release
 
-# Builds the `enrolment` image and pushes it to GHCR when a version tag is pushed.
-# Image: ghcr.io/<owner>/<repository>-enrolment, lowercased (for this repository
-# ghcr.io/recasaos/recasaos-relay-enrolment), tagged with the git tag and, for a final release, `latest`.
+# Builds the `enrolment` and `derper` images and pushes them to GHCR when a version tag is pushed.
+# Images: ghcr.io/<owner>/<repository>-enrolment and -derper, lowercased (for this repository
+# ghcr.io/recasaos/recasaos-relay-enrolment and ghcr.io/recasaos/recasaos-relay-derper), tagged with the
+# git tag and, for a final release, `latest`.
 # Only the built-in GITHUB_TOKEN is used; the only actions are actions/checkout@v4 and
 # actions/setup-go@v5 (first-party, pinned by major version tag, like ci.yml); the image is built with plain `docker`.
 on:
@@ -38,11 +39,20 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          image="ghcr.io/${GITHUB_REPOSITORY,,}-enrolment"
-          tags=(-t "$image:$VERSION")
-          # A pre-release tag (v1.2.0-rc1) must not move `latest`.
-          case "$VERSION" in *-*) ;; *) tags+=(-t "$image:latest") ;; esac
           echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker build --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
-            --label "org.opencontainers.image.version=$VERSION" "${tags[@]}" .
-          docker push --all-tags "$image"
+          # <image suffix> <build context>. Build every image before pushing any: a failed build must not
+          # leave a half-published release (one image pushed, `latest` moved).
+          pairs=("enrolment ." "derper ./derper")
+          for pair in "${pairs[@]}"; do
+            read -r name context <<<"$pair"
+            image="ghcr.io/${GITHUB_REPOSITORY,,}-$name"
+            tags=(-t "$image:$VERSION")
+            # A pre-release tag (v1.2.0-rc1) must not move `latest`.
+            case "$VERSION" in *-*) ;; *) tags+=(-t "$image:latest") ;; esac
+            docker build --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+              --label "org.opencontainers.image.version=$VERSION" "${tags[@]}" "$context"
+          done
+          for pair in "${pairs[@]}"; do
+            read -r name _ <<<"$pair"
+            docker push --all-tags "ghcr.io/${GITHUB_REPOSITORY,,}-$name"
+          done

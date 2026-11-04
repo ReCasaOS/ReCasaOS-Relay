@@ -5,12 +5,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/fakes"
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
+	"github.com/ReCasaOS/recasaos-relay/internal/meter"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
 )
 
@@ -168,5 +170,224 @@ func TestRateLimited(t *testing.T) {
 	}
 	if w := e.do("GET", "/admin/", token, nil); w.Code != 429 {
 		t.Fatalf("the right token is not tried once limited: %d", w.Code)
+	}
+}
+
+func TestAuthenticatedRequestsAreNotLimited(t *testing.T) {
+	e := setup(t)
+	for i := 0; i < 300; i++ {
+		if w := e.do("GET", "/admin/", token, nil); w.Code != 200 {
+			t.Fatalf("request %d: %d", i+1, w.Code)
+		}
+	}
+}
+
+func TestFailedAuthIsLimited(t *testing.T) {
+	e := setup(t)
+	for i := 0; i < requestsPerHour; i++ {
+		if w := e.do("GET", "/admin/", "wrong", nil); w.Code != 401 {
+			t.Fatalf("request %d: %d, want 401", i+1, w.Code)
+		}
+	}
+	if w := e.do("GET", "/admin/", token, nil); w.Code != 429 {
+		t.Fatalf("right token after the limit: %d, want 429", w.Code)
+	}
+}
+
+func TestFullLimiterFailsClosed(t *testing.T) {
+	e := setup(t)
+	h, err := New(Config{Token: token, ClientHeader: "X-Client-IP"}, Deps{
+		Store: e.st, Headscale: e.hs, Now: func() time.Time { return t0 },
+		Remover: &fleets.Remover{Store: e.st, Headscale: e.hs, Locks: &fleets.Locks{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	get := func(ip string) int {
+		r := httptest.NewRequest("GET", "/admin/", nil)
+		r.Header.Set("X-Client-IP", ip)
+		r.SetBasicAuth("admin", "wrong")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+	for i := 0; i < 100_000; i++ { // the limiter's key cap (ratelimit.defaultMaxKeys)
+		get("10." + strconv.Itoa(i>>16) + "." + strconv.Itoa(i>>8&255) + "." + strconv.Itoa(i&255))
+	}
+	if c := get("192.0.2.1"); c != 429 {
+		t.Fatalf("new address with a full limiter: %d, want 429", c)
+	}
+}
+
+type fakeMeter meter.Live
+
+func (f fakeMeter) Live() meter.Live { return meter.Live(f) }
+
+// with rebuilds the handler over the same store and Headscale, with a reference and a meter.
+func (e env) with(t *testing.T, reference int64, m interface{ Live() meter.Live }) env {
+	t.Helper()
+	h, err := New(Config{Token: token, NodesPerFleet: 50, MaxFleets: 1000, MonthlyReference: reference}, Deps{
+		Store: e.st, Headscale: e.hs, Now: func() time.Time { return t0 }, Meter: m,
+		Remover: &fleets.Remover{Store: e.st, Headscale: e.hs, Locks: &fleets.Locks{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.h = h
+	return e
+}
+
+func (e env) nodeID(t *testing.T, user, host string) string {
+	t.Helper()
+	ns, _ := e.hs.ListNodes(context.Background(), user)
+	for _, n := range ns {
+		if n.Hostname == host {
+			return n.ID
+		}
+	}
+	t.Fatalf("no node %s/%s", user, host)
+	return ""
+}
+
+func (e env) usage(t *testing.T, samples ...store.UsageSample) {
+	t.Helper()
+	if err := e.st.ApplyUsage(context.Background(), t0.Add(-5*time.Minute), samples, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// between returns the text of body from the first from to the next to after it.
+func between(t *testing.T, body, from, to string) string {
+	t.Helper()
+	i := strings.Index(body, from)
+	if i < 0 {
+		t.Fatalf("page lacks %q", from)
+	}
+	j := strings.Index(body[i:], to)
+	if j < 0 {
+		t.Fatalf("no %q after %q", to, from)
+	}
+	return body[i : i+j]
+}
+
+func TestIndexShowsRelayedUsage(t *testing.T) {
+	e := setup(t)
+	e.hs.AddNode("f-bbbb", "b-idle", true)
+	one, two, idle := e.nodeID(t, "f-aaaa", "b-one"), e.nodeID(t, "f-bbbb", "b-two"), e.nodeID(t, "f-bbbb", "b-idle")
+	e.usage(t, store.UsageSample{FleetID: "aaaa", NodeID: one, Rx: 2e9, Tx: 1},
+		store.UsageSample{FleetID: "bbbb", NodeID: two, Rx: 5e9, Tx: 2},
+		store.UsageSample{FleetID: "bbbb", NodeID: idle, Rx: 1e6})
+	e = e.with(t, 0, fakeMeter{OK: true, At: t0, Nodes: map[string]meter.Rate{
+		one: {Up: 1500, Down: 200e3}, two: {Up: 2.5e6}, idle: {Up: 10, Down: 500}}})
+	w := e.do("GET", "/admin/", token, nil)
+	body := w.Body.String()
+	if w.Code != 200 {
+		t.Fatalf("%d", w.Code)
+	}
+	for _, want := range []string{"<b>7.0 GB</b><span>relayed this month</span>", "<b>2.5 MB/s</b><span>relayed now</span>"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	if a, b := strings.Index(body, "<code>aaaa</code>"), strings.Index(body, "<code>bbbb</code>"); b < 0 || a < b {
+		t.Errorf("the fleet with more volume is not first (aaaa at %d, bbbb at %d)", a, b)
+	}
+	for fleet, want := range map[string][]string{"bbbb": {"5.0 GB", "2.5 MB/s"}, "aaaa": {"2.0 GB", "1.5 kB/s"}} {
+		head := between(t, body, "<code>"+fleet+"</code>", "</summary>")
+		for _, s := range want {
+			if !strings.Contains(head, s) {
+				t.Errorf("fleet %s header lacks %q: %s", fleet, s, head)
+			}
+		}
+	}
+	row := between(t, body, `data-node-id="`+one+`"`, "</tr>")
+	for _, s := range []string{`data-up-month="2000000000"`, "↑ 1.5 kB/s", "↓ 200.0 kB/s", "2.0 GB this month"} {
+		if !strings.Contains(row, s) {
+			t.Errorf("node row lacks %q: %s", s, row)
+		}
+	}
+	if row := between(t, body, `data-node-id="`+idle+`"`, "</tr>"); !strings.Contains(row, "≈ 0 relayed") {
+		t.Errorf("idle node row: %s", row)
+	}
+	if row := between(t, body, `data-node-id="`+two+`"`, "</tr>"); strings.Contains(row, "≈ 0 relayed") {
+		t.Errorf("busy node shown idle: %s", row)
+	}
+}
+
+func TestIndexReferenceBar(t *testing.T) {
+	e := setup(t)
+	e.usage(t, store.UsageSample{FleetID: "aaaa", NodeID: e.nodeID(t, "f-aaaa", "b-one"), Rx: 85e9})
+	if body := e.with(t, 100e9, nil).do("GET", "/admin/", token, nil).Body.String(); !strings.Contains(body, `class="bar warn"`) ||
+		!strings.Contains(body, "85.0 GB / 100.0 GB") {
+		t.Error("no warning bar at 85 %")
+	}
+	if body := e.with(t, 0, nil).do("GET", "/admin/", token, nil).Body.String(); strings.Contains(body, `class="bar`) {
+		t.Error("a bar without a reference")
+	}
+}
+
+func TestIndexDeletedFleets(t *testing.T) {
+	e := setup(t)
+	e.usage(t, store.UsageSample{FleetID: "zzzz", NodeID: "99", Rx: 3e9},
+		store.UsageSample{FleetID: "aaaa", NodeID: e.nodeID(t, "f-aaaa", "b-one"), Rx: 1e9})
+	body := e.do("GET", "/admin/", token, nil).Body.String()
+	if line := between(t, body, "deleted fleets", "</p>"); !strings.Contains(line, "3.0 GB") {
+		t.Errorf("deleted fleets line: %s", line)
+	}
+	if !strings.Contains(body, "<b>4.0 GB</b><span>relayed this month</span>") {
+		t.Error("the global tile leaves out deleted fleets")
+	}
+}
+
+func TestIndexMeteringUnavailable(t *testing.T) {
+	for name, m := range map[string]interface{ Live() meter.Live }{"nil": nil, "not ok": fakeMeter{OK: false}} {
+		w := setup(t).with(t, 0, m).do("GET", "/admin/", token, nil)
+		body := w.Body.String()
+		if w.Code != 200 {
+			t.Fatalf("%s: %d", name, w.Code)
+		}
+		for _, want := range []string{"metering unavailable", "aaaa", "bbbb", "b-one", "b-two"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: page lacks %q", name, want)
+			}
+		}
+	}
+}
+
+func TestIndexRange(t *testing.T) {
+	e := setup(t)
+	body := e.do("GET", "/admin/?range=24h", token, nil).Body.String()
+	if !strings.Contains(body, `<a href="?range=24h" class="cur" aria-current="page">24 h</a>`) || !strings.Contains(body, `data-buckets="96"`) {
+		t.Error("24h range not applied")
+	}
+	body = e.do("GET", "/admin/?range=bogus", token, nil).Body.String()
+	if !strings.Contains(body, `<a href="?range=1h" class="cur" aria-current="page">1 h</a>`) || !strings.Contains(body, `data-buckets="60"`) {
+		t.Error("bogus range does not fall back to 1h")
+	}
+}
+
+func TestIndexAutoReloadScript(t *testing.T) {
+	w := setup(t).do("GET", "/admin/", token, nil)
+	if !strings.Contains(w.Body.String(), "setInterval(function(){ if (!document.hidden) location.reload() }, 15000)") {
+		t.Error("no visibility-guarded reload")
+	}
+	if got := w.Header().Get("Content-Security-Policy"); got != "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'" {
+		t.Errorf("CSP changed: %s", got)
+	}
+}
+
+func TestIndexEscapesNodeNames(t *testing.T) {
+	e := setup(t)
+	id := e.hs.AddNode("f-aaaa", "<img src=x>", true)
+	e.usage(t, store.UsageSample{FleetID: "aaaa", NodeID: id, Rx: 1e6})
+	body := e.do("GET", "/admin/", token, nil).Body.String()
+	if strings.Contains(body, "<img") {
+		t.Error("raw hostname in the page")
+	}
+	if lg := between(t, body, `<div class="lg">`, "</div>"); !strings.Contains(lg, "&lt;img src=x&gt;") {
+		t.Errorf("legend lacks the escaped name: %s", lg)
+	}
+	if svg := between(t, body, "<svg", "</svg>"); strings.Contains(svg, "src=x") {
+		t.Errorf("name in the svg: %s", svg)
 	}
 }

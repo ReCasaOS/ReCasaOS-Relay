@@ -110,3 +110,25 @@ func TestLimiterAtCapSweepsAtMostOncePerSecond(t *testing.T) {
 		t.Fatal("new key refused although a sweep is due and a key expired")
 	}
 }
+
+func TestBlockedDoesNotRecord(t *testing.T) {
+	c := &clock{time.Unix(1_800_000_000, 0)}
+	l := New(3, c.now)
+	for i := 0; i < 1000; i++ {
+		if l.Blocked("a") {
+			t.Fatal("blocked with no events")
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if ok, _ := l.Allow("a"); !ok {
+			t.Fatalf("Allow %d refused: Blocked recorded events", i)
+		}
+	}
+	if !l.Blocked("a") {
+		t.Fatal("not blocked at the limit")
+	}
+	c.t = c.t.Add(time.Hour)
+	if l.Blocked("a") {
+		t.Fatal("still blocked after the window")
+	}
+}

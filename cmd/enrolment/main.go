@@ -6,9 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,6 +19,7 @@ import (
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/gc"
 	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
+	"github.com/ReCasaOS/recasaos-relay/internal/meter"
 	"github.com/ReCasaOS/recasaos-relay/internal/policy"
 	"github.com/ReCasaOS/recasaos-relay/internal/server"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
@@ -53,11 +57,26 @@ func run() error {
 	pol := policy.NewWriter(st, hs)
 	// One remover (and so one set of per-fleet locks) for the HTTP handlers and the janitor.
 	remover := &fleets.Remover{Store: st, Headscale: hs, Policy: pol, Locks: &fleets.Locks{}}
+	reference, err := parseBytes(os.Getenv("MONTHLY_TRAFFIC_REFERENCE"))
+	if err != nil {
+		return fmt.Errorf("MONTHLY_TRAFFIC_REFERENCE: %w", err)
+	}
+	// Traffic metering needs the derper's debug key; without it nothing is metered (the key is never logged).
+	var mtr *meter.Meter
+	if key := os.Getenv("DERPER_DEBUG_KEY"); key != "" {
+		mtr = &meter.Meter{Source: meter.NewDerper(getenv("DERPER_URL", "http://derper:8090"), key, nil), Nodes: hs, Store: st}
+	} else {
+		log.Printf("traffic metering is off: DERPER_DEBUG_KEY is not set")
+	}
 	// The operator page, under /admin, only when ADMIN_TOKEN is set (404 otherwise).
 	var adminH http.Handler
 	if tok := os.Getenv("ADMIN_TOKEN"); tok != "" {
+		deps := admin.Deps{Store: st, Headscale: hs, Remover: remover}
+		if mtr != nil { // never put a nil *Meter in the interface
+			deps.Meter = mtr
+		}
 		adminH, err = admin.New(admin.Config{Token: tok, NodesPerFleet: cfg.NodesPerFleet, MaxFleets: cfg.MaxFleets,
-			ClientHeader: cfg.TrustedProxyHeader}, admin.Deps{Store: st, Headscale: hs, Remover: remover})
+			ClientHeader: cfg.TrustedProxyHeader, MonthlyReference: reference}, deps)
 		if err != nil {
 			return err
 		}
@@ -89,9 +108,13 @@ func run() error {
 	// The janitor starts with the server, after the policy is in place, and Run returns only once its
 	// tick in flight has: the store must not be closed under it.
 	janitorStarted, janitorDone := false, make(chan struct{})
+	meterStarted, meterDone := false, make(chan struct{})
 	waitJanitor := func() {
 		if janitorStarted {
 			<-janitorDone
+		}
+		if mtr != nil && meterStarted {
+			<-meterDone
 		}
 	}
 	// Headscale allows everything until it has a policy: apply the deny-by-default one first, and
@@ -103,6 +126,13 @@ func run() error {
 				defer close(janitorDone)
 				gc.Run(ctx, gc.Deps{Remover: remover, IdleAfter: cfg.IdleAfter, JoinKeyTTL: cfg.JoinKeyTTL}, cfg.GCEvery)
 			}()
+			if mtr != nil {
+				meterStarted = true
+				go func() {
+					defer close(meterDone)
+					mtr.Run(ctx, 15*time.Second)
+				}()
+			}
 			log.Printf("enrolment listening on %s", srv.Addr)
 			return srv.ListenAndServe()
 		})
@@ -124,4 +154,28 @@ func serveAfterPolicy(ctx context.Context, applyPolicy func(context.Context) err
 		return fmt.Errorf("applying the access policy (refusing to serve without it): %w", err)
 	}
 	return serve()
+}
+
+// parseBytes reads a byte count with an optional decimal K, M, G or T suffix, any case, and an optional
+// trailing B ("100G", "1.5 GB", "2t"); blank is 0.
+func parseBytes(in string) (int64, error) {
+	s := strings.TrimSpace(in)
+	if s == "" {
+		return 0, nil
+	}
+	if n := len(s); s[n-1] == 'B' || s[n-1] == 'b' {
+		s = s[:n-1]
+	}
+	mult := 1.0
+	if n := len(s); n > 0 {
+		if i := strings.Index("KMGT", strings.ToUpper(s[n-1:])); i >= 0 {
+			mult = [...]float64{1e3, 1e6, 1e9, 1e12}[i]
+			s = s[:n-1]
+		}
+	}
+	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil || !(f >= 0 && f*mult < 9e18) { // negated so NaN fails too; the cap keeps int64 from overflowing
+		return 0, fmt.Errorf("invalid byte count %q", in)
+	}
+	return int64(math.Round(f * mult)), nil
 }

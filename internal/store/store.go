@@ -34,6 +34,15 @@ type Store interface {
 	// ListFleets returns every fleet ordered by id, without secret hashes (for building the access policy).
 	ListFleets(ctx context.Context) ([]Fleet, error)
 	CountFleets(ctx context.Context) (int, error)
+	// ApplyUsage atomically adds samples to the minute and hour buckets of at (UTC),
+	// then replaces the whole derper cursor table with cursors.
+	ApplyUsage(ctx context.Context, at time.Time, samples []UsageSample, cursors []Cursor) error
+	Cursors(ctx context.Context) (map[string]Cursor, error)
+	// UsageTotals sums hour buckets >= since per fleet and node.
+	UsageTotals(ctx context.Context, since time.Time) ([]UsageTotal, error)
+	// UsageSeries returns buckets >= since, ordered by time.
+	UsageSeries(ctx context.Context, res Resolution, since time.Time) ([]UsagePoint, error)
+	PruneUsage(ctx context.Context, minutesBefore, hoursBefore time.Time) error
 	Close() error
 }
 
@@ -50,7 +59,24 @@ CREATE TABLE IF NOT EXISTS keys (
 	key_id TEXT NOT NULL,
 	expires INTEGER NOT NULL,
 	PRIMARY KEY (fleet_id, key_id)
-);`
+);
+-- No foreign key to fleets: a deleted fleet's usage stays. Buckets are UTC unix seconds.
+CREATE TABLE IF NOT EXISTS usage_minute (
+	fleet_id TEXT NOT NULL, node_id TEXT NOT NULL, minute INTEGER NOT NULL,
+	rx INTEGER NOT NULL, tx INTEGER NOT NULL,
+	CHECK (fleet_id <> '' AND node_id <> ''),
+	PRIMARY KEY (fleet_id, node_id, minute)
+);
+CREATE TABLE IF NOT EXISTS usage_hour (
+	fleet_id TEXT NOT NULL, node_id TEXT NOT NULL, hour INTEGER NOT NULL,
+	rx INTEGER NOT NULL, tx INTEGER NOT NULL,
+	CHECK (fleet_id <> '' AND node_id <> ''),
+	PRIMARY KEY (fleet_id, node_id, hour)
+);
+-- Time-range reads and pruning filter on the bucket alone, which the primary keys do not lead with.
+CREATE INDEX IF NOT EXISTS usage_minute_minute ON usage_minute(minute);
+CREATE INDEX IF NOT EXISTS usage_hour_hour ON usage_hour(hour);
+CREATE TABLE IF NOT EXISTS derp_cursor (conn TEXT PRIMARY KEY, rx INTEGER NOT NULL, tx INTEGER NOT NULL);`
 
 type sqlStore struct{ db *sql.DB }
 
@@ -196,4 +222,140 @@ func (s *sqlStore) CountFleets(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("store: count fleets: %w", err)
 	}
 	return n, nil
+}
+
+// Cursor is the last seen byte counters of one derper connection;
+// Conn is "<key>|<connNum>|<connectedAt unix ns>".
+type Cursor struct {
+	Conn   string
+	Rx, Tx int64
+}
+
+type UsageSample struct {
+	FleetID, NodeID string
+	Rx, Tx          int64
+}
+
+type UsagePoint struct {
+	FleetID, NodeID string
+	At              time.Time
+	Rx, Tx          int64
+}
+
+type UsageTotal struct {
+	FleetID, NodeID string
+	Rx, Tx          int64
+}
+
+type Resolution int
+
+const (
+	PerMinute Resolution = iota
+	PerHour
+)
+
+func (s *sqlStore) ApplyUsage(ctx context.Context, at time.Time, samples []UsageSample, cursors []Cursor) (err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: apply usage: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+			err = fmt.Errorf("store: apply usage: %w", err)
+		}
+	}()
+	at = at.UTC()
+	for _, b := range []struct {
+		table, col string
+		t          time.Time
+	}{{"usage_minute", "minute", at.Truncate(time.Minute)}, {"usage_hour", "hour", at.Truncate(time.Hour)}} {
+		q := `INSERT INTO ` + b.table + ` (fleet_id, node_id, ` + b.col + `, rx, tx) VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(fleet_id, node_id, ` + b.col + `) DO UPDATE SET rx = rx + excluded.rx, tx = tx + excluded.tx`
+		for _, sm := range samples {
+			if _, err = tx.ExecContext(ctx, q, sm.FleetID, sm.NodeID, b.t.Unix(), sm.Rx, sm.Tx); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM derp_cursor`); err != nil {
+		return err
+	}
+	for _, c := range cursors {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO derp_cursor (conn, rx, tx) VALUES (?, ?, ?)`, c.Conn, c.Rx, c.Tx); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *sqlStore) Cursors(ctx context.Context) (map[string]Cursor, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT conn, rx, tx FROM derp_cursor`)
+	if err != nil {
+		return nil, fmt.Errorf("store: cursors: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]Cursor{}
+	for rows.Next() {
+		var c Cursor
+		if err := rows.Scan(&c.Conn, &c.Rx, &c.Tx); err != nil {
+			return nil, fmt.Errorf("store: cursors: %w", err)
+		}
+		out[c.Conn] = c
+	}
+	return out, rows.Err()
+}
+
+func (s *sqlStore) UsageTotals(ctx context.Context, since time.Time) ([]UsageTotal, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT fleet_id, node_id, SUM(rx), SUM(tx) FROM usage_hour WHERE hour >= ? GROUP BY fleet_id, node_id ORDER BY fleet_id, node_id`,
+		since.UTC().Unix())
+	if err != nil {
+		return nil, fmt.Errorf("store: usage totals: %w", err)
+	}
+	defer rows.Close()
+	var out []UsageTotal
+	for rows.Next() {
+		var u UsageTotal
+		if err := rows.Scan(&u.FleetID, &u.NodeID, &u.Rx, &u.Tx); err != nil {
+			return nil, fmt.Errorf("store: usage totals: %w", err)
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+func (s *sqlStore) UsageSeries(ctx context.Context, res Resolution, since time.Time) ([]UsagePoint, error) {
+	table, col := "usage_minute", "minute"
+	if res == PerHour {
+		table, col = "usage_hour", "hour"
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT fleet_id, node_id, `+col+`, rx, tx FROM `+table+` WHERE `+col+` >= ? ORDER BY `+col+`, fleet_id, node_id`,
+		since.UTC().Unix())
+	if err != nil {
+		return nil, fmt.Errorf("store: usage series: %w", err)
+	}
+	defer rows.Close()
+	var out []UsagePoint
+	for rows.Next() {
+		var p UsagePoint
+		var at int64
+		if err := rows.Scan(&p.FleetID, &p.NodeID, &at, &p.Rx, &p.Tx); err != nil {
+			return nil, fmt.Errorf("store: usage series: %w", err)
+		}
+		p.At = time.Unix(at, 0).UTC()
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *sqlStore) PruneUsage(ctx context.Context, minutesBefore, hoursBefore time.Time) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM usage_minute WHERE minute < ?`, minutesBefore.UTC().Unix()); err != nil {
+		return fmt.Errorf("store: prune usage: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM usage_hour WHERE hour < ?`, hoursBefore.UTC().Unix()); err != nil {
+		return fmt.Errorf("store: prune usage: %w", err)
+	}
+	return nil
 }

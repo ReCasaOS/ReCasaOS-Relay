@@ -1,6 +1,8 @@
-# DERP: the "derp" role is Headscale's embedded DERP server (see headscale/config.yaml), so it is
-# not a separate service for now; its STUN port is published below. A standalone derper is needed
-# for per-fleet traffic metering and is planned as a follow-up: see docs/metering.md.
+# DERP: the relay is a standalone `derper` (Headscale's embedded DERP is off, see headscale/config.yaml),
+# so its per-connection byte counters can be metered. Headscale's DERP map (headscale/derp.yaml, which an
+# operator replaces with their own host through an override, docs/self-hosting.md) sends boxes to /derp on the public host, which `front` proxies to derper; only its STUN port is published.
+# derper admits a node only if Headscale's /verify knows its key, and refuses everyone when Headscale
+# cannot be reached (fail-closed).
 services:
   headscale:
     image: headscale/headscale:v0.29.7
@@ -8,10 +10,28 @@ services:
     restart: unless-stopped
     volumes:
       - ./headscale/config.yaml:/etc/headscale/config.yaml:ro
+      - ./headscale/derp.yaml:/etc/headscale/derp.yaml:ro
       - headscale-data:/var/lib/headscale
-    # Only STUN (embedded DERP) is published. The control plane on 8080 is published through `front`, which
-    # hides the admin REST API (/api/); the gRPC API (50443) is never published. `enrolment` reaches the REST API
-    # directly on the compose network (HEADSCALE_URL).
+    # Nothing is published. The control plane on 8080 is published through `front`, which hides the admin
+    # REST API (/api/); the gRPC API (50443) is never published. `enrolment` reaches the REST API and
+    # `derper` reaches /verify directly on the compose network.
+
+  derper:
+    build: ./derper
+    restart: unless-stopped
+    depends_on:
+      - headscale
+    command: -a :8090 -http-port -1 -stun-port 3478 -verify-client-url http://headscale:8080/verify -verify-client-url-fail-open=false
+    environment:
+      # /debug/ answers only with ?debugkey=<this file's content, trimmed>; DERPER_DEBUG_KEY unset: the file
+      # holds a lone newline, which never matches (see the `configs:` entry at the end).
+      TS_DEBUG_KEY_PATH: /run/derper-debug-key
+    configs:
+      - source: derper-debug-key
+        target: /run/derper-debug-key
+    # Plain HTTP, reached only through `front` (/derp) and by `enrolment` (/debug/clients/): never publish it.
+    expose:
+      - "8090"
     ports:
       - "3478:3478/udp"
 
@@ -20,6 +40,7 @@ services:
     restart: unless-stopped
     depends_on:
       - headscale
+      - derper
       - enrolment
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
@@ -52,6 +73,11 @@ services:
       GC_INTERVAL: ${GC_INTERVAL:-10m}
       # Optional operator page at /admin (24+ characters). Unset: /admin answers 404.
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      # Optional traffic metering from the derper. DERPER_DEBUG_KEY unset: metering is off.
+      DERPER_URL: ${DERPER_URL:-http://derper:8090}
+      DERPER_DEBUG_KEY: ${DERPER_DEBUG_KEY:-}
+      # Monthly traffic budget shown on /admin, e.g. 100G, 100GB or 2t (K, M, G, T are decimal, any case). Unset: no reference.
+      MONTHLY_TRAFFIC_REFERENCE: ${MONTHLY_TRAFFIC_REFERENCE:-}
     volumes:
       - enrolment-data:/data
     # Reached only through `front` (Caddyfile): never publish this port, the rate limiter trusts X-Client-IP.
@@ -62,3 +88,9 @@ services:
 volumes:
   headscale-data:
   enrolment-data:
+
+configs:
+  derper-debug-key:
+    # Never empty: compose turns an empty `content` into a bind mount of its working directory (with .env).
+    # CI checks this renders as content, never as a file.
+    content: "${DERPER_DEBUG_KEY:-}\n"

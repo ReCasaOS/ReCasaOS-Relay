@@ -91,6 +91,8 @@ Two things Headscale handles in one piece grow with the number of fleets, and bo
 
 The defaults keep both under 3 MiB (the test above fails otherwise). They were chosen against the alternatives: 5000 fleets would allow only 1 pending key per fleet (5000 x 1 x 400 B = 2 MB), so a box owner whose join failed once could not add a box for a day; 2000 x 5 x 400 B = 4 MB (3.8 MiB) is too close to it. With 5, an owner adding boxes one at a time (each key is used within minutes, and lives 24 h otherwise) can lose four joins in a day and still go on. If you raise one, lower the other: keep `MAX_FLEETS` x `MAX_PENDING_KEYS` x 400 B well under 4 MiB. Pre-auth keys created by hand for users that are not fleets also count towards that list.
 
+Metering adds a third, which grows with the number of nodes: the meter reads every node in one `GET /api/v1/node` (no filter), at roughly 450-500 B of JSON per node (an estimate, not measured). The same 4 MiB cap is then reached at roughly 8,000 to 9,000 nodes, well under the 50,000 that `MAX_FLEETS` x `NODES_PER_FLEET` allows with the defaults; past it the list cannot be read and `/admin` shows "metering unavailable" (enrolment and the janitor do not use this call). A per-fleet fallback is a planned follow-up.
+
 The fleet cap is exact for one enrolment service: creations in flight count against it, so concurrent requests cannot overshoot. Two services sharing one store are not supported.
 
 ## Removing nodes and fleets
@@ -110,11 +112,11 @@ Each fleet is a Headscale user `f-<fleet id>`. The enrolment service owns Headsc
 
 ## Relayed traffic and quotas
 
-Metering of relayed (DERP) traffic was investigated in [docs/metering.md](docs/metering.md): the embedded DERP cannot be metered; a per-fleet monthly quota needs a standalone `derper`, planned as a follow-up.
+Relayed (DERP) traffic goes through a standalone `derper` and is metered per box and per fleet: set `DERPER_DEBUG_KEY` and read it on `/admin` (observed, not capped). A per-fleet monthly quota that cuts a fleet off is a planned follow-up; the investigation and design are in [docs/metering.md](docs/metering.md).
 
 ## Releases
 
-Pushing a tag `v*` runs `.github/workflows/release.yml`: `go vet` and `go test`, then the `enrolment` image is built and pushed to `ghcr.io/<owner>/<repository>-enrolment` (lowercased; `ghcr.io/recasaos/recasaos-relay-enrolment` here) tagged with the version and, unless the tag has a `-` suffix (a pre-release), `latest`. It uses only the built-in `GITHUB_TOKEN`. To run the published image instead of building it, see [docs/self-hosting.md](docs/self-hosting.md#using-the-published-image).
+Pushing a tag `v*` runs `.github/workflows/release.yml`: `go vet` and `go test`, then the `enrolment` and `derper` images are built and pushed to `ghcr.io/<owner>/<repository>-enrolment` and `-derper` (lowercased; `ghcr.io/recasaos/recasaos-relay-enrolment` here) tagged with the version and, unless the tag has a `-` suffix (a pre-release), `latest`. It uses only the built-in `GITHUB_TOKEN`. To run the published image instead of building it, see [docs/self-hosting.md](docs/self-hosting.md#using-the-published-image).
 
 ## Development
 

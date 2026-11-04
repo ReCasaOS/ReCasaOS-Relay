@@ -12,6 +12,8 @@
 //   - POST /api/v1/preauthkey {"user":"<id>","reusable":false,"ephemeral":false,"expiration":RFC3339}
 //     -> 200 {"preAuthKey":{"key":"hskey-auth-...","used":false,"expiration":...}}.
 //   - GET /api/v1/node?user=N -> 200 {"nodes":[...]}; an unknown user gives 500 "user not found".
+//   - GET /api/v1/node (no user) -> 200 {"nodes":[...]} for every user's nodes, each with "nodeKey"
+//     ("nodekey:<hex>") and "user":{"name"}. Not yet checked live: the shape follows the per-user call.
 //   - PUT /api/v1/policy {"policy":"<json text>"} -> 200 {"policy":...,"updatedAt":...}; invalid
 //     policy -> 500 {"message":"setting policy: parsing policy: ..."}. Mode "database" starts with
 //     no policy (GET gives 500 "acl policy not found" until the first PUT).
@@ -59,6 +61,8 @@ type Node struct {
 	Online       bool
 	LastSeen     time.Time // zero if Headscale never reported it
 	Expiry       time.Time // node-key expiry; zero if the key does not expire
+	NodeKey      string    // as Headscale returns it ("nodekey:...")
+	User         string    // Headscale user name, f-<fleet id>
 }
 
 // PreAuthKey is a join key as Headscale lists it (the key text itself is masked there).
@@ -84,6 +88,8 @@ type API interface {
 	// DeletePreAuthKey removes a key by id; an unknown id is not an error.
 	DeletePreAuthKey(ctx context.Context, id string) error
 	ListNodes(ctx context.Context, user string) ([]Node, error)
+	// ListAllNodes returns every user's nodes in one request.
+	ListAllNodes(ctx context.Context) ([]Node, error)
 	// DeleteNode removes EVERY node of the user with that hostname (Headscale lets two nodes of
 	// one user share a name); an unknown hostname is not an error.
 	DeleteNode(ctx context.Context, user, hostname string) error
@@ -283,6 +289,7 @@ type hsNode struct {
 	LastSeen    *time.Time `json:"lastSeen"` // RFC3339; absent/null when never seen
 	Expiry      *time.Time `json:"expiry"`   // RFC3339; zero value when the key does not expire
 	User        hsUser     `json:"user"`
+	NodeKey     string     `json:"nodeKey"`
 }
 
 // nodes lists the user's nodes with their ids. An unknown user has none.
@@ -308,9 +315,22 @@ func (c *Client) ListNodes(ctx context.Context, user string) ([]Node, error) {
 	if err != nil {
 		return nil, err
 	}
+	return toNodes(ns), nil
+}
+
+// ListAllNodes lists every user's nodes (GET /api/v1/node without a user).
+func (c *Client) ListAllNodes(ctx context.Context) ([]Node, error) {
+	var res struct{ Nodes []hsNode }
+	if err := c.do(ctx, http.MethodGet, "/api/v1/node", nil, nil, &res); err != nil {
+		return nil, err
+	}
+	return toNodes(res.Nodes), nil
+}
+
+func toNodes(ns []hsNode) []Node {
 	out := make([]Node, 0, len(ns))
 	for _, n := range ns {
-		node := Node{ID: n.ID, Hostname: n.Name, Online: n.Online, IPs: n.IPAddresses}
+		node := Node{ID: n.ID, Hostname: n.Name, Online: n.Online, IPs: n.IPAddresses, NodeKey: n.NodeKey, User: n.User.Name}
 		if len(n.IPAddresses) > 0 {
 			node.IP = n.IPAddresses[0]
 		}
@@ -322,7 +342,7 @@ func (c *Client) ListNodes(ctx context.Context, user string) ([]Node, error) {
 		}
 		out = append(out, node)
 	}
-	return out, nil
+	return out
 }
 
 func (c *Client) DeleteNode(ctx context.Context, user, hostname string) error {

@@ -1,12 +1,19 @@
 # Public front. Headscale's admin REST API (/api/) shares its port with the box control plane and must
 # only be reachable by `enrolment`, so it is answered 404 here. /v1/* goes to the enrolment service,
 # which is NOT published: this proxy is its only way in, so the client address it receives is one we set.
+# /derp goes to the derper service; /debug (derper's debug pages) is answered 404.
 # (enrolment's own /healthz stays internal.)
 {
 	auto_https off
 }
 
 :8080 {
+	# derper's debug pages (node keys, client addresses) are for `enrolment` only, on the compose network.
+	@debug path /debug /debug/*
+	handle @debug {
+		respond 404
+	}
+
 	@api path /api /api/*
 	handle @api {
 		respond 404
@@ -20,6 +27,12 @@
 			# client when `trusted_proxies` lists the proxy in front of this one (see README).
 			header_up X-Client-IP {client_ip}
 		}
+	}
+
+	# The DERP relay (standalone derper, plain HTTP); the connection upgrade passes through.
+	@derp path /derp /derp/* /generate_204
+	handle @derp {
+		reverse_proxy derper:8090
 	}
 
 	handle {
