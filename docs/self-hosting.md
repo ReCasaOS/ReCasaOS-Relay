@@ -178,7 +178,7 @@ From v0.4.0 the relay no longer uses Headscale's embedded DERP: a standalone `de
 4. `git pull && docker compose up -d --build` (or the published images below). This is one switch: relayed traffic drops for a few seconds while `derper` and Headscale restart, then boxes reconnect by themselves. No re-enrolment, no action on the boxes. Direct (peer-to-peer) links are not affected.
 5. Check: `/admin` lists every box online within a minute; with `DERPER_DEBUG_KEY` set, a box forced through DERP shows a rate; `https://your-relay/debug/clients/` answers 404; `tailscale netcheck` on a box reports `UDP: true` and a latency for region `relay`.
 
-**Rollback:** check out the previous release's files (`compose.yaml`, `Caddyfile`, `headscale/config.yaml`) and run `docker compose up -d`. The usage tables that v0.4.0 added to `relay.db` stay and are ignored by the old version.
+**Rollback:** check out the previous release's files (`compose.yaml`, `Caddyfile`, `headscale/config.yaml`) and run `docker compose up -d`. If you use the TLS setup of section 3a, also revert `Caddyfile.tls`: remove its `@debug` and `@derp` blocks, or `/derp` would point at a `derper` service that no longer exists and the restored embedded DERP would be unreachable. `headscale/derp.yaml` can stay (unused). The usage tables that v0.4.0 added to `relay.db` stay and are ignored by the old version.
 
 ### Using the published image
 

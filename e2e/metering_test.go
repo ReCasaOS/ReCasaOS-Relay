@@ -57,15 +57,20 @@ func TestRelayedTrafficIsMetered(t *testing.T) {
 	a1 := r.startNode("A", "a1", r.joinKey(id, sec))
 	a2 := r.startNode("A", "a2", r.joinKey(id, sec))
 
-	out, err := sh("docker", "exec", a1.container, "tailscale", "ping", "--until-direct=false", "-c", "1", "--timeout", "10s", a2.ip)
-	if err != nil || !strings.Contains(out, "via DERP(relay)") {
-		t.Fatalf("a1 -> a2 is not relayed by DERP(relay): %v %s", err, out)
-	}
+	r.mustReach(a1, a2) // peers and DERP home connections are ready (retries, like TestDerperAdmission)
+	eventually(t, "a1 -> a2 is answered via DERP(relay)", 60*time.Second, func() error {
+		out, err := sh("docker", "exec", a1.container, "tailscale", "ping", "--until-direct=false", "-c", "1", "--timeout", "5s", a2.ip)
+		if err != nil || !strings.Contains(out, "via DERP(relay)") {
+			return fmt.Errorf("not relayed yet: %v %s", err, out)
+		}
+		return nil
+	})
 
-	// nc may exit non-zero once its -w idle timeout fires; what matters is the volume metered.
-	out, err = sh("docker", "exec", a1.container, "sh", "-c",
+	out, err := sh("docker", "exec", a1.container, "sh", "-c",
 		fmt.Sprintf("head -c %d /dev/zero | nc -w 5 %s %s", sent, a2.ip, probePort))
-	t.Logf("send: err=%v %s", err, out)
+	if err != nil {
+		t.Fatalf("sending %d bytes to a2 failed: %v %s", sent, err, out)
+	}
 
 	nodes, err := r.hs.ListNodes(context.Background(), r.fleetUser["A"])
 	if err != nil {
@@ -87,6 +92,9 @@ func TestRelayedTrafficIsMetered(t *testing.T) {
 			return err
 		}
 		a1Up, a2Up := up[ids["a1"]], up[ids["a2"]]
+		if _, ok := up[ids["a2"]]; !ok {
+			return fmt.Errorf("no /admin row for a2 (node %s)", ids["a2"])
+		}
 		t.Logf("data-up-month a1=%d a2=%d", a1Up, a2Up)
 		if a1Up < sent || a1Up > maxUp {
 			return fmt.Errorf("a1 up-month %d, want [%d, %d]", a1Up, sent, maxUp)
