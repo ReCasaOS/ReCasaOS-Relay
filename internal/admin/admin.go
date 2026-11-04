@@ -63,6 +63,8 @@ var page = template.Must(template.New("page").Funcs(template.FuncMap{
 	},
 	"expired": func(t, now time.Time) bool { return now.After(t) },
 	"join":    strings.Join,
+	"bytes":   func(n int64) string { return humanBytes(float64(n)) },
+	"rate":    humanRate,
 }).Parse(pageHTML))
 
 // Config is what the page shows next to the live numbers.
@@ -165,25 +167,103 @@ func (h *handler) client(r *http.Request) string {
 type fleetView struct {
 	ID                  string
 	Created, LastOnline time.Time
-	Nodes               []headscale.Node
+	Nodes               []nodeView
 	Online              int
-	Err                 bool // its nodes could not be listed
+	Err                 bool    // its nodes could not be listed
+	Month               int64   // relayed bytes this month (Rx: what its nodes sent to the relay)
+	Up                  float64 // live bytes/s: the sum of its listed nodes' Up
+	RefPct              int     // Month against Config.MonthlyReference, capped at 100
+	RefClass            string  // "", "warn" (>= 80 %) or "over" (>= 100 %)
+	Chart               template.HTML
+	Series              []chartSeries // the chart's legend
 }
+
+type nodeView struct {
+	headscale.Node
+	meter.Rate
+	UpMonth int64
+}
+
+// Idle: under 1 kB/s both ways, which a node's DERP keepalive alone produces.
+func (n nodeView) Idle() bool { return n.Up < 1000 && n.Down < 1000 }
 
 func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), opTimeout)
 	defer cancel()
+	now := h.deps.Now()
+	rangeKey := r.URL.Query().Get("range")
+	cr, ok := chartRanges[rangeKey]
+	if !ok {
+		rangeKey, cr = "1h", chartRanges["1h"]
+	}
+	start := cr.start(now)
 	all, err := h.deps.Store.ListFleets(ctx)
 	if err != nil {
 		log.Printf("admin: list fleets: %v", err)
 		http.Error(w, "store error", http.StatusInternalServerError)
 		return
 	}
-	sort.Slice(all, func(i, j int) bool { return all[i].LastOnline.After(all[j].LastOnline) })
+	y, m, _ := now.UTC().Date()
+	totals, err := h.deps.Store.UsageTotals(ctx, time.Date(y, m, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		log.Printf("admin: usage totals: %v", err)
+		http.Error(w, "store error", http.StatusInternalServerError)
+		return
+	}
+	points, err := h.deps.Store.UsageSeries(ctx, cr.res, start)
+	if err != nil {
+		log.Printf("admin: usage series: %v", err)
+		http.Error(w, "store error", http.StatusInternalServerError)
+		return
+	}
+	var live meter.Live
+	if h.deps.Meter != nil {
+		if live = h.deps.Meter.Live(); !live.OK {
+			live.Nodes = nil
+		}
+	}
+	known := map[string]bool{}
+	for _, f := range all {
+		known[f.ID] = true
+	}
+	var monthTotal, deleted int64
+	var upNow float64
+	fleetMonth, nodeMonth := map[string]int64{}, map[[2]string]int64{}
+	for _, t := range totals {
+		monthTotal += t.Rx
+		fleetMonth[t.FleetID] += t.Rx
+		nodeMonth[[2]string{t.FleetID, t.NodeID}] += t.Rx
+		if !known[t.FleetID] {
+			deleted += t.Rx
+		}
+	}
+	for _, rt := range live.Nodes {
+		upNow += rt.Up
+	}
+	fleetPoints := map[string][]store.UsagePoint{}
+	for _, p := range points {
+		fleetPoints[p.FleetID] = append(fleetPoints[p.FleetID], p)
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if a, b := fleetMonth[all[i].ID], fleetMonth[all[j].ID]; a != b {
+			return a > b
+		}
+		return all[i].LastOnline.After(all[j].LastOnline)
+	})
 	views := make([]fleetView, len(all))
 	var wg sync.WaitGroup
 	for i, f := range all {
-		views[i] = fleetView{ID: f.ID, Created: f.CreatedAt, LastOnline: f.LastOnline}
+		views[i] = fleetView{ID: f.ID, Created: f.CreatedAt, LastOnline: f.LastOnline, Month: fleetMonth[f.ID]}
+		if ref := h.cfg.MonthlyReference; ref > 0 {
+			pct := float64(views[i].Month) / float64(ref) * 100
+			views[i].RefPct = int(min(pct, 100))
+			switch {
+			case pct >= 100:
+				views[i].RefClass = "over"
+			case pct >= 80:
+				views[i].RefClass = "warn"
+			}
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -195,8 +275,10 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 				views[i].Err = true
 				return
 			}
-			views[i].Nodes = ns
 			for _, n := range ns {
+				nv := nodeView{Node: n, Rate: live.Nodes[n.ID], UpMonth: nodeMonth[[2]string{f.ID, n.ID}]}
+				views[i].Nodes = append(views[i].Nodes, nv)
+				views[i].Up += nv.Up
 				if n.Online {
 					views[i].Online++
 				}
@@ -205,14 +287,22 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 	}
 	wg.Wait()
 	nodes, online := 0, 0
-	for _, v := range views {
+	for i, v := range views {
 		nodes += len(v.Nodes)
 		online += v.Online
+		names := map[string]string{}
+		for _, n := range v.Nodes {
+			names[n.ID] = n.Hostname
+		}
+		views[i].Series = fleetSeries(fleetPoints[v.ID], names, cr, start)
+		views[i].Chart = stackedChart(views[i].Series, cr.n)
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := page.Execute(w, map[string]any{
-		"Fleets": views, "Nodes": nodes, "Online": online, "Now": h.deps.Now(),
+		"Fleets": views, "Nodes": nodes, "Online": online, "Now": now,
 		"MaxFleets": h.cfg.MaxFleets, "NodesPerFleet": h.cfg.NodesPerFleet, "CSRF": h.csrf,
+		"Month": monthTotal, "UpNow": upNow, "Live": live.OK, "Deleted": deleted,
+		"Reference": h.cfg.MonthlyReference, "Range": rangeKey,
 	}); err != nil {
 		log.Printf("admin: render: %v", err)
 	}

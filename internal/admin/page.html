@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Relay admin</title>
 <style>
-:root { --bg:#fff; --fg:#1b1f24; --mut:#6a737d; --line:#d8dee4; --card:#f6f8fa; --ok:#1a7f37; --bad:#cf222e; }
-@media (prefers-color-scheme: dark) { :root { --bg:#0d1117; --fg:#e6edf3; --mut:#8b949e; --line:#30363d; --card:#161b22; --ok:#3fb950; --bad:#f85149; } }
+:root { --bg:#fff; --fg:#1b1f24; --mut:#6a737d; --line:#d8dee4; --card:#f6f8fa; --ok:#1a7f37; --bad:#cf222e; --s1:#0969da; --s2:#8250df; --s3:#bf8700; }
+@media (prefers-color-scheme: dark) { :root { --bg:#0d1117; --fg:#e6edf3; --mut:#8b949e; --line:#30363d; --card:#161b22; --ok:#3fb950; --bad:#f85149; --s1:#58a6ff; --s2:#bc8cff; --s3:#d29922; } }
 body { font:15px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--fg); margin:0 auto; max-width:60rem; padding:1rem 16px 3rem; }
 h1 { font-size:1.3rem; margin:.5rem 0 1rem; }
 .stats { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:1.2rem; }
@@ -17,12 +17,23 @@ details { border:1px solid var(--line); border-radius:8px; margin-bottom:8px; ba
 summary { cursor:pointer; padding:.6rem .9rem; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
 summary code { font-weight:600; }
 .sp { flex:1; }
-.body { padding:0 .9rem .7rem; }
+.body { padding:0 .9rem .7rem; overflow-x:auto; }
 table { width:100%; border-collapse:collapse; }
 td { padding:.3rem .4rem; border-top:1px solid var(--line); }
 .on { color:var(--ok); } .off { color:var(--mut); } .err { color:var(--bad); }
 button { font:inherit; border:1px solid var(--line); background:var(--bg); color:var(--bad); border-radius:6px; padding:.2rem .6rem; cursor:pointer; }
 form { margin:0; display:inline; }
+.rt { white-space:nowrap; font-variant-numeric:tabular-nums; } .dn { color:var(--s1); } .up { color:var(--s2); }
+.bar { width:140px; height:8px; background:var(--line); border-radius:4px; overflow:hidden; display:inline-block; }
+.bar i { display:block; height:100%; background:var(--ok); } .bar.warn i { background:var(--s3); } .bar.over i { background:var(--bad); }
+.chart { margin-top:.7rem; }
+.tabs { font-size:.85rem; margin-bottom:.3rem; } .tabs a { color:var(--mut); text-decoration:none; margin-right:12px; }
+.tabs a.cur { color:var(--fg); border-bottom:2px solid var(--s1); }
+.chart svg { display:block; } .axis { stroke:var(--line); } .grid { stroke-dasharray:3 3; } .lbl { fill:var(--mut); font-size:10px; }
+.c0 { --c:var(--s1); } .c1 { --c:var(--s2); } .c2 { --c:var(--s3); } .c3 { --c:var(--ok); } .c4 { --c:var(--bad); } .c5 { --c:var(--mut); }
+polygon { fill:var(--c); fill-opacity:.8; }
+.lg { display:flex; gap:14px; flex-wrap:wrap; font-size:.8rem; color:var(--mut); margin-top:.3rem; }
+.lg b { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:4px; vertical-align:-1px; background:var(--c); }
 </style>
 </head>
 <body>
@@ -31,12 +42,16 @@ form { margin:0; display:inline; }
 <div class="stat"><b>{{len .Fleets}} / {{.MaxFleets}}</b><span>fleets</span></div>
 <div class="stat"><b>{{.Online}} / {{.Nodes}}</b><span>nodes online</span></div>
 <div class="stat"><b>{{.NodesPerFleet}}</b><span>nodes max per fleet</span></div>
+<div class="stat"><b>{{bytes .Month}}</b><span>relayed this month</span></div>
+<div class="stat"><b>{{if .Live}}{{rate .UpNow}}{{else}}–{{end}}</b><span>relayed now{{if not .Live}} · metering unavailable{{end}}</span></div>
 </div>
 {{range .Fleets}}
-<details>
+<details data-id="{{.ID}}">
 <summary>
 <code>{{.ID}}</code>
 {{if .Err}}<span class="err">nodes unavailable</span>{{else}}<span>{{.Online}} / {{len .Nodes}} online</span>{{end}}
+{{if $.Reference}}<span class="bar {{.RefClass}}"><i style="width:{{.RefPct}}%"></i></span><span>{{bytes .Month}} / {{bytes $.Reference}}</span>{{else}}<span>{{bytes .Month}} this month</span>{{end}}
+{{if $.Live}}<span class="rt">{{rate .Up}} now</span>{{end}}
 <span class="mut">created {{ago .Created $.Now}} · last activity {{ago .LastOnline $.Now}}</span>
 <span class="sp"></span>
 <form method="post" action="/admin/fleets/{{.ID}}/delete" onsubmit="return confirm('Delete fleet {{.ID}} and every node in it?')">
@@ -45,16 +60,37 @@ form { margin:0; display:inline; }
 </summary>
 <div class="body">
 {{if .Nodes}}<table>
-{{$fid := .ID}}{{range .Nodes}}<tr>
+{{$fid := .ID}}{{range .Nodes}}<tr data-node-id="{{.ID}}" data-up-month="{{.UpMonth}}">
 <td>{{.Hostname}}</td><td class="mut">{{join .IPs ", "}}</td>
 <td>{{if .Online}}<span class="on">online</span>{{else}}<span class="off">offline</span>{{if not .LastSeen.IsZero}} · {{ago .LastSeen $.Now}}{{end}}{{end}}</td>
+<td class="rt">{{if $.Live}}{{if .Idle}}<span class="mut">≈ 0 relayed</span>{{else}}<span class="dn">↓ {{rate .Down}}</span> <span class="up">↑ {{rate .Up}}</span>{{end}}{{end}}</td>
+<td class="mut rt">{{bytes .UpMonth}} this month</td>
 <td class="mut">{{if not .Expiry.IsZero}}<span class="{{if expired .Expiry $.Now}}err{{end}}">key {{if expired .Expiry $.Now}}expired{{else}}expires {{until .Expiry $.Now}}{{end}}</span>{{end}}</td>
 <td style="text-align:right"><form method="post" action="/admin/fleets/{{$fid}}/nodes/{{.ID}}/remove" onsubmit="return confirm('Remove this node?')">
 <input type="hidden" name="csrf" value="{{$.CSRF}}"><button>Remove</button></form></td>
 </tr>{{end}}
 </table>{{else}}<span class="mut">No node.</span>{{end}}
+<div class="chart">
+<div class="tabs"><a href="?range=1h"{{if eq $.Range "1h"}} class="cur" aria-current="page"{{end}}>1 h</a><a href="?range=24h"{{if eq $.Range "24h"}} class="cur" aria-current="page"{{end}}>24 h</a><a href="?range=30d"{{if eq $.Range "30d"}} class="cur" aria-current="page"{{end}}>30 d</a></div>
+{{.Chart}}
+<div class="lg">{{range $i, $s := .Series}}<span><b class="c{{$i}}"></b>{{$s.Name}}</span>{{else}}<span>no relayed traffic in this range</span>{{end}}</div>
+</div>
 </div>
 </details>
 {{else}}<p class="mut">No fleet yet.</p>{{end}}
+{{if .Deleted}}<p class="mut">deleted fleets: {{bytes .Deleted}} this month</p>{{end}}
+<script>
+// The reload would close every fleet: reopen the ones that were open.
+var openFleets = [];
+try { openFleets = JSON.parse(sessionStorage.getItem('admin-open')) || [] } catch (e) {}
+document.querySelectorAll('details[data-id]').forEach(function (d) {
+  if (openFleets.indexOf(d.dataset.id) >= 0) d.open = true
+  d.addEventListener('toggle', function () {
+    var ids = [].filter.call(document.querySelectorAll('details[data-id]'), function (x) { return x.open }).map(function (x) { return x.dataset.id })
+    try { sessionStorage.setItem('admin-open', JSON.stringify(ids)) } catch (e) {}
+  })
+})
+setInterval(function(){ if (!document.hidden) location.reload() }, 15000)
+</script>
 </body>
 </html>
