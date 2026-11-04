@@ -1,0 +1,12 @@
+# Test-only DERP map (mounted by e2e/compose.e2e.yaml): headscale/derp.yaml with the e2e host.
+regions:
+  999:
+    regionid: 999
+    regioncode: relay
+    regionname: ReCasaOS relay
+    nodes:
+      - name: 999a
+        regionid: 999
+        hostname: relay.test
+        derpport: 443
+        stunport: 3478

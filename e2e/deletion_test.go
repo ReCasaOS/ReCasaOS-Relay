@@ -60,7 +60,7 @@ func (r *rig) userExists(name string) bool {
 // The janitor runs every 5 s and treats a fleet as idle after 120 s.
 func TestFleetDeletionAndCleanup(t *testing.T) {
 	r := newRig(t)
-	r.env = []string{"GC_INTERVAL=5s", "IDLE_AFTER=120s"}
+	r.env = append(r.env, "GC_INTERVAL=5s", "IDLE_AFTER=120s")
 	r.up()
 
 	idA, secA := r.createFleet("A")

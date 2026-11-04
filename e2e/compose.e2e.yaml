@@ -8,9 +8,19 @@ services:
   headscale:
     environment:
       HEADSCALE_SERVER_URL: https://relay.test # overrides server_url of headscale/config.yaml
+    # The DERP map points at relay.test instead of relay.example.org.
+    volumes: !override
+      - ./headscale/config.yaml:/etc/headscale/config.yaml:ro
+      - ./e2e/derp.e2e.yaml:/etc/headscale/derp.yaml:ro
+      - headscale-data:/var/lib/headscale
     # Random loopback ports only (no clash with a running relay); the test reads the admin API there.
     ports: !override
       - "127.0.0.1::8080"
+
+  # DERPER_DEBUG_KEY comes from the test's environment (newRig).
+  derper:
+    ports: !override
+      - "127.0.0.1::3478/udp"
 
   front:
     ports: !override

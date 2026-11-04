@@ -1,0 +1,13 @@
+# DERP map Headscale gives to boxes (derp.paths in config.yaml): one region, served by the `derper`
+# service through `front` at https://<hostname>/derp, STUN on 3478/udp of the same host.
+regions:
+  999:
+    regionid: 999
+    regioncode: relay
+    regionname: ReCasaOS relay
+    nodes:
+      - name: 999a
+        regionid: 999
+        hostname: relay.example.org # set to your relay's public host
+        derpport: 443
+        stunport: 3478
