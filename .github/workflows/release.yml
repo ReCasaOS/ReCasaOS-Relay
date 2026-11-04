@@ -40,8 +40,10 @@ jobs:
         run: |
           set -euo pipefail
           echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          # <image suffix> <build context>
-          for pair in "enrolment ." "derper ./derper"; do
+          # <image suffix> <build context>. Build every image before pushing any: a failed build must not
+          # leave a half-published release (one image pushed, `latest` moved).
+          pairs=("enrolment ." "derper ./derper")
+          for pair in "${pairs[@]}"; do
             read -r name context <<<"$pair"
             image="ghcr.io/${GITHUB_REPOSITORY,,}-$name"
             tags=(-t "$image:$VERSION")
@@ -49,5 +51,8 @@ jobs:
             case "$VERSION" in *-*) ;; *) tags+=(-t "$image:latest") ;; esac
             docker build --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
               --label "org.opencontainers.image.version=$VERSION" "${tags[@]}" "$context"
-            docker push --all-tags "$image"
+          done
+          for pair in "${pairs[@]}"; do
+            read -r name _ <<<"$pair"
+            docker push --all-tags "ghcr.io/${GITHUB_REPOSITORY,,}-$name"
           done
