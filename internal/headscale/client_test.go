@@ -201,9 +201,9 @@ func TestListPreAuthKeysEmpty(t *testing.T) {
 }
 
 const nodesJSON = `{"nodes":[
- {"id":"3","name":"box-a","givenName":"box-a","user":` + userJSON + `,"ipAddresses":["100.64.0.1","fd7a:115c:a1e0::1"],"online":true,"lastSeen":"2026-11-04T10:00:00Z","expiry":"0001-01-01T00:00:00Z"},
- {"id":"4","name":"box-b","givenName":"box-b-2","user":` + userJSON + `,"ipAddresses":[],"online":false,"lastSeen":null,"expiry":"2026-12-01T00:00:00Z"},
- {"id":"5","name":"intruder","user":{"id":"9","name":"f-other"},"ipAddresses":["100.64.0.9"],"online":true}]}`
+ {"id":"3","name":"box-a","givenName":"box-a","user":` + userJSON + `,"nodeKey":"nodekey:aa","ipAddresses":["100.64.0.1","fd7a:115c:a1e0::1"],"online":true,"lastSeen":"2026-11-04T10:00:00Z","expiry":"0001-01-01T00:00:00Z"},
+ {"id":"4","name":"box-b","givenName":"box-b-2","user":` + userJSON + `,"nodeKey":"nodekey:bb","ipAddresses":[],"online":false,"lastSeen":null,"expiry":"2026-12-01T00:00:00Z"},
+ {"id":"5","name":"intruder","user":{"id":"9","name":"f-other"},"nodeKey":"nodekey:cc","ipAddresses":["100.64.0.9"],"online":true}]}`
 
 func TestListNodes(t *testing.T) {
 	c, f := newFake(t, map[string]reply{
@@ -216,14 +216,30 @@ func TestListNodes(t *testing.T) {
 	}
 	// zero expiry = key never expires; null lastSeen = never seen: both stay zero.
 	want := []Node{
-		{ID: "3", Hostname: "box-a", IP: "100.64.0.1", IPs: []string{"100.64.0.1", "fd7a:115c:a1e0::1"}, Online: true,
+		{ID: "3", Hostname: "box-a", NodeKey: "nodekey:aa", User: "f-abc", IP: "100.64.0.1", IPs: []string{"100.64.0.1", "fd7a:115c:a1e0::1"}, Online: true,
 			LastSeen: time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)},
-		{ID: "4", Hostname: "box-b", IPs: []string{}, Expiry: time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)},
+		{ID: "4", Hostname: "box-b", NodeKey: "nodekey:bb", User: "f-abc", IPs: []string{}, Expiry: time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v, want %+v", got, want)
 	}
 	f.want(t, `GET /api/v1/user?name=f-abc`, `GET /api/v1/node?user=f-abc`)
+}
+
+func TestListAllNodes(t *testing.T) {
+	c, f := newFake(t, map[string]reply{"GET /api/v1/node": {200, nodesJSON}})
+	got, err := c.ListAllNodes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d nodes, want 3: %+v", len(got), got)
+	}
+	if got[2].Hostname != "intruder" || got[2].NodeKey != "nodekey:cc" || got[2].User != "f-other" ||
+		got[0].NodeKey != "nodekey:aa" || got[0].User != "f-abc" {
+		t.Fatalf("got %+v", got)
+	}
+	f.want(t, `GET /api/v1/node?`) // no user parameter
 }
 
 func TestListNodesUnknownUserIsEmpty(t *testing.T) {

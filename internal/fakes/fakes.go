@@ -5,6 +5,7 @@ package fakes
 import (
 	"context"
 	"errors"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -109,7 +110,7 @@ func (h *HS) AddNode(user, host string, online bool) string {
 	h.users[user] = true
 	h.nextN++
 	id := strconv.Itoa(h.nextN)
-	h.nodes[user] = append(h.nodes[user], headscale.Node{ID: id, Hostname: host, Online: online})
+	h.nodes[user] = append(h.nodes[user], headscale.Node{ID: id, Hostname: host, Online: online, User: user})
 	return id
 }
 
@@ -141,6 +142,17 @@ func (h *HS) SetNodeInfo(user, host string, ips []string, lastSeen, expiry time.
 	}
 }
 
+// SetNodeKey sets the node key of every node of the user with that hostname.
+func (h *HS) SetNodeKey(user, host, nodeKey string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i := range h.nodes[user] {
+		if h.nodes[user][i].Hostname == host {
+			h.nodes[user][i].NodeKey = nodeKey
+		}
+	}
+}
+
 // AddKey adds a key owned by user and returns its id.
 func (h *HS) AddKey(user string, used bool, exp time.Time) string {
 	h.mu.Lock()
@@ -167,6 +179,25 @@ func (h *HS) ListNodes(_ context.Context, user string) ([]headscale.Node, error)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]headscale.Node(nil), h.nodes[user]...), nil
+}
+
+// ListAllNodes returns every user's nodes, users in name order.
+func (h *HS) ListAllNodes(_ context.Context) ([]headscale.Node, error) {
+	if err := h.enter("nodes-all", "nodes-all"); err != nil {
+		return nil, err
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	users := make([]string, 0, len(h.nodes))
+	for u := range h.nodes {
+		users = append(users, u)
+	}
+	sort.Strings(users)
+	var out []headscale.Node
+	for _, u := range users {
+		out = append(out, h.nodes[u]...)
+	}
+	return out, nil
 }
 
 // DeleteNode removes every node of the user with that hostname.
