@@ -46,8 +46,9 @@ form { margin:0; display:inline; }
 <div class="body">
 {{if .Nodes}}<table>
 {{$fid := .ID}}{{range .Nodes}}<tr>
-<td>{{.Hostname}}</td><td class="mut">{{.IP}}</td>
-<td>{{if .Online}}<span class="on">online</span>{{else}}<span class="off">offline</span>{{end}}</td>
+<td>{{.Hostname}}</td><td class="mut">{{join .IPs ", "}}</td>
+<td>{{if .Online}}<span class="on">online</span>{{else}}<span class="off">offline</span>{{if not .LastSeen.IsZero}} · {{ago .LastSeen $.Now}}{{end}}{{end}}</td>
+<td class="mut">{{if not .Expiry.IsZero}}<span class="{{if expired .Expiry $.Now}}err{{end}}">key {{if expired .Expiry $.Now}}expired{{else}}expires {{until .Expiry $.Now}}{{end}}</span>{{end}}</td>
 <td style="text-align:right"><form method="post" action="/admin/fleets/{{$fid}}/nodes/{{.ID}}/remove" onsubmit="return confirm('Remove this node?')">
 <input type="hidden" name="csrf" value="{{$.CSRF}}"><button>Remove</button></form></td>
 </tr>{{end}}

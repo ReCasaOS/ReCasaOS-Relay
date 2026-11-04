@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -200,8 +201,8 @@ func TestListPreAuthKeysEmpty(t *testing.T) {
 }
 
 const nodesJSON = `{"nodes":[
- {"id":"3","name":"box-a","givenName":"box-a","user":` + userJSON + `,"ipAddresses":["100.64.0.1","fd7a:115c:a1e0::1"],"online":true},
- {"id":"4","name":"box-b","givenName":"box-b-2","user":` + userJSON + `,"ipAddresses":[],"online":false},
+ {"id":"3","name":"box-a","givenName":"box-a","user":` + userJSON + `,"ipAddresses":["100.64.0.1","fd7a:115c:a1e0::1"],"online":true,"lastSeen":"2026-11-04T10:00:00Z","expiry":"0001-01-01T00:00:00Z"},
+ {"id":"4","name":"box-b","givenName":"box-b-2","user":` + userJSON + `,"ipAddresses":[],"online":false,"lastSeen":null,"expiry":"2026-12-01T00:00:00Z"},
  {"id":"5","name":"intruder","user":{"id":"9","name":"f-other"},"ipAddresses":["100.64.0.9"],"online":true}]}`
 
 func TestListNodes(t *testing.T) {
@@ -213,8 +214,13 @@ func TestListNodes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []Node{{"3", "box-a", "100.64.0.1", true}, {"4", "box-b", "", false}}
-	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+	// zero expiry = key never expires; null lastSeen = never seen: both stay zero.
+	want := []Node{
+		{ID: "3", Hostname: "box-a", IP: "100.64.0.1", IPs: []string{"100.64.0.1", "fd7a:115c:a1e0::1"}, Online: true,
+			LastSeen: time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)},
+		{ID: "4", Hostname: "box-b", IPs: []string{}, Expiry: time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)},
+	}
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v, want %+v", got, want)
 	}
 	f.want(t, `GET /api/v1/user?name=f-abc`, `GET /api/v1/node?user=f-abc`)

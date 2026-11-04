@@ -99,6 +99,21 @@ func TestIndexListsFleetsAndNodes(t *testing.T) {
 	}
 }
 
+func TestIndexShowsNodeDetails(t *testing.T) {
+	e := setup(t)
+	// b-two is offline: addresses, "last seen", and a key expiry in the future.
+	e.hs.SetNodeInfo("f-bbbb", "b-two", []string{"100.64.0.2", "fd7a::2"},
+		t0.Add(-3*time.Hour), t0.Add(72*time.Hour))
+	// b-one's key is already expired.
+	e.hs.SetNodeInfo("f-aaaa", "b-one", []string{"100.64.0.1"}, t0, t0.Add(-time.Minute))
+	body := e.do("GET", "/admin/", token, nil).Body.String()
+	for _, want := range []string{"100.64.0.2, fd7a::2", "3 h ago", "expires in 3 d", "key expired"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+}
+
 func TestPostNeedsCSRF(t *testing.T) {
 	e := setup(t)
 	if w := e.do("POST", "/admin/fleets/aaaa/delete", token, nil); w.Code != 400 {

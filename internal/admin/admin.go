@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,6 +49,19 @@ var page = template.Must(template.New("page").Funcs(template.FuncMap{
 			return strconv.Itoa(int(d.Hours()/24)) + " d ago"
 		}
 	},
+	// until formats a future instant (a node-key expiry) as "in N min/h/d".
+	"until": func(t, now time.Time) string {
+		switch d := t.Sub(now); {
+		case d < time.Hour:
+			return "in " + strconv.Itoa(int(d.Minutes())) + " min"
+		case d < 48*time.Hour:
+			return "in " + strconv.Itoa(int(d.Hours())) + " h"
+		default:
+			return "in " + strconv.Itoa(int(d.Hours()/24)) + " d"
+		}
+	},
+	"expired": func(t, now time.Time) bool { return now.After(t) },
+	"join":    strings.Join,
 }).Parse(pageHTML))
 
 // Config is what the page shows next to the live numbers.

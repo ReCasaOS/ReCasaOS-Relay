@@ -54,8 +54,11 @@ import (
 // Node is a machine of a fleet, as the dashboard shows it.
 type Node struct {
 	ID           string // Headscale's numeric id (a decimal string); hostnames are NOT unique
-	Hostname, IP string
+	Hostname, IP string // IP is the first tailnet address; IPs holds them all
+	IPs          []string
 	Online       bool
+	LastSeen     time.Time // zero if Headscale never reported it
+	Expiry       time.Time // node-key expiry; zero if the key does not expire
 }
 
 // PreAuthKey is a join key as Headscale lists it (the key text itself is masked there).
@@ -273,11 +276,13 @@ func (c *Client) DeletePreAuthKey(ctx context.Context, id string) error {
 }
 
 type hsNode struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	IPAddresses []string `json:"ipAddresses"`
-	Online      bool     `json:"online"`
-	User        hsUser   `json:"user"`
+	ID          string     `json:"id"`
+	Name        string     `json:"name"`
+	IPAddresses []string   `json:"ipAddresses"`
+	Online      bool       `json:"online"`
+	LastSeen    *time.Time `json:"lastSeen"` // RFC3339; absent/null when never seen
+	Expiry      *time.Time `json:"expiry"`   // RFC3339; zero value when the key does not expire
+	User        hsUser     `json:"user"`
 }
 
 // nodes lists the user's nodes with their ids. An unknown user has none.
@@ -305,9 +310,15 @@ func (c *Client) ListNodes(ctx context.Context, user string) ([]Node, error) {
 	}
 	out := make([]Node, 0, len(ns))
 	for _, n := range ns {
-		node := Node{ID: n.ID, Hostname: n.Name, Online: n.Online}
+		node := Node{ID: n.ID, Hostname: n.Name, Online: n.Online, IPs: n.IPAddresses}
 		if len(n.IPAddresses) > 0 {
 			node.IP = n.IPAddresses[0]
+		}
+		if n.LastSeen != nil {
+			node.LastSeen = n.LastSeen.UTC()
+		}
+		if n.Expiry != nil && !n.Expiry.IsZero() {
+			node.Expiry = n.Expiry.UTC()
 		}
 		out = append(out, node)
 	}

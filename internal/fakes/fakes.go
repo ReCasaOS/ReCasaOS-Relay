@@ -124,6 +124,23 @@ func (h *HS) SetOnline(user, host string, online bool) {
 	}
 }
 
+// SetNodeInfo fills the richer fields the admin page shows (addresses, last seen, key expiry) for
+// every node of the user with that hostname.
+func (h *HS) SetNodeInfo(user, host string, ips []string, lastSeen, expiry time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i := range h.nodes[user] {
+		if h.nodes[user][i].Hostname == host {
+			h.nodes[user][i].IPs = ips
+			if len(ips) > 0 {
+				h.nodes[user][i].IP = ips[0]
+			}
+			h.nodes[user][i].LastSeen = lastSeen
+			h.nodes[user][i].Expiry = expiry
+		}
+	}
+}
+
 // AddKey adds a key owned by user and returns its id.
 func (h *HS) AddKey(user string, used bool, exp time.Time) string {
 	h.mu.Lock()
