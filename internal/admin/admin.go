@@ -125,7 +125,11 @@ func (h *handler) guard(next http.Handler) http.Handler {
 		_, pass, ok := r.BasicAuth()
 		got := sha256.Sum256([]byte(pass))
 		if !ok || subtle.ConstantTimeCompare(got[:], h.tokenSum[:]) != 1 {
-			h.limiter.Allow(ip)
+			// A refusal here means the limiter is full of other addresses: fail closed, not an unlimited 401.
+			if ok, _ := h.limiter.Allow(ip); !ok {
+				http.Error(w, "too many requests", http.StatusTooManyRequests)
+				return
+			}
 			w.Header().Set("WWW-Authenticate", `Basic realm="relay admin", charset="UTF-8"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return

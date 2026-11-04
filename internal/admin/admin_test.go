@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -189,5 +190,30 @@ func TestFailedAuthIsLimited(t *testing.T) {
 	}
 	if w := e.do("GET", "/admin/", token, nil); w.Code != 429 {
 		t.Fatalf("right token after the limit: %d, want 429", w.Code)
+	}
+}
+
+func TestFullLimiterFailsClosed(t *testing.T) {
+	e := setup(t)
+	h, err := New(Config{Token: token, ClientHeader: "X-Client-IP"}, Deps{
+		Store: e.st, Headscale: e.hs, Now: func() time.Time { return t0 },
+		Remover: &fleets.Remover{Store: e.st, Headscale: e.hs, Locks: &fleets.Locks{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	get := func(ip string) int {
+		r := httptest.NewRequest("GET", "/admin/", nil)
+		r.Header.Set("X-Client-IP", ip)
+		r.SetBasicAuth("admin", "wrong")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+	for i := 0; i < 100_000; i++ { // the limiter's key cap (ratelimit.defaultMaxKeys)
+		get("10." + strconv.Itoa(i>>16) + "." + strconv.Itoa(i>>8&255) + "." + strconv.Itoa(i&255))
+	}
+	if c := get("192.0.2.1"); c != 429 {
+		t.Fatalf("new address with a full limiter: %d, want 429", c)
 	}
 }
