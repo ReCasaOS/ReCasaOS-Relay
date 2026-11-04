@@ -1,6 +1,6 @@
 # DERP: the relay is a standalone `derper` (Headscale's embedded DERP is off, see headscale/config.yaml),
-# so its per-connection byte counters can be metered. Headscale's DERP map (headscale/derp.yaml) sends
-# boxes to /derp on the public host, which `front` proxies to derper; only its STUN port is published.
+# so its per-connection byte counters can be metered. Headscale's DERP map (headscale/derp.yaml, which an
+# operator replaces with their own host through an override, docs/self-hosting.md) sends boxes to /derp on the public host, which `front` proxies to derper; only its STUN port is published.
 # derper admits a node only if Headscale's /verify knows its key, and refuses everyone when Headscale
 # cannot be reached (fail-closed).
 services:
@@ -19,6 +19,8 @@ services:
   derper:
     build: ./derper
     restart: unless-stopped
+    depends_on:
+      - headscale
     command: -a :8090 -http-port -1 -stun-port 3478 -verify-client-url http://headscale:8080/verify -verify-client-url-fail-open=false
     environment:
       # /debug/ answers only with ?debugkey=<this file's content, trimmed>; DERPER_DEBUG_KEY unset: the file
@@ -74,7 +76,7 @@ services:
       # Optional traffic metering from the derper. DERPER_DEBUG_KEY unset: metering is off.
       DERPER_URL: ${DERPER_URL:-http://derper:8090}
       DERPER_DEBUG_KEY: ${DERPER_DEBUG_KEY:-}
-      # Monthly traffic budget shown on /admin, e.g. 100G or 2T (K, M, G, T are decimal). Unset: no reference.
+      # Monthly traffic budget shown on /admin, e.g. 100G, 100GB or 2t (K, M, G, T are decimal, any case). Unset: no reference.
       MONTHLY_TRAFFIC_REFERENCE: ${MONTHLY_TRAFFIC_REFERENCE:-}
     volumes:
       - enrolment-data:/data
