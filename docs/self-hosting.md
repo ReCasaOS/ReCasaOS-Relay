@@ -51,7 +51,8 @@ relay.example.org {
 		respond 404
 	}
 
-	handle /v1/* {
+	@enrolment path /v1/* /admin /admin/*
+	handle @enrolment {
 		reverse_proxy enrolment:8081 {
 			header_up X-Client-IP {client_ip}
 		}
@@ -114,6 +115,7 @@ Put them in a `.env` file next to `compose.yaml` (Compose substitutes them). An 
 | `IDLE_AFTER` | `720h` (30 days) | yes | a fleet with no online node for this long is deleted |
 | `GC_INTERVAL` | `10m` | yes | janitor period |
 | `TRUSTED_PROXY_HEADER` | `X-Client-IP` in compose (empty in the binary) | yes | header set by `front`. An empty value in `.env` makes the service use the TCP peer address, which is wrong behind `front`: keep the default |
+| `ADMIN_TOKEN` | none (page disabled) | yes | 24 characters or more. Turns on the operator page (section 11) |
 | `HEADSCALE_URL` | `http://headscale:8080` | no, fixed in `compose.yaml` | Headscale REST API, compose network only |
 | `STORE_PATH` | `/data/relay.db` | no, fixed in `compose.yaml` | SQLite file, in the `enrolment-data` volume |
 | `LISTEN_ADDR` | `:8081` | no, not passed by `compose.yaml` | never publish it |
@@ -217,7 +219,16 @@ In ReCasaOS, enter your public URL (`https://relay.example.org`, no path) in the
 ## 10. Security checklist
 
 - TLS in front of everything. The enrolment API relies on it: a box signature is bearer-like within its ±120 s validity window. While the service runs, each signature is accepted once (replay is refused); a restart forgets which signatures were seen, so a signature captured on the wire can be replayed within the window after a restart.
+- `ADMIN_TOKEN` opens `/admin` to the Internet: long random token, HTTPS only (section 11).
 - Do not add a `ports:` entry for `enrolment` (8081) or Headscale's gRPC (50443). The rate limiter trusts `X-Client-IP`, which only `front` sets, and the admin API has no other protection. `/api/` must stay unreachable from outside (`front` answers 404).
 - `X-Client-IP` and `trusted_proxies`: read the README section on the proxy header before putting another proxy in front of `front`.
 - Keep `.env` (the API key) out of version control; rotate the key (section 5).
 - Do not edit the access policy in Headscale by hand: the next sync overwrites it.
+
+## 11. Admin page
+
+A small page at `https://your-relay/admin/` lists the fleets and their nodes (online or not, activity, quotas) and can delete a fleet or remove a node. It is off, and `/admin` answers 404, until you set `ADMIN_TOKEN` in `.env` (24 characters or more, for example `openssl rand -hex 16`) and run `docker compose up -d`.
+
+The browser asks for a login: any user name, the token as the password. Use it over HTTPS only (section 3), since the token travels with every request. It answers 429 beyond 120 requests per hour per client address, which makes guessing the token impractical; a long random token is still what protects it. The page shows no fleet secret and no join key: the relay does not keep them. Deleting a fleet takes its boxes off the relay, and each box notices the next time it asks for its state.
+
+If you would rather not expose it, remove `/admin /admin/*` from the `@enrolment` line of your Caddyfile.

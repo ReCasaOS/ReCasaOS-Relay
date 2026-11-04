@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Relay admin</title>
+<style>
+:root { --bg:#fff; --fg:#1b1f24; --mut:#6a737d; --line:#d8dee4; --card:#f6f8fa; --ok:#1a7f37; --bad:#cf222e; }
+@media (prefers-color-scheme: dark) { :root { --bg:#0d1117; --fg:#e6edf3; --mut:#8b949e; --line:#30363d; --card:#161b22; --ok:#3fb950; --bad:#f85149; } }
+body { font:15px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--fg); margin:0 auto; max-width:60rem; padding:1rem 16px 3rem; }
+h1 { font-size:1.3rem; margin:.5rem 0 1rem; }
+.stats { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:1.2rem; }
+.stat { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:.5rem .9rem; }
+.stat b { display:block; font-size:1.25rem; }
+.stat span, .mut { color:var(--mut); font-size:.85rem; }
+details { border:1px solid var(--line); border-radius:8px; margin-bottom:8px; background:var(--card); }
+summary { cursor:pointer; padding:.6rem .9rem; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+summary code { font-weight:600; }
+.sp { flex:1; }
+.body { padding:0 .9rem .7rem; }
+table { width:100%; border-collapse:collapse; }
+td { padding:.3rem .4rem; border-top:1px solid var(--line); }
+.on { color:var(--ok); } .off { color:var(--mut); } .err { color:var(--bad); }
+button { font:inherit; border:1px solid var(--line); background:var(--bg); color:var(--bad); border-radius:6px; padding:.2rem .6rem; cursor:pointer; }
+form { margin:0; display:inline; }
+</style>
+</head>
+<body>
+<h1>Relay admin</h1>
+<div class="stats">
+<div class="stat"><b>{{len .Fleets}} / {{.MaxFleets}}</b><span>fleets</span></div>
+<div class="stat"><b>{{.Online}} / {{.Nodes}}</b><span>nodes online</span></div>
+<div class="stat"><b>{{.NodesPerFleet}}</b><span>nodes max per fleet</span></div>
+</div>
+{{range .Fleets}}
+<details>
+<summary>
+<code>{{.ID}}</code>
+{{if .Err}}<span class="err">nodes unavailable</span>{{else}}<span>{{.Online}} / {{len .Nodes}} online</span>{{end}}
+<span class="mut">created {{ago .Created $.Now}} · last activity {{ago .LastOnline $.Now}}</span>
+<span class="sp"></span>
+<form method="post" action="/admin/fleets/{{.ID}}/delete" onsubmit="return confirm('Delete fleet {{.ID}} and every node in it?')">
+<input type="hidden" name="csrf" value="{{$.CSRF}}"><button>Delete fleet</button>
+</form>
+</summary>
+<div class="body">
+{{if .Nodes}}<table>
+{{$fid := .ID}}{{range .Nodes}}<tr>
+<td>{{.Hostname}}</td><td class="mut">{{.IP}}</td>
+<td>{{if .Online}}<span class="on">online</span>{{else}}<span class="off">offline</span>{{end}}</td>
+<td style="text-align:right"><form method="post" action="/admin/fleets/{{$fid}}/nodes/{{.ID}}/remove" onsubmit="return confirm('Remove this node?')">
+<input type="hidden" name="csrf" value="{{$.CSRF}}"><button>Remove</button></form></td>
+</tr>{{end}}
+</table>{{else}}<span class="mut">No node.</span>{{end}}
+</div>
+</details>
+{{else}}<p class="mut">No fleet yet.</p>{{end}}
+</body>
+</html>

@@ -50,6 +50,8 @@ services:
       JOIN_KEY_TTL: ${JOIN_KEY_TTL:-24h}
       IDLE_AFTER: ${IDLE_AFTER:-720h}
       GC_INTERVAL: ${GC_INTERVAL:-10m}
+      # Optional operator page at /admin (24+ characters). Unset: /admin answers 404.
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
     volumes:
       - enrolment-data:/data
     # Reached only through `front` (Caddyfile): never publish this port, the rate limiter trusts X-Client-IP.
