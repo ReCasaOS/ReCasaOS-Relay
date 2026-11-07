@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -92,7 +94,8 @@ func TestLoginForm(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/html") {
 		t.Fatalf("%d %q", rec.Code, rec.Header().Get("Content-Type"))
 	}
-	for _, s := range []string{`<form method="post">`, `name="code"`, "<!-- recasaos-device-login -->", "Enter the code"} {
+	for _, s := range []string{`<form method="post">`, `name="code"`, "<!-- recasaos-device-login -->", "Enter the code",
+		"Only enter a code if you just started this login in the Tailscale app on this device."} {
 		if !strings.Contains(body, s) {
 			t.Fatalf("body lacks %q:\n%s", s, body)
 		}
@@ -110,7 +113,8 @@ func TestLoginForm(t *testing.T) {
 	if e.get("hskey-authreq-short", "").Code != http.StatusNotFound {
 		t.Fatal("invalid id not 404")
 	}
-	if fr := e.get(authID, "fr-FR,fr;q=0.9").Body.String(); !strings.Contains(fr, "Saisis le code") {
+	if fr := e.get(authID, "fr-FR,fr;q=0.9").Body.String(); !strings.Contains(fr, "Saisis le code") ||
+		!strings.Contains(fr, html.EscapeString("Ne saisis un code que si tu viens de lancer cette connexion dans l'app Tailscale, sur cet appareil.")) {
 		t.Fatalf("not French: %s", fr)
 	}
 }
@@ -118,7 +122,7 @@ func TestLoginForm(t *testing.T) {
 func TestLoginApproves(t *testing.T) {
 	e := setupLogin(t, nil)
 	rec := e.post(authID, e.code(t), "", ip1)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Device added") {
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Device added: device-1") {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
 	if got := e.log.Calls(); len(got) != 1 || got[0] != "register:f-fleet0001" {
@@ -128,8 +132,17 @@ func TestLoginApproves(t *testing.T) {
 	if err != nil || len(ids) != 1 || !ids["1"] {
 		t.Fatalf("devices %v %v", ids, err)
 	}
-	if fr := setupLogin(t, nil); !strings.Contains(fr.post(authID, fr.code(t), "fr", ip1).Body.String(), "Appareil ajouté") {
+	if fr := setupLogin(t, nil); !strings.Contains(fr.post(authID, fr.code(t), "fr", ip1).Body.String(), "Appareil ajouté : device-1") {
 		t.Fatal("not French")
+	}
+}
+
+func TestLoginEscapesHostname(t *testing.T) {
+	e := setupLogin(t, nil)
+	e.hs.RegisterHostname = "<script>alert(1)</script>"
+	body := e.post(authID, e.code(t), "", ip1).Body.String()
+	if strings.Contains(body, "<script>") || !strings.Contains(body, "&lt;script&gt;alert(1)&lt;/script&gt;") {
+		t.Fatalf("hostname not escaped:\n%s", body)
 	}
 }
 
@@ -175,8 +188,11 @@ func TestLoginExpiredAuthRequest(t *testing.T) {
 func TestLoginHeadscaleDown(t *testing.T) {
 	e := setupLogin(t, nil)
 	e.hs.Fail("register", context.DeadlineExceeded)
-	if rec := e.post(authID, e.code(t), "", ip1); rec.Code != http.StatusBadGateway {
-		t.Fatalf("%d", rec.Code)
+	if rec := e.post(authID, e.code(t), "", ip1); rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "Generate a new code") {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	if fr := e.post(authID, e.code(t), "fr", ip1); !strings.Contains(fr.Body.String(), "Génère un nouveau code") {
+		t.Fatalf("%d %s", fr.Code, fr.Body)
 	}
 }
 
@@ -193,6 +209,25 @@ func TestLoginRateLimit(t *testing.T) {
 	}
 	if e.post(authID, e.code(t), "", "192.0.2.9:1").Code != http.StatusOK {
 		t.Fatal("other IP blocked")
+	}
+}
+
+// One /48 holds 65,536 /64s: it gets prefix48Factor times the per-/64 rate in all.
+func TestLoginRateLimitPer48(t *testing.T) {
+	e := setupLogin(t, nil)
+	for i := 0; i < 200; i++ { // 200 distinct /64s of 2001:db8:5::/48, one try each
+		if rec := e.post(authID, "ABCD-EFGH", "", "[2001:db8:5:"+strconv.FormatInt(int64(i+1), 16)+"::1]:1"); rec.Code != http.StatusBadRequest {
+			t.Fatalf("attempt %d = %d", i, rec.Code)
+		}
+	}
+	if rec := e.post(authID, e.code(t), "", "[2001:db8:5:ffff::1]:1"); rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("fresh /64 of the same /48 = %d", rec.Code)
+	}
+	if rec := e.post(authID, e.code(t), "", "[2001:db8:6:1::1]:1"); rec.Code != http.StatusOK {
+		t.Fatalf("another /48 = %d", rec.Code)
+	}
+	if e.registers() != 1 {
+		t.Fatalf("registers %d", e.registers())
 	}
 }
 

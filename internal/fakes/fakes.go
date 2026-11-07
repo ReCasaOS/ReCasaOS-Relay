@@ -65,6 +65,8 @@ type HS struct {
 	KeepKeysOnUserDelete bool
 	// Expired lists auth ids RegisterNode answers ErrAuthRequestNotFound for.
 	Expired map[string]bool
+	// RegisterHostname, when set, is the hostname RegisterNode gives the node (default device-<n>).
+	RegisterHostname string
 }
 
 func NewHS(log *Log, now func() time.Time) *HS {
@@ -196,6 +198,9 @@ func (h *HS) RegisterNode(_ context.Context, user, authID string) (headscale.Nod
 	h.users[user] = true
 	h.nextN++
 	n := headscale.Node{ID: strconv.Itoa(h.nextN), Hostname: "device-" + strconv.Itoa(h.nextN), User: user}
+	if h.RegisterHostname != "" {
+		n.Hostname = h.RegisterHostname
+	}
 	h.nodes[user] = append(h.nodes[user], n)
 	return n, nil
 }
