@@ -141,6 +141,9 @@ Put them in a `.env` file next to `compose.yaml` (Compose substitutes them). An 
 | `CREATE_RATE_PER_HOUR` | `5` | yes | fleet creations per hour per client IP (IPv6: per /64, plus 10 times this per /48) |
 | `KEY_RATE_PER_HOUR` | `30` | yes | join keys per hour per fleet |
 | `AUTH_RATE_PER_HOUR` | `60` | yes | authenticated fleet requests (join key, status, deletions) per hour per client IP (boxes behind one NAT share it) |
+| `DEVICE_CODE_TTL` | `10m` | yes | validity of a device code (remote access, section 13) |
+| `MAX_PENDING_DEVICE_CODES` | `5` | yes | unused device codes per fleet at once (409 beyond) |
+| `LOGIN_RATE_PER_HOUR` | `20` | yes | device-login form submissions per hour per client IP |
 | `JOIN_KEY_TTL` | `24h` | yes | validity of a join key |
 | `IDLE_AFTER` | `720h` (30 days) | yes | a fleet with no online node for this long is deleted |
 | `GC_INTERVAL` | `10m` | yes | janitor period |
@@ -297,3 +300,22 @@ If you would rather not expose it, remove `/admin /admin/*` from the `@enrolment
 - **Not metered:** a connection that opens and closes within one 15 s scrape interval, and direct peer-to-peer traffic (which does not cost you bandwidth).
 - **Large relays:** metering needs Headscale's full node list in one reply, which its gRPC layer caps at 4 MiB: beyond roughly 8,000 nodes (an estimate, not measured; the defaults allow 50,000) `/admin` shows "metering unavailable". A per-fleet fallback is a planned follow-up (README, "Capacity").
 - **Observed, not enforced:** nothing is refused or cut when a budget is exceeded.
+
+## 13. Remote access (phone login)
+
+A phone joins a fleet with the official Tailscale app, using your relay as its login server. The box asks `POST /v1/fleets/{id}/device-codes` for a one-time code (valid `DEVICE_CODE_TTL`, 10 minutes by default); the app opens `https://your-relay/register/<auth id>` and the user types the code. The API is in the README ("Remote access"). Three things matter to an operator:
+
+- **Route `/register/*` to `enrolment`.** The shipped `Caddyfile` has it. If you copied an older one (the `Caddyfile.tls` of section 3a, or your own proxy), add this block next to the `@enrolment` one, or the app lands on Headscale's own page, which cannot approve anything:
+
+  ```
+  	@login path /register/*
+  	handle @login {
+  		reverse_proxy enrolment:8081 {
+  			header_up X-Client-IP {client_ip}
+  		}
+  	}
+  ```
+
+  Behind your own proxy: send `/register/*` to host port `8080` like the rest, and keep the `X-Client-IP` rule of section 3b, since `LOGIN_RATE_PER_HOUR` counts per client address.
+- **Devices never expire.** `headscale/config.yaml` pins `node.expiry: 0`, so a phone is not logged out after 180 days. If you replaced that file, keep the setting; without it, phones drop off the network and must register again.
+- **Limits** (section 4): `DEVICE_CODE_TTL` `10m`, `MAX_PENDING_DEVICE_CODES` `5` unused codes per fleet, `LOGIN_RATE_PER_HOUR` `20` form submissions per hour per client address. Devices do not count in `NODES_PER_FLEET`. After upgrading, run `docker compose up -d` so `enrolment` gets the new variables.

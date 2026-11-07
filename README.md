@@ -71,6 +71,9 @@ Fleet creation is limited per client IP (per /64 for IPv6, and in addition per /
 | `MAX_PENDING_KEYS` | `5` | unused, unexpired join keys a fleet may hold at once, whatever `NODES_PER_FLEET` leaves: one more is refused (409). A key request also deletes the fleet's used and expired keys (sizing: see "Capacity") |
 | `CREATE_RATE_PER_HOUR` | `5` | fleet creations per hour per IP (IPv6: per /64); an IPv6 /48 also gets at most 10 times this in all (fixed factor) |
 | `KEY_RATE_PER_HOUR` | `30` | join-key requests per hour per fleet (counted once the fleet secret is verified) |
+| `DEVICE_CODE_TTL` | `10m` | validity of a device code (remote access, see below) |
+| `MAX_PENDING_DEVICE_CODES` | `5` | unused, unexpired device codes a fleet may hold at once (409 beyond) |
+| `LOGIN_RATE_PER_HOUR` | `20` | device-login form submissions per hour per client IP (`POST /register/*`), right or wrong code |
 | `AUTH_RATE_PER_HOUR` | `60` | authenticated fleet requests (join key, status, node and fleet deletion) per hour per client IP, counted BEFORE the secret is checked, wrong or right; boxes behind one NAT share it |
 | `JOIN_KEY_TTL` | `24h` | validity of a join key |
 | `IDLE_AFTER` | `720h` | a fleet with no online node for this long is deleted by the janitor |
@@ -101,6 +104,19 @@ Both calls take the fleet secret (`Authorization: Bearer ...`) and answer `204` 
 
 - `DELETE /v1/fleets/{id}/nodes/{hostname}` removes one node. The hostname is 1 to 63 of `[A-Za-z0-9-]` (else `400`). A hostname that is not a node of the fleet is a success (`204`).
 - `DELETE /v1/fleets/{id}` deletes the fleet: its nodes, its Headscale user and keys, then its row, then the policy is rewritten. The secret is only forgotten at the end, so after a `502` the same call can simply be repeated. Once the deletion has completed there is nothing left to authenticate against and a repeat answers `404`: **treat `404` as "already deleted"**.
+
+## Remote access (phone login)
+
+A phone joins a fleet's private network with the official Tailscale app, pointed at this relay as its login server. The box (the fleet owner, `Authorization: Bearer <fleet secret>`) asks for a one-time code and shows it to the user; the app opens `https://<relay>/register/<auth id>`, a page the relay serves (`front` routes `/register/*` to the enrolment service), and the user types the code there. Loose input is accepted (lowercase, no dash). The code decides the fleet; the device never expires (`node.expiry: 0` in `headscale/config.yaml`).
+
+| Call | Answer |
+|---|---|
+| `POST /v1/fleets/{id}/device-codes` | `201 {"code": "XXXX-XXXX", "expires_at": ...}`; one use, valid `DEVICE_CODE_TTL`; `409` when the fleet already holds `MAX_PENDING_DEVICE_CODES` unused codes |
+| `GET /v1/fleets/{id}/devices` | `200 {"devices": [{"id", "hostname", "ip", "online", "last_seen"}]}` |
+| `DELETE /v1/fleets/{id}/devices/{node}` | `204`; removes the device from Headscale. An id that is not a device of the fleet is a quiet `204` |
+| `GET` / `POST /register/{auth id}` | the login page (HTML) and its form (field `code`); a wrong, used or expired code answers `400`. Throttled by `LOGIN_RATE_PER_HOUR` |
+
+The first three take the fleet secret (`401` wrong secret, `404` unknown fleet, `429` throttle, `502` Headscale failure). Devices do not count in `NODES_PER_FLEET` and are not listed by `GET /v1/fleets/{id}`.
 
 ### Janitor
 
