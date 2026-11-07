@@ -45,8 +45,11 @@ func TestWebLoginIsTakenOver(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	page, _ := io.ReadAll(resp.Body)
+	page, err := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(page), "recasaos-device-login") {
 		t.Fatalf("GET %s = %d, body %.200q", u.Path, resp.StatusCode, page)
 	}

@@ -397,7 +397,8 @@ func (c *Client) RegisterNode(ctx context.Context, user, authID string) (Node, e
 	var res struct{ Node hsNode }
 	err := c.do(ctx, http.MethodPost, "/api/v1/auth/register", nil, body, &res)
 	var ae *APIError
-	if errors.As(err, &ae) && ae.Status == http.StatusNotFound {
+	// Headscale 0.29.7 returns 500 "node not found in registration cache" for an unknown or expired id.
+	if errors.As(err, &ae) && (ae.Status == http.StatusNotFound || strings.Contains(ae.Message, "not found in registration cache")) {
 		return Node{}, fmt.Errorf("%w (%v)", ErrAuthRequestNotFound, err)
 	}
 	if err != nil {

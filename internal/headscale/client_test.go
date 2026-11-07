@@ -412,10 +412,26 @@ func TestRegisterNodeUnknownAuthID(t *testing.T) {
 	}
 }
 
+// Headscale 0.29.7 answers an unknown or expired auth id with HTTP 500, not 404.
+func TestRegisterNodeUnknownAuthIDIs500(t *testing.T) {
+	c, _ := newFake(t, map[string]reply{"POST /api/v1/auth/register": {500, `{"code":5,"message":"node not found in registration cache"}`}})
+	if _, err := c.RegisterNode(ctx, "f-abc", authID); !errors.Is(err, ErrAuthRequestNotFound) {
+		t.Fatalf("err = %v, want ErrAuthRequestNotFound", err)
+	}
+}
+
+func TestRegisterNodeOther500IsNotMapped(t *testing.T) {
+	c, _ := newFake(t, map[string]reply{"POST /api/v1/auth/register": {500, `{"code":2,"message":"database is locked"}`}})
+	_, err := c.RegisterNode(ctx, "f-abc", authID)
+	if err == nil || errors.Is(err, ErrAuthRequestNotFound) {
+		t.Fatalf("err = %v, want a plain API error", err)
+	}
+}
+
 func TestValidAuthID(t *testing.T) {
 	for s, want := range map[string]bool{
 		authID:                                   true,
-		"hskey-authreq-abcDEF_-0123456789abcdef":   true,
+		"hskey-authreq-abcDEF_-0123456789abcdef": true,
 		"hskey-authreq-short":                    false,
 		"hskey-authreq-AAAAAAAAAAAAAAAAAAAAAA/A": false,
 		authID + "\n":                            false,
