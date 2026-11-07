@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/devicecode"
+	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
 )
 
@@ -56,10 +57,12 @@ func (h *fleetsHandler) listDevices(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), opTimeout)
 	defer cancel()
-	nodes, err := h.deps.Headscale.ListNodes(ctx, f.HeadscaleUser)
-	var ids map[string]bool
+	// Rows first, nodes second: a device joining in between is then missing from ids (just not
+	// listed) instead of looking like a stale row and being deleted.
+	ids, err := h.deps.Store.DeviceIDs(ctx, f.ID)
+	var nodes []headscale.Node
 	if err == nil {
-		ids, err = h.deps.Store.DeviceIDs(ctx, f.ID)
+		nodes, err = h.deps.Headscale.ListNodes(ctx, f.HeadscaleUser)
 	}
 	if err != nil {
 		log.Printf("fleet %s: list devices: %v", f.ID, err)

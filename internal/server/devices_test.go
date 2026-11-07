@@ -1,7 +1,10 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"github.com/ReCasaOS/recasaos-relay/internal/fakes"
+	"github.com/ReCasaOS/recasaos-relay/internal/store"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -137,5 +140,46 @@ func TestDeleteDevice(t *testing.T) {
 	}
 	if d.hs.NodeCount(d.user) != 1 || d.hs.NodeCount("f-other") != 1 {
 		t.Fatal("wrong nodes deleted")
+	}
+}
+
+// joinStore makes a device join (node and row) right before DeviceIDs answers, i.e. between the
+// two reads of a list that reads nodes first.
+type joinStore struct {
+	store.Store
+	join func()
+}
+
+func (j *joinStore) DeviceIDs(ctx context.Context, id string) (map[string]bool, error) {
+	j.join()
+	return j.Store.DeviceIDs(ctx, id)
+}
+
+func TestListDevicesKeepsRowOfDeviceJoiningMidList(t *testing.T) {
+	hs := fakes.NewHS(&fakes.Log{}, func() time.Time { return now0 })
+	js := &joinStore{}
+	e := setup(t, func(c *Config, d *Deps) {
+		c.AuthRatePerHour = 1000
+		js.Store, d.Store, d.Headscale = d.Store, js, hs
+	})
+	secret := addFleet(t, e.st, "fleet0001")
+	hs.AddUser("f-fleet0001")
+	var joined string
+	js.join = func() {
+		joined = hs.AddNode("f-fleet0001", "newphone", true)
+		if err := e.st.AddDevice(t.Context(), "fleet0001", joined, now0); err != nil {
+			t.Error(err)
+		}
+	}
+	r := httptest.NewRequest(http.MethodGet, "/v1/fleets/fleet0001/devices", nil)
+	r.RemoteAddr = ip1
+	r.Header.Set("Authorization", "Bearer "+secret)
+	rec := httptest.NewRecorder()
+	e.h.ServeHTTP(rec, r)
+	if rec.Code != 200 {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if ids, _ := e.st.DeviceIDs(t.Context(), "fleet0001"); !ids[joined] {
+		t.Fatalf("live device's row deleted: %v", ids)
 	}
 }
