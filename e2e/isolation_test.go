@@ -303,7 +303,8 @@ func (r *rig) startNodeWeb(fleet, name string) (n *node, authURL string) {
 }
 
 // launch creates and starts the tailscaled container; an empty key means no TS_AUTHKEY (web login).
-func (r *rig) launch(fleet, name, ctr, key string) *node {
+// An entrypoint (program, then its arguments) replaces the image's containerboot.
+func (r *rig) launch(fleet, name, ctr, key string, entrypoint ...string) *node {
 	t := r.t
 	n := &node{name: ctr, container: r.proj + "-" + ctr, fleet: fleet}
 	args := []string{"create", "--name", n.container, "--hostname", name,
@@ -317,7 +318,14 @@ func (r *rig) launch(fleet, name, ctr, key string) *node {
 	for _, e := range r.nodeEnv {
 		args = append(args, "-e", e)
 	}
-	out, err := sh("docker", append(args, "tailscale/tailscale:v1.104.4")...) // pinned: what :stable was when this was last run
+	if len(entrypoint) > 0 {
+		args = append(args, "--entrypoint", entrypoint[0])
+	}
+	args = append(args, "tailscale/tailscale:v1.104.4") // pinned: what :stable was when this was last run
+	if len(entrypoint) > 0 {
+		args = append(args, entrypoint[1:]...)
+	}
+	out, err := sh("docker", args...)
 	if err != nil {
 		t.Fatalf("docker create %s: %v\n%s", name, err, out)
 	}

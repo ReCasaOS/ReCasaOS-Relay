@@ -202,7 +202,7 @@ func TestDeviceJoinsWithCode(t *testing.T) {
 
 // TestDeviceInTwoNetworks: the same device added to two fleets through two app accounts (profiles)
 // stays in both. The second profile is started with `tailscale login`, which switches to a new empty
-// profile and logs it in; it runs detached, and its AuthURL is read from `tailscale status`.
+// profile and logs it in.
 //
 //	go test -tags e2e ./e2e -run TestDeviceInTwoNetworks -v -timeout 15m
 func TestDeviceInTwoNetworks(t *testing.T) {
@@ -236,8 +236,45 @@ func TestDeviceInTwoNetworks(t *testing.T) {
 		}
 	}
 
+	// The phone runs a plain tailscaled: containerboot exits when the login state changes, which a
+	// second profile does. Each login runs detached (it blocks until approved); its AuthURL is read
+	// from `tailscale status` and must differ from the previous one.
+	dev := r.launch("a", "phone", "phone", "", "tailscaled", "--statedir=/var/lib/tailscale", "--tun=tailscale0")
+	t.Cleanup(func() { // runs before the rig's own cleanup removes the container
+		if t.Failed() {
+			out, _ := sh("docker", "logs", "--tail", "80", dev.container)
+			t.Logf("docker logs %s (tail):\n%s", dev.container, out)
+		}
+	})
+	eventually(t, "tailscaled answers", 60*time.Second, func() error {
+		out, err := sh("docker", "exec", dev.container, "tailscale", "status", "--json")
+		var st struct{ BackendState string }
+		if json.Unmarshal([]byte(out), &st) != nil || st.BackendState == "" {
+			return fmt.Errorf("%v: %.200s", err, out)
+		}
+		return nil
+	})
+	login := func(cmd, prev string) string {
+		t.Helper()
+		if out, err := sh("docker", "exec", "-d", dev.container, "tailscale", cmd,
+			"--login-server="+loginServer, "--hostname=phone", "--accept-dns=false"); err != nil {
+			t.Fatalf("tailscale %s: %v\n%s", cmd, err, out)
+		}
+		var authURL string
+		eventually(t, "tailscale "+cmd+" shows a login URL", 90*time.Second, func() error {
+			out, _ := sh("docker", "exec", dev.container, "tailscale", "status", "--json")
+			var st struct{ AuthURL string }
+			if json.Unmarshal([]byte(out), &st) != nil || st.AuthURL == "" || st.AuthURL == prev {
+				return fmt.Errorf("no new AuthURL yet: %.200s", out)
+			}
+			authURL = st.AuthURL
+			return nil
+		})
+		return authURL
+	}
+
 	// Profile 1: fleet a.
-	dev, authA := r.startNodeWeb("a", "phone")
+	authA := login("up", "")
 	approve(authA, code(idA, secA))
 	eventually(t, "phone gets an address in a", 90*time.Second, func() error { return r.fetchIP(dev) })
 	r.listen(dev)
@@ -257,22 +294,8 @@ func TestDeviceInTwoNetworks(t *testing.T) {
 		t.Fatalf("phone is not a node of %s", userA)
 	}
 
-	// Profile 2, same container: fleet b.
-	if out, err := sh("docker", "exec", "-d", dev.container, "tailscale", "login",
-		"--login-server="+loginServer, "--hostname=phone", "--accept-dns=false"); err != nil {
-		t.Fatalf("tailscale login: %v\n%s", err, out)
-	}
-	var authB string
-	eventually(t, "second profile shows a login URL", 90*time.Second, func() error {
-		out, _ := sh("docker", "exec", dev.container, "tailscale", "status", "--json")
-		var st struct{ AuthURL string }
-		if json.Unmarshal([]byte(out), &st) != nil || st.AuthURL == "" || st.AuthURL == authA {
-			return fmt.Errorf("no new AuthURL yet: %.200s", out)
-		}
-		authB = st.AuthURL
-		return nil
-	})
-	approve(authB, code(idB, secB))
+	// Profile 2, same container: `tailscale login` switches to a new empty profile. Fleet b.
+	approve(login("login", authA), code(idB, secB))
 	devB := &node{name: "phone (profile b)", container: dev.container, fleet: "b"}
 	eventually(t, "phone gets an address in b", 90*time.Second, func() error {
 		if err := r.fetchIP(devB); err != nil {
