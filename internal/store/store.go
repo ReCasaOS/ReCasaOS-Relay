@@ -15,6 +15,8 @@ import (
 var (
 	ErrNotFound = errors.New("store: not found")
 	ErrExists   = errors.New("store: already exists")
+
+	ErrTooManyCodes = errors.New("store: too many unused device codes")
 )
 
 type Fleet struct {
@@ -43,6 +45,18 @@ type Store interface {
 	// UsageSeries returns buckets >= since, ordered by time.
 	UsageSeries(ctx context.Context, res Resolution, since time.Time) ([]UsagePoint, error)
 	PruneUsage(ctx context.Context, minutesBefore, hoursBefore time.Time) error
+	// CreateDeviceCode prunes the fleet's expired codes, then stores codeHash unless
+	// maxPending unexpired codes already exist (ErrTooManyCodes).
+	CreateDeviceCode(ctx context.Context, fleetID, codeHash string, expires, now time.Time, maxPending int) error
+	// TakeDeviceCode consumes a code and returns its fleet; missing or expired is ErrNotFound.
+	TakeDeviceCode(ctx context.Context, codeHash string, now time.Time) (fleetID string, err error)
+	// AddDevice upserts a device (node id) into a fleet.
+	AddDevice(ctx context.Context, fleetID, nodeID string, at time.Time) error
+	DeviceIDs(ctx context.Context, fleetID string) (map[string]bool, error)
+	// AllDevices maps node id to fleet id.
+	AllDevices(ctx context.Context) (map[string]string, error)
+	// DeleteDevice removes a device; an unknown id is not an error.
+	DeleteDevice(ctx context.Context, nodeID string) error
 	Close() error
 }
 
@@ -76,6 +90,16 @@ CREATE TABLE IF NOT EXISTS usage_hour (
 -- Time-range reads and pruning filter on the bucket alone, which the primary keys do not lead with.
 CREATE INDEX IF NOT EXISTS usage_minute_minute ON usage_minute(minute);
 CREATE INDEX IF NOT EXISTS usage_hour_hour ON usage_hour(hour);
+CREATE TABLE IF NOT EXISTS device_codes (
+	code_hash TEXT PRIMARY KEY,
+	fleet_id TEXT NOT NULL REFERENCES fleets(id) ON DELETE CASCADE,
+	expires INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS devices (
+	node_id TEXT PRIMARY KEY,
+	fleet_id TEXT NOT NULL REFERENCES fleets(id) ON DELETE CASCADE,
+	added INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS derp_cursor (conn TEXT PRIMARY KEY, rx INTEGER NOT NULL, tx INTEGER NOT NULL);`
 
 type sqlStore struct{ db *sql.DB }
@@ -356,6 +380,106 @@ func (s *sqlStore) PruneUsage(ctx context.Context, minutesBefore, hoursBefore ti
 	}
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM usage_hour WHERE hour < ?`, hoursBefore.UTC().Unix()); err != nil {
 		return fmt.Errorf("store: prune usage: %w", err)
+	}
+	return nil
+}
+
+func (s *sqlStore) CreateDeviceCode(ctx context.Context, fleetID, codeHash string, expires, now time.Time, maxPending int) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: create device code: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM device_codes WHERE fleet_id = ? AND expires <= ?`, fleetID, ts(now)); err != nil {
+		return fmt.Errorf("store: create device code: %w", err)
+	}
+	var n int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM device_codes WHERE fleet_id = ?`, fleetID).Scan(&n); err != nil {
+		return fmt.Errorf("store: create device code: %w", err)
+	}
+	if n >= maxPending {
+		return ErrTooManyCodes
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO device_codes (code_hash, fleet_id, expires) VALUES (?, ?, ?)`,
+		codeHash, fleetID, ts(expires)); err != nil {
+		return fmt.Errorf("store: create device code: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: create device code: %w", err)
+	}
+	return nil
+}
+
+func (s *sqlStore) TakeDeviceCode(ctx context.Context, codeHash string, now time.Time) (string, error) {
+	var fleetID string
+	var expires int64
+	err := s.db.QueryRowContext(ctx, `DELETE FROM device_codes WHERE code_hash = ? RETURNING fleet_id, expires`, codeHash).Scan(&fleetID, &expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: take device code: %w", err)
+	}
+	if expires <= ts(now) {
+		return "", ErrNotFound
+	}
+	return fleetID, nil
+}
+
+func (s *sqlStore) AddDevice(ctx context.Context, fleetID, nodeID string, at time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO devices (node_id, fleet_id, added) VALUES (?, ?, ?)
+		 ON CONFLICT(node_id) DO UPDATE SET fleet_id = excluded.fleet_id, added = excluded.added`,
+		nodeID, fleetID, ts(at))
+	if err != nil {
+		return fmt.Errorf("store: add device: %w", err)
+	}
+	return nil
+}
+
+func (s *sqlStore) DeviceIDs(ctx context.Context, fleetID string) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT node_id FROM devices WHERE fleet_id = ?`, fleetID)
+	if err != nil {
+		return nil, fmt.Errorf("store: device ids: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store: device ids: %w", err)
+		}
+		out[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: device ids: %w", err)
+	}
+	return out, nil
+}
+
+func (s *sqlStore) AllDevices(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT node_id, fleet_id FROM devices`)
+	if err != nil {
+		return nil, fmt.Errorf("store: all devices: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var node, fleet string
+		if err := rows.Scan(&node, &fleet); err != nil {
+			return nil, fmt.Errorf("store: all devices: %w", err)
+		}
+		out[node] = fleet
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: all devices: %w", err)
+	}
+	return out, nil
+}
+
+func (s *sqlStore) DeleteDevice(ctx context.Context, nodeID string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM devices WHERE node_id = ?`, nodeID); err != nil {
+		return fmt.Errorf("store: delete device: %w", err)
 	}
 	return nil
 }
