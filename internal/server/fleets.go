@@ -70,9 +70,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+func retryAfter(retry time.Duration) string {
+	return strconv.Itoa(max(int((retry+time.Second-1)/time.Second), 1))
+}
+
 func tooMany(w http.ResponseWriter, retry time.Duration) {
-	secs := int((retry + time.Second - 1) / time.Second)
-	w.Header().Set("Retry-After", strconv.Itoa(max(secs, 1)))
+	w.Header().Set("Retry-After", retryAfter(retry))
 	writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 }
 
