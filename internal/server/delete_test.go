@@ -258,7 +258,7 @@ func TestRemoveNodeHostnameValidation(t *testing.T) {
 func TestRemoveNodeUpstreamErrorIsGeneric(t *testing.T) {
 	d := setupDel(t, nil)
 	d.hs.AddNode(d.user, "box-a", true)
-	d.hs.Fail("nodes-named", &headscale.APIError{Status: 500, Message: "db password is hunter2"})
+	d.hs.Fail("nodes", &headscale.APIError{Status: 500, Message: "db password is hunter2"})
 	rec := d.removeNode(d.secret, "box-a")
 	if rec.Code != http.StatusBadGateway || strings.Contains(rec.Body.String(), "hunter2") {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
@@ -496,5 +496,24 @@ func TestKeyCreationTouchesTheFleet(t *testing.T) {
 	}
 	if f, _ := e.st.Fleet(context.Background(), e.id); !f.LastOnline.Equal(now0) {
 		t.Fatalf("last online = %v, want %v", f.LastOnline, now0)
+	}
+}
+
+func TestRemoveNodeSparesDevices(t *testing.T) {
+	d := setupDel(t, nil)
+	box := d.hs.AddNode(d.user, "b-x", true)
+	dev := d.hs.AddNode(d.user, "b-x", true)
+	if err := d.st.AddDevice(t.Context(), d.id, dev, now0); err != nil {
+		t.Fatal(err)
+	}
+	d.log.Reset()
+	if rec := d.removeNode(d.secret, "b-x"); rec.Code != http.StatusNoContent {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if got := d.log.String(); !strings.Contains(got, "node:"+box) || strings.Contains(got, "node:"+dev) || strings.Contains(got, "nodes-named") {
+		t.Fatalf("log %q", got)
+	}
+	if d.hs.NodeCount(d.user) != 1 {
+		t.Fatalf("nodes left %d", d.hs.NodeCount(d.user))
 	}
 }

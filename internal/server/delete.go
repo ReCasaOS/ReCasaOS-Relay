@@ -37,7 +37,21 @@ func (h *fleetsHandler) removeNode(w http.ResponseWriter, r *http.Request) {
 	// Detached like the other writes: a node half-removed for a client that hung up helps nobody.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), opTimeout)
 	defer cancel()
-	if err := h.deps.Headscale.DeleteNode(ctx, f.HeadscaleUser, hostname); err != nil {
+	// By id, not by hostname: a device may share the box's hostname and must survive.
+	nodes, err := h.deps.Headscale.ListNodes(ctx, f.HeadscaleUser)
+	var devs map[string]bool
+	if err == nil {
+		devs, err = h.deps.Store.DeviceIDs(ctx, f.ID)
+	}
+	for _, n := range nodes {
+		if err != nil {
+			break
+		}
+		if n.Hostname == hostname && !devs[n.ID] {
+			err = h.deps.Headscale.DeleteNodeByID(ctx, n.ID)
+		}
+	}
+	if err != nil {
 		log.Printf("fleet %s: remove node: %v", f.ID, err)
 		writeError(w, http.StatusBadGateway, "upstream error")
 		return

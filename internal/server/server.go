@@ -78,6 +78,8 @@ func New(cfg Config, deps Deps) http.Handler {
 		mux.HandleFunc("POST /v1/fleets", h.createFleet)
 		mux.HandleFunc("POST /v1/fleets/{id}/keys", h.createKey)
 		mux.HandleFunc("POST /v1/fleets/{id}/device-codes", h.createDeviceCode)
+		mux.HandleFunc("GET /v1/fleets/{id}/devices", h.listDevices)
+		mux.HandleFunc("DELETE /v1/fleets/{id}/devices/{node}", h.removeDevice)
 		mux.HandleFunc("GET /v1/fleets/{id}", h.fleetStatus)
 		mux.HandleFunc("DELETE /v1/fleets/{id}/nodes/{hostname}", h.removeNode)
 		mux.HandleFunc("DELETE /v1/fleets/{id}", h.deleteFleet)

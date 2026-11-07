@@ -46,3 +46,73 @@ func (h *fleetsHandler) createDeviceCode(w http.ResponseWriter, r *http.Request)
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"code": code, "expires_at": expires.Format(time.RFC3339)})
 }
+
+// listDevices handles GET /v1/fleets/{id}/devices. A device row whose node is gone from Headscale
+// (removed from the phone, or expired) is dropped here.
+func (h *fleetsHandler) listDevices(w http.ResponseWriter, r *http.Request) {
+	f, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), opTimeout)
+	defer cancel()
+	nodes, err := h.deps.Headscale.ListNodes(ctx, f.HeadscaleUser)
+	var ids map[string]bool
+	if err == nil {
+		ids, err = h.deps.Store.DeviceIDs(ctx, f.ID)
+	}
+	if err != nil {
+		log.Printf("fleet %s: list devices: %v", f.ID, err)
+		writeError(w, http.StatusBadGateway, "upstream error")
+		return
+	}
+	type device struct {
+		ID       string `json:"id"`
+		Hostname string `json:"hostname"`
+		IP       string `json:"ip"`
+		Online   bool   `json:"online"`
+		LastSeen string `json:"last_seen"`
+	}
+	out := []device{} // [] rather than null
+	for _, n := range nodes {
+		if !ids[n.ID] {
+			continue
+		}
+		delete(ids, n.ID)
+		d := device{n.ID, n.Hostname, n.IP, n.Online, ""}
+		if !n.LastSeen.IsZero() {
+			d.LastSeen = n.LastSeen.UTC().Format(time.RFC3339)
+		}
+		out = append(out, d)
+	}
+	for id := range ids { // left over: the node no longer exists
+		if err := h.deps.Store.DeleteDevice(ctx, id); err != nil {
+			log.Printf("fleet %s: drop device %s: %v", f.ID, id, err)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"devices": out})
+}
+
+// removeDevice handles DELETE /v1/fleets/{id}/devices/{node}. Only a device of this fleet is
+// deleted; any other id is a quiet success.
+func (h *fleetsHandler) removeDevice(w http.ResponseWriter, r *http.Request) {
+	f, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	node := r.PathValue("node")
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), opTimeout)
+	defer cancel()
+	ids, err := h.deps.Store.DeviceIDs(ctx, f.ID)
+	if err == nil && ids[node] {
+		if err = h.deps.Headscale.DeleteNodeByID(ctx, node); err == nil {
+			err = h.deps.Store.DeleteDevice(ctx, node)
+		}
+	}
+	if err != nil {
+		log.Printf("fleet %s: remove device: %v", f.ID, err)
+		writeError(w, http.StatusBadGateway, "upstream error")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
