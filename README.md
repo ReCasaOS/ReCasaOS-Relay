@@ -73,8 +73,8 @@ Fleet creation is limited per client IP (per /64 for IPv6, and in addition per /
 | `KEY_RATE_PER_HOUR` | `30` | join-key requests per hour per fleet (counted once the fleet secret is verified) |
 | `DEVICE_CODE_TTL` | `10m` | validity of a device code (remote access, see below) |
 | `MAX_PENDING_DEVICE_CODES` | `5` | unused, unexpired device codes a fleet may hold at once (409 beyond) |
-| `LOGIN_RATE_PER_HOUR` | `20` | device-login form submissions per hour per client IP (`POST /register/*`), right or wrong code |
-| `AUTH_RATE_PER_HOUR` | `60` | authenticated fleet requests (join key, status, node and fleet deletion) per hour per client IP, counted BEFORE the secret is checked, wrong or right; boxes behind one NAT share it |
+| `LOGIN_RATE_PER_HOUR` | `20` | device-login form submissions per hour per client IP (`POST /register/*`), right or wrong code; IPv6: per /64, plus 10 times this per /48 |
+| `AUTH_RATE_PER_HOUR` | `60` | authenticated fleet requests (join key, status, node and fleet deletion, device code, device list, device removal) per hour per client IP, one budget shared by all of them, counted BEFORE the secret is checked, wrong or right; boxes behind one NAT share it |
 | `JOIN_KEY_TTL` | `24h` | validity of a join key |
 | `IDLE_AFTER` | `720h` | a fleet with no online node for this long is deleted by the janitor |
 | `GC_INTERVAL` | `10m` | how often the janitor runs (see below) |
@@ -114,13 +114,13 @@ A phone joins a fleet's private network with the official Tailscale app, pointed
 | `POST /v1/fleets/{id}/device-codes` | `201 {"code": "XXXX-XXXX", "expires_at": ...}`; one use, valid `DEVICE_CODE_TTL`; `409` when the fleet already holds `MAX_PENDING_DEVICE_CODES` unused codes |
 | `GET /v1/fleets/{id}/devices` | `200 {"devices": [{"id", "hostname", "ip", "online", "last_seen"}]}` |
 | `DELETE /v1/fleets/{id}/devices/{node}` | `204`; removes the device from Headscale. An id that is not a device of the fleet is a quiet `204` |
-| `GET` / `POST /register/{auth id}` | the login page (HTML) and its form (field `code`); a wrong, used or expired code answers `400`. Throttled by `LOGIN_RATE_PER_HOUR` |
+| `GET` / `POST /register/{auth id}` | the login page (HTML) and its form (field `code`). The `POST` answers `200` device added (the page names it), `400` code wrong, already used or expired, `410` the login request in the app expired (restart the login in the app, then use a new code), `413` body too large, `429` throttled by `LOGIN_RATE_PER_HOUR`, `502` Headscale failure (the code is used up: generate a new one) |
 
 The first three take the fleet secret (`401` wrong secret, `404` unknown fleet, `429` throttle, `502` Headscale failure). Devices do not count in `NODES_PER_FLEET` and are not listed by `GET /v1/fleets/{id}`.
 
 ### Janitor
 
-Every `GC_INTERVAL` the service (1) marks every fleet that has an online node as seen, (2) deletes, with the routine behind `DELETE /v1/fleets/{id}`, the fleets that have had no online node for longer than `IDLE_AFTER` (a fleet whose nodes could not be read in that pass is never deleted), (3) deletes the used and the expired pre-auth keys of all fleets (Headscale never prunes them, and the key quota reads them all), (4) deletes the fleets that have no node at all, were created more than twice `JOIN_KEY_TTL` ago (48 h by default) and hold no unused, unexpired join key, however recently they asked for a key (a key request refreshes the row the `IDLE_AFTER` rule reads, so without this an owner who keeps asking for keys but never enrols a box would keep the fleet forever), and (5) rewrites the access policy, which also repairs a hand edit. Deletions re-check, under the fleet's lock, that the fleet is still idle (or still empty and untouched since the pass began). A failure for one fleet is logged and the pass goes on; a panic in a pass is logged and the next pass runs.
+Every `GC_INTERVAL` the service (1) marks every fleet that has an online node as seen, (2) deletes, with the routine behind `DELETE /v1/fleets/{id}`, the fleets that have had no online node for longer than `IDLE_AFTER` (a fleet whose nodes could not be read in that pass is never deleted), (3) deletes the used and the expired pre-auth keys of all fleets (Headscale never prunes them, and the key quota reads them all), (4) deletes the fleets that have no node at all, were created more than twice `JOIN_KEY_TTL` ago (48 h by default) and hold no unused, unexpired join key, however recently they asked for a key (a key request refreshes the row the `IDLE_AFTER` rule reads, so without this an owner who keeps asking for keys but never enrols a box would keep the fleet forever), and (5) rewrites the access policy, which also repairs a hand edit. Devices (remote access) are nodes of the fleet like boxes: an online device keeps its fleet alive under the `IDLE_AFTER` rule, and a fleet with only devices is not "empty" for rule (4). Deletions re-check, under the fleet's lock, that the fleet is still idle (or still empty and untouched since the pass began). A failure for one fleet is logged and the pass goes on; a panic in a pass is logged and the next pass runs.
 
 ## Fleet isolation
 
