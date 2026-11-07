@@ -279,17 +279,53 @@ func (r *rig) startNode(fleet, name, key string) *node {
 // startNodeAs is startNode with a container name (suffix) that differs from the hostname, so two
 // nodes can share a hostname.
 func (r *rig) startNodeAs(fleet, name, ctr, key string) *node {
+	n := r.launch(fleet, name, ctr, key)
+	r.t.Helper()
+	eventually(r.t, name+" gets an address", 90*time.Second, func() error { return r.fetchIP(n) })
+	r.listen(n)
+	return n
+}
+
+// startNodeWeb starts a node without a key: tailscaled asks for a web login. It returns the node
+// (no address yet) and the login URL tailscale shows, taken from `tailscale status --json`.
+func (r *rig) startNodeWeb(fleet, name string) (n *node, authURL string) {
+	n = r.launch(fleet, name, name, "")
+	eventually(r.t, name+" shows a login URL", 90*time.Second, func() error {
+		out, _ := sh("docker", "exec", n.container, "tailscale", "status", "--json")
+		var st struct{ AuthURL string }
+		if json.Unmarshal([]byte(out), &st) != nil || st.AuthURL == "" {
+			return fmt.Errorf("no AuthURL yet: %.200s", out)
+		}
+		authURL = st.AuthURL
+		return nil
+	})
+	return n, authURL
+}
+
+// launch creates and starts the tailscaled container; an empty key means no TS_AUTHKEY (web login).
+// An entrypoint (program, then its arguments) replaces the image's containerboot.
+func (r *rig) launch(fleet, name, ctr, key string, entrypoint ...string) *node {
 	t := r.t
 	n := &node{name: ctr, container: r.proj + "-" + ctr, fleet: fleet}
 	args := []string{"create", "--name", n.container, "--hostname", name,
 		"--label", "rre2e.project=" + r.proj, "--network", r.proj + "_default",
 		"--cap-add", "NET_ADMIN", "--cap-add", "NET_RAW", "--device", "/dev/net/tun:/dev/net/tun",
-		"-e", "TS_AUTHKEY=" + key, "-e", "TS_USERSPACE=false", "-e", "TS_HOSTNAME=" + name, "-e", "TS_STATE_DIR=/var/lib/tailscale",
+		"-e", "TS_USERSPACE=false", "-e", "TS_HOSTNAME=" + name, "-e", "TS_STATE_DIR=/var/lib/tailscale",
 		"-e", "TS_EXTRA_ARGS=--login-server=" + loginServer, "-e", "SSL_CERT_FILE=/relay-ca.crt"}
+	if key != "" {
+		args = append(args, "-e", "TS_AUTHKEY="+key)
+	}
 	for _, e := range r.nodeEnv {
 		args = append(args, "-e", e)
 	}
-	out, err := sh("docker", append(args, "tailscale/tailscale:v1.104.4")...) // pinned: what :stable was when this was last run
+	if len(entrypoint) > 0 {
+		args = append(args, "--entrypoint", entrypoint[0])
+	}
+	args = append(args, "tailscale/tailscale:v1.104.4") // pinned: what :stable was when this was last run
+	if len(entrypoint) > 0 {
+		args = append(args, entrypoint[1:]...)
+	}
+	out, err := sh("docker", args...)
 	if err != nil {
 		t.Fatalf("docker create %s: %v\n%s", name, err, out)
 	}
@@ -299,21 +335,26 @@ func (r *rig) startNodeAs(fleet, name, ctr, key string) *node {
 	if out, err := sh("docker", "start", n.container); err != nil {
 		t.Fatalf("docker start %s: %v\n%s", name, err, out)
 	}
-	eventually(t, name+" gets an address", 90*time.Second, func() error {
-		ip, err := sh("docker", "exec", n.container, "tailscale", "ip", "-4")
-		if err != nil || ip == "" || strings.ContainsAny(ip, " \n") {
-			return fmt.Errorf("no address yet: %v %s", err, ip)
-		}
-		n.ip = ip
-		return nil
-	})
-	// A TCP listener to connect to over the tailnet. Restarted by the loop after each probe.
-	if out, err := sh("docker", "exec", "-d", n.container, "sh", "-c",
-		"while true; do nc -l -p "+probePort+" >/dev/null 2>&1; done"); err != nil {
-		t.Fatalf("listener %s: %v\n%s", name, err, out)
-	}
 	r.ts[ctr] = n
 	return n
+}
+
+// fetchIP records the node's tailnet IPv4 once it has one.
+func (r *rig) fetchIP(n *node) error {
+	ip, err := sh("docker", "exec", n.container, "tailscale", "ip", "-4")
+	if err != nil || ip == "" || strings.ContainsAny(ip, " \n") {
+		return fmt.Errorf("no address yet: %v %s", err, ip)
+	}
+	n.ip = ip
+	return nil
+}
+
+// listen starts a TCP listener to connect to over the tailnet, restarted by the loop after each probe.
+func (r *rig) listen(n *node) {
+	if out, err := sh("docker", "exec", "-d", n.container, "sh", "-c",
+		"while true; do nc -l -p "+probePort+" >/dev/null 2>&1; done"); err != nil {
+		r.t.Fatalf("listener %s: %v\n%s", n.name, err, out)
+	}
 }
 
 func (r *rig) tcpReach(from, to *node) bool {

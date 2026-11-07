@@ -391,3 +391,50 @@ func TestIndexEscapesNodeNames(t *testing.T) {
 		t.Errorf("name in the svg: %s", svg)
 	}
 }
+
+func (e env) addDevice(t *testing.T, fleet, host string) string {
+	t.Helper()
+	id := e.hs.AddNode("f-"+fleet, host, true)
+	if err := e.st.AddDevice(context.Background(), fleet, id, t0); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func TestIndexSplitsDevices(t *testing.T) {
+	e := setup(t)
+	e.addDevice(t, "aaaa", "phone-x")
+	e.addDevice(t, "aaaa", "laptop-y")
+	body := e.do("GET", "/admin/", token, nil).Body.String()
+	fleet := between(t, body, `data-id="aaaa"`, `data-id="bbbb"`)
+	box, devs, ok := strings.Cut(fleet, "Devices")
+	if !ok || !strings.Contains(box, "b-one") || strings.Contains(box, "phone-x") || strings.Contains(box, "laptop-y") {
+		t.Fatalf("boxes and devices not apart:\n%s", fleet)
+	}
+	if !strings.Contains(devs, "phone-x") || !strings.Contains(devs, "laptop-y") || strings.Contains(devs, "b-one") {
+		t.Fatalf("devices sub-list wrong:\n%s", devs)
+	}
+	for _, want := range []string{"2 devices", "1 / 1 online", "<b>2</b><span>devices</span>"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	// devices are not boxes: the summary counts one box online of two
+	if !strings.Contains(body, "1 / 2</b><span>nodes online") {
+		t.Error("summary counts devices as boxes")
+	}
+}
+
+func TestRemoveDevice(t *testing.T) {
+	e := setup(t)
+	id := e.addDevice(t, "aaaa", "phone-x")
+	if w := e.do("POST", "/admin/fleets/aaaa/nodes/"+id+"/remove", token, csrf(e)); w.Code != 303 {
+		t.Fatalf("%d", w.Code)
+	}
+	if e.hs.NodeCount("f-aaaa") != 1 {
+		t.Fatal("device node still in headscale")
+	}
+	if all, _ := e.st.AllDevices(context.Background()); len(all) != 0 {
+		t.Fatalf("store row left: %v", all)
+	}
+}

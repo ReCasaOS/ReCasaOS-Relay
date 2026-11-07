@@ -531,3 +531,26 @@ func TestFleetStatusNeedsTheSecret(t *testing.T) {
 		t.Fatalf("unknown fleet = %d", rec.Code)
 	}
 }
+
+func TestDevicesDoNotCountInQuota(t *testing.T) {
+	e := setupKeys(t, func(c *Config, _ *Deps) { c.NodesPerFleet = 2 })
+	e.q.addNodes(e.user, 1)
+	for i := 1; i <= 3; i++ {
+		id := strconv.Itoa(100 + i)
+		e.q.nodes[e.user] = append(e.q.nodes[e.user], headscale.Node{ID: id, Hostname: "phone-" + id})
+		if err := e.st.AddDevice(t.Context(), e.id, id, now0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var body struct {
+		Nodes []struct{ Hostname string } `json:"nodes"`
+		State string                      `json:"state"`
+	}
+	rec := e.status(e.secret, ip1)
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || len(body.Nodes) != 1 || body.State != "ok" {
+		t.Fatalf("status %v %s", err, rec.Body)
+	}
+	if rec := e.key(e.secret, ip1); rec.Code != http.StatusCreated {
+		t.Fatalf("key = %d: %s", rec.Code, rec.Body)
+	}
+}

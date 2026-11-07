@@ -70,9 +70,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+func retryAfter(retry time.Duration) string {
+	return strconv.Itoa(max(int((retry+time.Second-1)/time.Second), 1))
+}
+
 func tooMany(w http.ResponseWriter, retry time.Duration) {
-	secs := int((retry + time.Second - 1) / time.Second)
-	w.Header().Set("Retry-After", strconv.Itoa(max(secs, 1)))
+	w.Header().Set("Retry-After", retryAfter(retry))
 	writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 }
 
@@ -199,7 +202,7 @@ func (h *fleetsHandler) authenticate(w http.ResponseWriter, r *http.Request) (st
 // its spent ones (used or expired). Pending keys count as nodes-to-be against the node quota:
 // without that a fleet could stockpile keys (the key rate limit allows many per day) and enrol
 // beyond it. Used keys are not counted: their node is.
-func (h *fleetsHandler) quotaUsage(ctx context.Context, user string) (nodes []headscale.Node, pending int, spent []string, err error) {
+func (h *fleetsHandler) quotaUsage(ctx context.Context, fleetID, user string) (nodes []headscale.Node, pending int, spent []string, err error) {
 	// Keys first, nodes second: a box that registers between the two reads is then counted twice
 	// (its key is still pending in the first read, its node shows in the second), which only errs on
 	// the safe side. The other order would miss it entirely.
@@ -207,8 +210,19 @@ func (h *fleetsHandler) quotaUsage(ctx context.Context, user string) (nodes []he
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	if nodes, err = h.deps.Headscale.ListNodes(ctx, user); err != nil {
+	all, err := h.deps.Headscale.ListNodes(ctx, user)
+	if err != nil {
 		return nil, 0, nil, err
+	}
+	// Devices (phones, PCs) share the fleet's Headscale user but are not boxes: neither quota nor status counts them.
+	devs, err := h.deps.Store.DeviceIDs(ctx, fleetID)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	for _, n := range all {
+		if !devs[n.ID] {
+			nodes = append(nodes, n)
+		}
 	}
 	now := h.deps.Now()
 	for _, k := range keys {
@@ -242,7 +256,7 @@ func (h *fleetsHandler) createKey(w http.ResponseWriter, r *http.Request) {
 	}
 	defer unlock()
 
-	nodes, pending, spent, err := h.quotaUsage(ctx, f.HeadscaleUser)
+	nodes, pending, spent, err := h.quotaUsage(ctx, f.ID, f.HeadscaleUser)
 	if err != nil {
 		log.Printf("fleet %s: key quota: %v", f.ID, err)
 		writeError(w, http.StatusBadGateway, "upstream error")
@@ -292,7 +306,7 @@ func (h *fleetsHandler) fleetStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), opTimeout)
 	defer cancel()
-	nodes, pending, _, err := h.quotaUsage(ctx, f.HeadscaleUser)
+	nodes, pending, _, err := h.quotaUsage(ctx, f.ID, f.HeadscaleUser)
 	if err != nil {
 		log.Printf("fleet %s: status: %v", f.ID, err)
 		writeError(w, http.StatusBadGateway, "upstream error")

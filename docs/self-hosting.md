@@ -64,6 +64,13 @@ relay.example.org {
 		}
 	}
 
+	@login path /register/*
+	handle @login {
+		reverse_proxy enrolment:8081 {
+			header_up X-Client-IP {client_ip}
+		}
+	}
+
 	@derp path /derp /derp/* /generate_204
 	handle @derp {
 		reverse_proxy derper:8090
@@ -121,7 +128,7 @@ Every Compose command then takes both files:
 docker compose -f compose.yaml -f compose.tls.yaml up -d
 ```
 
-Verified: this Caddyfile passes `caddy validate` in a throwaway `caddy:2.10.0-alpine` container (the image of `front`), and the override passes `docker compose -f compose.yaml -f compose.tls.yaml config -q`; its `derp.local.yaml` mount replaces the shipped one (Compose merges `volumes` by container path, checked in the rendered config). **Not verified:** an actual certificate issuance (it needs a real domain pointing at a public host) and a box enrolling through this setup. Here `front` faces the clients directly, so `{client_ip}` is the real TCP peer and no `trusted_proxies` is needed; the IPv6 / Docker userland proxy caveat in the README still applies.
+Verified: this Caddyfile, before its `@login` block (copied from the shipped `Caddyfile`) was added, passes `caddy validate` in a throwaway `caddy:2.10.0-alpine` container (the image of `front`), and the override passes `docker compose -f compose.yaml -f compose.tls.yaml config -q`; its `derp.local.yaml` mount replaces the shipped one (Compose merges `volumes` by container path, checked in the rendered config). **Not verified:** an actual certificate issuance (it needs a real domain pointing at a public host) and a box enrolling through this setup. Here `front` faces the clients directly, so `{client_ip}` is the real TCP peer and no `trusted_proxies` is needed; the IPv6 / Docker userland proxy caveat in the README still applies.
 
 ### b) Your own reverse proxy in front of `front`
 
@@ -140,7 +147,10 @@ Put them in a `.env` file next to `compose.yaml` (Compose substitutes them). An 
 | `MAX_PENDING_KEYS` | `5` | yes | unused join keys per fleet at once (409 beyond). Raising it or `MAX_FLEETS`: README, "Capacity" |
 | `CREATE_RATE_PER_HOUR` | `5` | yes | fleet creations per hour per client IP (IPv6: per /64, plus 10 times this per /48) |
 | `KEY_RATE_PER_HOUR` | `30` | yes | join keys per hour per fleet |
-| `AUTH_RATE_PER_HOUR` | `60` | yes | authenticated fleet requests (join key, status, deletions) per hour per client IP (boxes behind one NAT share it) |
+| `AUTH_RATE_PER_HOUR` | `60` | yes | authenticated fleet requests (join key, status, deletions, device code, device list, device removal) per hour per client IP, one shared budget (boxes behind one NAT share it) |
+| `DEVICE_CODE_TTL` | `10m` | yes | validity of a device code (remote access, section 13) |
+| `MAX_PENDING_DEVICE_CODES` | `5` | yes | unused device codes per fleet at once (409 beyond) |
+| `LOGIN_RATE_PER_HOUR` | `20` | yes | device-login form submissions per hour per client IP (IPv6: per /64, plus 10 times this per /48) |
 | `JOIN_KEY_TTL` | `24h` | yes | validity of a join key |
 | `IDLE_AFTER` | `720h` (30 days) | yes | a fleet with no online node for this long is deleted |
 | `GC_INTERVAL` | `10m` | yes | janitor period |
@@ -185,7 +195,7 @@ Headscale is pinned in `compose.yaml` (`headscale/headscale:v0.29.7`), and the e
 3. Change the tag in `compose.yaml`. If you can, run the e2e isolation test on the new tag first; it starts the stack from `compose.yaml`: `go test -tags e2e ./e2e -run TestFleetsAreIsolated -v -timeout 15m`.
 4. `docker compose pull && docker compose up -d` (with your `-f` options if any).
 
-The enrolment service is built from this repository: `git pull && docker compose up -d --build`, or use the published image below. **Upgrading from a build before the non-root image** (the enrolment image used to run as root, so the `enrolment-data` volume and `relay.db` belong to root): give them to uid 65532 once before starting the new image, `docker compose stop enrolment && docker run --rm --volumes-from "$(docker compose ps -aq enrolment)" alpine chown -R 65532:65532 /data && docker compose up -d --build enrolment` (not run here on an old volume). `front` is pinned to `caddy:2.10.0-alpine`; the README's proxy-header checks were made with that version.
+The enrolment service is built from this repository: `git pull && docker compose up -d --build`, or use the published image below. When a release changes `Caddyfile` or `headscale/config.yaml` (v0.5.0 does: section 13, "Upgrading to v0.5.0"), also run `docker compose up -d --force-recreate front headscale`: both files are bind-mounted, so Compose does not recreate those containers by itself. **Upgrading from a build before the non-root image** (the enrolment image used to run as root, so the `enrolment-data` volume and `relay.db` belong to root): give them to uid 65532 once before starting the new image, `docker compose stop enrolment && docker run --rm --volumes-from "$(docker compose ps -aq enrolment)" alpine chown -R 65532:65532 /data && docker compose up -d --build enrolment` (not run here on an old volume). `front` is pinned to `caddy:2.10.0-alpine`; the README's proxy-header checks were made with that version.
 
 ### Upgrading from v0.3.x: standalone `derper` and metering
 
@@ -297,3 +307,35 @@ If you would rather not expose it, remove `/admin /admin/*` from the `@enrolment
 - **Not metered:** a connection that opens and closes within one 15 s scrape interval, and direct peer-to-peer traffic (which does not cost you bandwidth).
 - **Large relays:** metering needs Headscale's full node list in one reply, which its gRPC layer caps at 4 MiB: beyond roughly 8,000 nodes (an estimate, not measured; the defaults allow 50,000) `/admin` shows "metering unavailable". A per-fleet fallback is a planned follow-up (README, "Capacity").
 - **Observed, not enforced:** nothing is refused or cut when a budget is exceeded.
+
+## 13. Remote access (phone login)
+
+A phone joins a fleet with the official Tailscale app, using your relay as its login server. The box asks `POST /v1/fleets/{id}/device-codes` for a one-time code (valid `DEVICE_CODE_TTL`, 10 minutes by default); the app opens `https://your-relay/register/<auth id>` and the user types the code. The API is in the README ("Remote access"). Three things matter to an operator:
+
+- **Route `/register/*` to `enrolment`.** The shipped `Caddyfile` and the `Caddyfile.tls` of section 3a have it. If your Caddyfile predates v0.5.0 (a `Caddyfile.tls` copied from section 3a before then, or your own), add this block next to the `@enrolment` one, or the app lands on Headscale's own page, which cannot approve anything:
+
+  ```
+  	@login path /register/*
+  	handle @login {
+  		reverse_proxy enrolment:8081 {
+  			header_up X-Client-IP {client_ip}
+  		}
+  	}
+  ```
+
+  Behind your own proxy: send `/register/*` to host port `8080` like the rest, and keep the `X-Client-IP` rule of section 3b, since `LOGIN_RATE_PER_HOUR` counts per client address.
+- **Devices never expire.** `headscale/config.yaml` pins `node.expiry: 0`, so a phone is not logged out after 180 days. If you replaced that file, keep the setting; without it, phones drop off the network and must register again.
+- **Limits** (section 4): `DEVICE_CODE_TTL` `10m`, `MAX_PENDING_DEVICE_CODES` `5` unused codes per fleet, `LOGIN_RATE_PER_HOUR` `20` form submissions per hour per client address. Devices do not count in `NODES_PER_FLEET`.
+- **Upgrading to v0.5.0.** `git pull`, then `docker compose up -d --build` with your `-f` options (or `COMPOSE_FILE`), so `enrolment` gets the new code and variables. That is not enough for `front` and `headscale`: the `Caddyfile` (or your `Caddyfile.tls`) and `headscale/config.yaml` are bind-mounted, so Compose does not see their change and keeps the containers running with the old files (no `/register/*` route, no `node.expiry: 0`). Recreate both, with the same `-f` options:
+
+  ```
+  docker compose up -d --force-recreate front headscale
+  ```
+
+  Restarting Headscale interrupts the control plane for a few seconds (boxes reconnect by themselves; established peer-to-peer links are not affected). Then check that `/register/*` reaches `enrolment` (not verified here: this upgrade was not run):
+
+  ```
+  curl -s https://your-relay/register/hskey-authreq-AAAAAAAAAAAAAAAAAAAAAAAA | grep recasaos-device-login
+  ```
+
+  No output means the app would land on Headscale's own page: `front` still runs the old Caddyfile, or the `@login` block is missing.
