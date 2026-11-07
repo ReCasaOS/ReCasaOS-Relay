@@ -29,7 +29,10 @@ type Config struct {
 	LoginServer       string        // required: an https URL with no path, see loginServer
 	// TrustedProxyHeader names the header (e.g. X-Forwarded-For) in which a trusted reverse proxy
 	// appends the client address; its LAST value is then the client IP. Empty: use the TCP peer.
-	TrustedProxyHeader string
+	TrustedProxyHeader    string
+	DeviceCodeTTL         time.Duration // validity of a device code
+	MaxPendingDeviceCodes int           // unused device codes a fleet may hold (409 beyond)
+	LoginRatePerHour      int           // device-code logins per hour, per IP
 }
 
 // prefix48Factor: an IPv6 /48 may create this many times CREATE_RATE_PER_HOUR fleets per hour in
@@ -74,6 +77,7 @@ func New(cfg Config, deps Deps) http.Handler {
 		}
 		mux.HandleFunc("POST /v1/fleets", h.createFleet)
 		mux.HandleFunc("POST /v1/fleets/{id}/keys", h.createKey)
+		mux.HandleFunc("POST /v1/fleets/{id}/device-codes", h.createDeviceCode)
 		mux.HandleFunc("GET /v1/fleets/{id}", h.fleetStatus)
 		mux.HandleFunc("DELETE /v1/fleets/{id}/nodes/{hostname}", h.removeNode)
 		mux.HandleFunc("DELETE /v1/fleets/{id}", h.deleteFleet)
@@ -126,6 +130,15 @@ func ConfigFromEnv() (Config, error) {
 		return c, err
 	}
 	c.TrustedProxyHeader = os.Getenv("TRUSTED_PROXY_HEADER")
+	if c.DeviceCodeTTL, err = envDuration("DEVICE_CODE_TTL", 10*time.Minute); err != nil {
+		return c, err
+	}
+	if c.MaxPendingDeviceCodes, err = envInt("MAX_PENDING_DEVICE_CODES", 5); err != nil {
+		return c, err
+	}
+	if c.LoginRatePerHour, err = envInt("LOGIN_RATE_PER_HOUR", 20); err != nil {
+		return c, err
+	}
 	return c, nil
 }
 

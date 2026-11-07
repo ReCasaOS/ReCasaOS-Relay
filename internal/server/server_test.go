@@ -21,7 +21,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestConfigFromEnvDefaults(t *testing.T) {
-	for _, k := range []string{"NODES_PER_FLEET", "CREATE_RATE_PER_HOUR", "KEY_RATE_PER_HOUR", "AUTH_RATE_PER_HOUR", "JOIN_KEY_TTL", "IDLE_AFTER", "GC_INTERVAL", "TRUSTED_PROXY_HEADER", "MAX_FLEETS", "MAX_PENDING_KEYS"} {
+	for _, k := range []string{"NODES_PER_FLEET", "CREATE_RATE_PER_HOUR", "KEY_RATE_PER_HOUR", "AUTH_RATE_PER_HOUR", "JOIN_KEY_TTL", "IDLE_AFTER", "GC_INTERVAL", "TRUSTED_PROXY_HEADER", "MAX_FLEETS", "MAX_PENDING_KEYS", "DEVICE_CODE_TTL", "MAX_PENDING_DEVICE_CODES", "LOGIN_RATE_PER_HOUR"} {
 		t.Setenv(k, "")
 	}
 	t.Setenv("LOGIN_SERVER", "https://relay.example") // required, no default
@@ -40,6 +40,7 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 		MaxFleets:         1000,
 		MaxPendingKeys:    5,
 		LoginServer:       "https://relay.example",
+		DeviceCodeTTL:     10 * time.Minute, MaxPendingDeviceCodes: 5, LoginRatePerHour: 20,
 	}
 	if got != want {
 		t.Fatalf("defaults = %+v, want %+v", got, want)
@@ -63,7 +64,8 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Config{NodesPerFleet: 10, CreateRatePerHour: 2, KeyRatePerHour: 7, AuthRatePerHour: 9, JoinKeyTTL: time.Hour,
-		IdleAfter: 48 * time.Hour, GCEvery: 90 * time.Second, LoginServer: "https://relay.example", TrustedProxyHeader: "X-Forwarded-For", MaxFleets: 3, MaxPendingKeys: 4}
+		IdleAfter: 48 * time.Hour, GCEvery: 90 * time.Second, LoginServer: "https://relay.example", TrustedProxyHeader: "X-Forwarded-For", MaxFleets: 3, MaxPendingKeys: 4,
+		DeviceCodeTTL: 10 * time.Minute, MaxPendingDeviceCodes: 5, LoginRatePerHour: 20}
 	if got != want {
 		t.Fatalf("overrides = %+v, want %+v", got, want)
 	}
@@ -113,7 +115,7 @@ func TestConfigFromEnvLoginServer(t *testing.T) {
 // Both go through Headscale's gRPC layer, which refuses messages over 4 MiB. With the defaults,
 // keep both under 3 MiB. The README ("Capacity") states the same numbers.
 func TestDefaultsKeepHeadscaleMessagesUnder3MiB(t *testing.T) {
-	for _, k := range []string{"MAX_FLEETS", "MAX_PENDING_KEYS"} {
+	for _, k := range []string{"MAX_FLEETS", "MAX_PENDING_KEYS", "DEVICE_CODE_TTL", "MAX_PENDING_DEVICE_CODES", "LOGIN_RATE_PER_HOUR"} {
 		t.Setenv(k, "")
 	}
 	t.Setenv("LOGIN_SERVER", "https://relay.example")
