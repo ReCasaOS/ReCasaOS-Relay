@@ -63,6 +63,8 @@ type HS struct {
 	Hook func(op string)
 	// KeepKeysOnUserDelete makes DeleteUser leave the user's keys behind, as if Headscale did not cascade.
 	KeepKeysOnUserDelete bool
+	// Expired lists auth ids RegisterNode answers ErrAuthRequestNotFound for.
+	Expired map[string]bool
 }
 
 func NewHS(log *Log, now func() time.Time) *HS {
@@ -179,6 +181,23 @@ func (h *HS) ListNodes(_ context.Context, user string) ([]headscale.Node, error)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]headscale.Node(nil), h.nodes[user]...), nil
+}
+
+// RegisterNode adds a node to the user, as approving a web login does (log: register:<user>).
+func (h *HS) RegisterNode(_ context.Context, user, authID string) (headscale.Node, error) {
+	if err := h.enter("register", "register:"+user); err != nil {
+		return headscale.Node{}, err
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.Expired[authID] {
+		return headscale.Node{}, headscale.ErrAuthRequestNotFound
+	}
+	h.users[user] = true
+	h.nextN++
+	n := headscale.Node{ID: strconv.Itoa(h.nextN), Hostname: "device-" + strconv.Itoa(h.nextN), User: user}
+	h.nodes[user] = append(h.nodes[user], n)
+	return n, nil
 }
 
 // ListAllNodes returns every user's nodes, users in name order.

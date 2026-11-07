@@ -29,6 +29,14 @@
 		}
 	}
 
+	# Headscale's web-login page (<server_url>/register/<auth id>) is answered by the enrolment service.
+	@login path /register/*
+	handle @login {
+		reverse_proxy enrolment:8081 {
+			header_up X-Client-IP {client_ip}
+		}
+	}
+
 	# The DERP relay (standalone derper, plain HTTP); the connection upgrade passes through.
 	@derp path /derp /derp/* /generate_204
 	handle @derp {

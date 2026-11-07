@@ -33,6 +33,10 @@ database:
   sqlite:
     path: /var/lib/headscale/db.sqlite
 
+# Devices stay until removed (remote-access spec): node keys never expire.
+node:
+  expiry: 0
+
 # Fleet isolation is enforced by the ACL policy that the enrolment service pushes through the API.
 policy:
   mode: database

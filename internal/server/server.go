@@ -77,6 +77,7 @@ func New(cfg Config, deps Deps) http.Handler {
 		mux.HandleFunc("GET /v1/fleets/{id}", h.fleetStatus)
 		mux.HandleFunc("DELETE /v1/fleets/{id}/nodes/{hostname}", h.removeNode)
 		mux.HandleFunc("DELETE /v1/fleets/{id}", h.deleteFleet)
+		mux.HandleFunc("GET /register/{authID}", loginPage)
 	}
 	if deps.Admin != nil {
 		mux.Handle("/admin/", deps.Admin)

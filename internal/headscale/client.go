@@ -49,6 +49,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -96,7 +97,21 @@ type API interface {
 	// DeleteNodeByID removes one node by its id; an unknown id is not an error.
 	DeleteNodeByID(ctx context.Context, id string) error
 	SetPolicy(ctx context.Context, policyJSON []byte) error
+	// RegisterNode approves a pending web login (Headscale's auth request) into the user's fleet.
+	// ErrAuthRequestNotFound if the id is unknown or its 15 minutes are over.
+	RegisterNode(ctx context.Context, user, authID string) (Node, error)
 }
+
+// ErrAuthRequestNotFound is returned by RegisterNode when no login is pending for the id.
+var ErrAuthRequestNotFound = errors.New("headscale: no pending login for this auth id")
+
+// AuthIDPattern is the shape of a Headscale v0.29.7 auth id: "hskey-authreq-" and 24 URL-safe characters.
+const AuthIDPattern = "^hskey-authreq-[A-Za-z0-9_-]{24}$"
+
+var authIDRe = regexp.MustCompile(AuthIDPattern)
+
+// ValidAuthID reports whether s has the shape of an auth id.
+func ValidAuthID(s string) bool { return authIDRe.MatchString(s) }
 
 // ErrUserNotFound is returned when an operation needs a Headscale user that does not exist.
 var ErrUserNotFound = errors.New("headscale: user not found")
@@ -371,4 +386,22 @@ func (c *Client) DeleteNodeByID(ctx context.Context, id string) error {
 
 func (c *Client) SetPolicy(ctx context.Context, policyJSON []byte) error {
 	return c.do(ctx, http.MethodPut, "/api/v1/policy", nil, map[string]string{"policy": string(policyJSON)}, nil)
+}
+
+// RegisterNode approves a pending web login (POST /api/v1/auth/register).
+func (c *Client) RegisterNode(ctx context.Context, user, authID string) (Node, error) {
+	body := struct {
+		User   string `json:"user"`
+		AuthID string `json:"authId"`
+	}{user, authID}
+	var res struct{ Node hsNode }
+	err := c.do(ctx, http.MethodPost, "/api/v1/auth/register", nil, body, &res)
+	var ae *APIError
+	if errors.As(err, &ae) && ae.Status == http.StatusNotFound {
+		return Node{}, fmt.Errorf("%w (%v)", ErrAuthRequestNotFound, err)
+	}
+	if err != nil {
+		return Node{}, err
+	}
+	return toNodes([]hsNode{res.Node})[0], nil
 }
