@@ -63,8 +63,15 @@ var page = template.Must(template.New("page").Funcs(template.FuncMap{
 	},
 	"expired": func(t, now time.Time) bool { return now.After(t) },
 	"join":    strings.Join,
-	"bytes":   func(n int64) string { return humanBytes(float64(n)) },
-	"rate":    humanRate,
+	"dict": func(kv ...any) map[string]any {
+		m := make(map[string]any, len(kv)/2)
+		for i := 0; i+1 < len(kv); i += 2 {
+			m[kv[i].(string)] = kv[i+1]
+		}
+		return m
+	},
+	"bytes": func(n int64) string { return humanBytes(float64(n)) },
+	"rate":  humanRate,
 }).Parse(pageHTML))
 
 // Config is what the page shows next to the live numbers.
@@ -167,7 +174,8 @@ func (h *handler) client(r *http.Request) string {
 type fleetView struct {
 	ID                  string
 	Created, LastOnline time.Time
-	Nodes               []nodeView
+	Nodes               []nodeView // boxes
+	Devices             []nodeView // phones and PCs that joined by code; never counted in Online
 	Online              int
 	Err                 bool    // its nodes could not be listed
 	Month               int64   // relayed bytes this month (Rx: what its nodes sent to the relay)
@@ -221,6 +229,12 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 		if live = h.deps.Meter.Live(); !live.OK {
 			live.Nodes = nil
 		}
+	}
+	// A failure here must not take the whole page down: the operator still needs the fleets, so
+	// every node is then shown as a box.
+	devices, err := h.deps.Store.AllDevices(ctx)
+	if err != nil {
+		log.Printf("admin: list devices: %v", err)
 	}
 	known := map[string]bool{}
 	for _, f := range all {
@@ -277,8 +291,12 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 			}
 			for _, n := range ns {
 				nv := nodeView{Node: n, Rate: live.Nodes[n.ID], UpMonth: nodeMonth[[2]string{f.ID, n.ID}]}
-				views[i].Nodes = append(views[i].Nodes, nv)
 				views[i].Up += nv.Up
+				if devices[n.ID] == f.ID {
+					views[i].Devices = append(views[i].Devices, nv)
+					continue
+				}
+				views[i].Nodes = append(views[i].Nodes, nv)
 				if n.Online {
 					views[i].Online++
 				}
@@ -286,12 +304,13 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 	wg.Wait()
-	nodes, online := 0, 0
+	nodes, online, deviceCount := 0, 0, 0
 	for i, v := range views {
 		nodes += len(v.Nodes)
+		deviceCount += len(v.Devices)
 		online += v.Online
 		names := map[string]string{}
-		for _, n := range v.Nodes {
+		for _, n := range append(append([]nodeView(nil), v.Nodes...), v.Devices...) {
 			names[n.ID] = n.Hostname
 		}
 		views[i].Series = fleetSeries(fleetPoints[v.ID], names, cr, start)
@@ -299,7 +318,7 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := page.Execute(w, map[string]any{
-		"Fleets": views, "Nodes": nodes, "Online": online, "Now": now,
+		"Fleets": views, "Nodes": nodes, "DeviceCount": deviceCount, "Online": online, "Now": now,
 		"MaxFleets": h.cfg.MaxFleets, "NodesPerFleet": h.cfg.NodesPerFleet, "CSRF": h.csrf,
 		"Month": monthTotal, "UpNow": upNow, "Live": live.OK, "Deleted": deleted,
 		"Reference": h.cfg.MonthlyReference, "Range": rangeKey,
@@ -353,6 +372,12 @@ func (h *handler) removeNode(w http.ResponseWriter, r *http.Request) {
 			if err := h.deps.Headscale.DeleteNodeByID(ctx, n.ID); err != nil {
 				log.Printf("admin: fleet %s: remove node: %v", f.ID, err)
 				http.Error(w, "upstream error, retry", http.StatusBadGateway)
+				return
+			}
+			// A box has no row: DeleteDevice is a no-op for it.
+			if err := h.deps.Store.DeleteDevice(ctx, n.ID); err != nil {
+				log.Printf("admin: fleet %s: delete device row %s: %v", f.ID, n.ID, err)
+				http.Error(w, "store error", http.StatusInternalServerError)
 				return
 			}
 			log.Printf("admin: fleet %s: node %s removed", f.ID, n.Hostname)
