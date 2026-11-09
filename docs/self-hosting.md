@@ -47,8 +47,8 @@ Create `Caddyfile.tls` next to `compose.yaml`: the shipped `Caddyfile` with `aut
 	email admin@example.org
 }
 
-# Only for public sharing (section 14), where it redirects plain HTTP to a shared name; harmless without
-# `share`. It is also the explicit http:// site the `proxy_protocol` wrapper of section 14 needs on port 80.
+# Only for public sharing (section 14); harmless without `share`. It makes the port-80 server explicit, which
+# the `proxy_protocol` wrapper of section 14 needs; Caddy's own HTTP-to-HTTPS redirect answers the shared names.
 http://*.box.example.org {
 	redir https://{host}{uri} 301
 }
@@ -68,7 +68,9 @@ relay.example.org {
 
 	@tunnel path /v1/share/tunnel
 	handle @tunnel {
-		reverse_proxy share:8082
+		reverse_proxy share:8082 {
+			header_up X-Client-IP {client_ip}
+		}
 	}
 
 	@enrolment path /v1/* /admin /admin/*
@@ -393,7 +395,7 @@ Open `53/udp` and `53/tcp` in the host firewall or cloud security group too. Beh
 
 **Client address.** `share` starts every connection to `front` with a [PROXY protocol](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt) v2 header carrying the visitor's address (`FRONT_PROXY_PROTOCOL`, default `true`; `false` forwards the bytes untouched, as before). The `Caddyfile.tls` of section 3a does not read it; the additions below do, with Caddy's `proxy_protocol` listener wrapper, placed before `tls` because the header precedes the TLS handshake; `{client_ip}` is then the visitor, `header_up X-Client-IP {client_ip}` hands it to `enrolment` unchanged, and the per-IP limits of section 4 (`CREATE_RATE_PER_HOUR`, `AUTH_RATE_PER_HOUR`, `LOGIN_RATE_PER_HOUR`) count per visitor again. Without the header every visitor would be the `share` container and those limits one budget for the whole Internet.
 
-The wrapper only trusts headers from `allow`: put your compose network's subnet there (`docker network inspect <project>_default` gives it; the private ranges of the Caddyfile are only a fallback). **The wrapper belongs to share mode only: have it in `Caddyfile.tls` only while `front` is unpublished (with `compose.share.yaml`), and remove it again on rollback.** With `front` published (section 3a alone), a client arriving through Docker's userland proxy (IPv6 publishing, hairpin) shows up with the bridge gateway as source, inside the compose subnet and so trusted, and could forge `X-Client-IP`. `allow` should also be as narrow as the compose subnet: any host that can reach `front` from an allowed address can forge `X-Client-IP` and evade the per-IP limits. Choice of policy: no `fallback_policy` line, so Caddy's default `ignore` applies to every other address (a header from outside is not believed, which stops a visitor from forging its address), and a connection from an allowed address **without** a header still works (Caddy's `use` for `allow`: header used if present). That is what makes the migration a one-way, no-flag-day change: `front` can run the new `Caddyfile.tls` while `share` still forwards headerless. Recreate `front` with the wrapper no later than `share` (the migration below does both in one command); the other order is safe only with `FRONT_PROXY_PROTOCOL=false`. Ordering to avoid: `share` with `FRONT_PROXY_PROTOCOL=true` against a `front` whose Caddyfile has no wrapper, which breaks every connection (Caddy reads the header as garbage); so update and recreate `front` first. Set `FRONT_PROXY_PROTOCOL=false` only when your Caddy is not configured for it.
+The wrapper only trusts headers from `allow`: put your compose network's subnet there (`docker network inspect <project>_default` gives it; the private ranges of the Caddyfile are only a fallback). **The wrapper belongs to share mode only: have it in `Caddyfile.tls` only while `front` is unpublished (with `compose.share.yaml`), and remove it again on rollback.** With `front` published (section 3a alone), a client arriving through Docker's userland proxy (IPv6 publishing, hairpin) shows up with the bridge gateway as source, inside the compose subnet and so trusted, and could forge `X-Client-IP`. `allow` should also be as narrow as the compose subnet: any host that can reach `front` from an allowed address can forge `X-Client-IP` and evade the per-IP limits. Choice of policy: no `fallback_policy` line, so Caddy's default `ignore` applies to every other address (a header from outside is not believed, which stops a visitor from forging its address), and a connection from an allowed address **without** a header still works (Caddy's `use` for `allow`: header used if present). That is what makes the migration a one-way, no-flag-day change: `front` can run the new `Caddyfile.tls` while `share` still forwards headerless. Recreate `front` with the wrapper no later than `share` (the migration below does both in one command); the other order is safe only with `FRONT_PROXY_PROTOCOL=false`. Ordering to avoid: `share` with `FRONT_PROXY_PROTOCOL=true` against a `front` whose Caddyfile has no wrapper, which breaks every connection (Caddy reads the header as garbage); so recreate them together, in step 3 of the migration below. Set `FRONT_PROXY_PROTOCOL=false` only when your Caddy is not configured for it.
 
 ### Settings
 
@@ -401,22 +403,22 @@ In `.env`, next to the ones of section 4:
 
 | Variable | Default | Process | Notes |
 |---|---|---|---|
-| `SHARE_DOMAIN` | none, **required** | both | the sharing domain, lowercased (`box.example.org`). Empty on `enrolment`: sharing is off (every `/v1/share*` answers 503) |
+| `SHARE_DOMAIN` | none, **required** | both | the sharing domain, lowercased (`box.example.org`): a bare DNS name, no scheme, port or trailing dot (both processes refuse to start otherwise). Empty on `enrolment`: sharing is off (every `/v1/share*` answers 503) |
 | `SHARE_PUBLIC_IP` | none, **required** | `enrolment` | IPv4 the zone answers with, and the IP port 53 is published on: the relay's public address |
 | `SHARE_PUBLIC_IP6` | none | `enrolment` | IPv6 address for `AAAA`; empty: no `AAAA` |
-| `RELAY_HOST` | none, **required** | `share` | the relay's own name (`relay.example.org`): traffic for it goes to `front`, any other name is looked up as a box |
-| `SHARE_QUARANTINE` | `2160h` (90 days) | `enrolment` | how long a released name cannot be claimed again |
+| `RELAY_HOST` | none, **required** | `share` | the relay's own name (`relay.example.org`), a bare DNS name not under `SHARE_DOMAIN`: traffic for it goes to `front`, any other name is looked up as a box |
 | `SHARE_ACME_TTL` | `10m` | `enrolment` | validity of an `_acme-challenge` TXT value |
 | `SHARE_ACME_RATE_PER_HOUR` | `20` | `enrolment` | ACME TXT writes per hour per box |
 | `PEEK_TIMEOUT` | `5s` | `share` | how long a new connection has to send its TLS hello / HTTP request line |
+| `TUNNEL_RATE_PER_HOUR` | `60` | `share` | tunnel dials (`/v1/share/tunnel`) per hour per client IP (`X-Client-IP`, set by `front`), counted before the signature check; `429` with `Retry-After` beyond |
 | `LISTEN_TLS`, `LISTEN_HTTP`, `LISTEN_TUNNEL` | `:443`, `:80`, `:8082` | `share` | listen addresses inside the container |
 | `FRONT_TLS`, `FRONT_HTTP` | `front:443`, `front:80` | `share` | where non-box traffic goes |
 | `FRONT_PROXY_PROTOCOL` | `true` | `share` | send a PROXY v2 header (the visitor's address) to `FRONT_TLS` and `FRONT_HTTP`; see "Client address" |
-| `SHARE_PSL_TXT` | empty | `enrolment` | value of `_psl.<SHARE_DOMAIN>` TXT (Public Suffix List ownership proof); empty: no such record |
+| `SHARE_PSL_TXT` | empty | `enrolment` | value of `_psl.<SHARE_DOMAIN>` TXT (Public Suffix List ownership proof), at most 255 bytes; empty: no such record |
 | `ENROLMENT_URL` | `http://enrolment:8081` | `share` | name lookups and usage posts, compose network only |
 | `LISTEN_DNS` | `:53` | `enrolment` | DNS listen address inside the container |
 
-The rows from `PEEK_TIMEOUT` on are the processes' own defaults (`compose.yaml` passes `LISTEN_TLS`, `LISTEN_HTTP`, `LISTEN_TUNNEL`, `FRONT_TLS`, `FRONT_HTTP`, `ENROLMENT_URL`, `PEEK_TIMEOUT` and `FRONT_PROXY_PROTOCOL` to `share`, and `SHARE_PSL_TXT` to `enrolment`, as shown there); none needs changing except `SHARE_PSL_TXT` once you have a PSL request.
+The rows from `PEEK_TIMEOUT` on are the processes' own defaults (`compose.yaml` passes `LISTEN_TLS`, `LISTEN_HTTP`, `LISTEN_TUNNEL`, `FRONT_TLS`, `FRONT_HTTP`, `ENROLMENT_URL`, `PEEK_TIMEOUT`, `FRONT_PROXY_PROTOCOL` and `TUNNEL_RATE_PER_HOUR` to `share`, and `SHARE_PSL_TXT` to `enrolment`, as shown there); none needs changing except `SHARE_PSL_TXT` once you have a PSL request.
 
 ### Compose override
 
@@ -442,7 +444,6 @@ services:
       SHARE_DOMAIN: ${SHARE_DOMAIN:?set SHARE_DOMAIN in .env}
       SHARE_PUBLIC_IP: ${SHARE_PUBLIC_IP:?set SHARE_PUBLIC_IP in .env}
       SHARE_PUBLIC_IP6: ${SHARE_PUBLIC_IP6:-}
-      SHARE_QUARANTINE: ${SHARE_QUARANTINE:-2160h}
       SHARE_ACME_TTL: ${SHARE_ACME_TTL:-10m}
       SHARE_ACME_RATE_PER_HOUR: ${SHARE_ACME_RATE_PER_HOUR:-20}
       SHARE_PSL_TXT: ${SHARE_PSL_TXT:-}
@@ -450,6 +451,8 @@ services:
       - "${SHARE_PUBLIC_IP:?set SHARE_PUBLIC_IP in .env}:53:53/udp"
       - "${SHARE_PUBLIC_IP:?set SHARE_PUBLIC_IP in .env}:53:53/tcp"
 ```
+
+`!reset` and `!override` need Docker Compose 2.24.4 or later on the host (`docker compose version`); an older one refuses the file or ignores the tags.
 
 Pass it after the others, on every `docker compose` command of this document from now on: `docker compose -f compose.yaml -f compose.tls.yaml -f compose.share.yaml ...`. For an IPv6 address also publish `"[${SHARE_PUBLIC_IP6}]:53:53/udp"` and `/tcp` (not verified). It builds on section 3a: with the plain `compose.yaml`, `front` publishes 8080 and has no TLS for `share` to forward to.
 
@@ -477,6 +480,8 @@ Additions to the `Caddyfile.tls` of section 3a, for share mode:
 			}
 			tls
 		}
+		# 443/udp no longer reaches `front`: do not advertise HTTP/3.
+		protocols h1 h2
 	}
 	servers :80 {
 		listener_wrappers {
@@ -489,24 +494,24 @@ Additions to the `Caddyfile.tls` of section 3a, for share mode:
 ```
 
    Do not recreate `front` with this block before the switch below: until `share` takes over, `front` is still published.
-1. the `/v1/share/tunnel` block (`@tunnel`, to `share:8082`) is already there; if your file predates this section, add it next to `@enrolment`;
-2. plain HTTP to a shared name reaches `front` on port 80 (through `share`): the `http://*.box.example.org` site that redirects it to HTTPS is in the base file of section 3a; if your file predates this section, add it (here a second site after the `relay.example.org` one). It is also what makes the `servers :80` wrapper of item 0 effective: Caddy applies it to a server defined by an explicit `http://` site, not to the redirect server it adds by itself (measured: without such a site, a PROXY header on port 80 is answered `400`, your own HTTP-01 renewals included).
+1. the `/v1/share/tunnel` block (`@tunnel`, to `share:8082`, with `header_up X-Client-IP {client_ip}`: `share` rate-limits tunnel dials per client IP) is in the base file of section 3a; make sure it is there, with the `header_up` line;
+2. the `http://*.box.example.org` site is in the base file of section 3a too; make sure it is there, once (Caddy refuses a file that defines the same site twice). It exists to make the port-80 server explicit: Caddy applies the `servers :80` wrapper of item 0 to a server defined by an explicit `http://` site, not to the redirect server it adds by itself (measured: without such a site, a PROXY header on port 80 is answered `400`, your own HTTP-01 renewals included). A plain-HTTP request for `<app>.<box>.box.example.org` is answered by Caddy's catch-all HTTP-to-HTTPS redirect, not by this site's `redir`.
 
-<!-- file: Caddyfile.tls (second site, after the relay site) -->
-```
-http://*.box.example.org {
-	redir https://{host}{uri} 301
-}
-```
-
-The file passes `caddy validate` in `caddy:2.10.0-alpine` (the image of `front`). Run with Caddy's internal CA in a throwaway container, a plain-HTTP request for `app.test.box.example.org` was redirected to HTTPS with a **308**, with or without this site (Caddy's own HTTP-to-HTTPS redirect answers first), so the site documents the intent and does not change what is observed. `Caddyfile.tls` is bind-mounted: recreate `front` after changing it (the migration below does).
+The file passes `caddy validate` in `caddy:2.10.0-alpine` (the image of `front`). Run with Caddy's internal CA in a throwaway container, a plain-HTTP request for `app.test.box.example.org` was redirected to HTTPS with a **308**, with or without the `http://*.box...` site (Caddy's own redirect answers first). `Caddyfile.tls` is bind-mounted: recreate `front` after changing it (the migration below does).
 
 ### Migrating the production relay
 
 For `relay.recasaos.org` (Scaleway host, observed 2026-11-09): `front` publishes `80/tcp` and `443/tcp` and exposes `443/udp`; a `watchtower` container updates images by itself; `systemd-resolved` holds `127.0.0.53:53` and `127.0.0.54:53` only, so port 53 is free on the public IP. **`watchtower` does not do this switch**: `share` is a new service and `front`'s ports change only through the override, so the operator applies it by hand, once.
 
 1. Owner, first: the delegation at the registrar, the Scaleway security group (`53/udp` and `53/tcp` in), the PSL request (it can wait).
-2. On the host: `git pull`; add `SHARE_DOMAIN`, `SHARE_PUBLIC_IP` (and `SHARE_PUBLIC_IP6`) and `RELAY_HOST` to `.env`; write `compose.share.yaml`; add the `http://*.box...` site and, if missing, the `/v1/share/tunnel` block to `Caddyfile.tls`; replace the global options of `Caddyfile.tls` with the share-mode block above (it takes effect when `front` is recreated in step 3, together with `share`: do not restart `front` in between).
+2. On the host: `git pull`; add `SHARE_DOMAIN`, `SHARE_PUBLIC_IP` (and `SHARE_PUBLIC_IP6`) and `RELAY_HOST` to `.env`; write `compose.share.yaml`; make sure `Caddyfile.tls` has the `http://*.box...` site and the `/v1/share/tunnel` block of section 3a (items 1 and 2 above; do not add the site a second time); replace the global options of `Caddyfile.tls` with the share-mode block above (it takes effect when `front` is recreated in step 3, together with `share`: do not restart `front` in between).
+   Then check the files before the switch (a Caddyfile that does not parse would leave `front` down during it):
+
+   ```
+   docker compose version   # 2.24.4 or later, for !reset / !override
+   docker compose -f compose.yaml -f compose.tls.yaml -f compose.share.yaml run --rm front caddy validate --config /etc/caddy/Caddyfile
+   ```
+
 3. The switch:
 
    ```
@@ -542,4 +547,4 @@ Between the two commands, take the `listener_wrappers` blocks out of the global 
 
 ### Operating it
 
-On `/admin` (section 11): **Shared names** lists every claimed name with a Revoke button, and **Forbidden names** is your own deny list on top of the built-in reserved words (`www relay admin api mail ns ns1 box tunnel recasaos casaos localhost`). Revoking a name frees it from its box and forbids it; the box's tunnel closes within a minute. Details: README, "Public sharing". A box whose node no longer exists in Headscale (for instance after `tailscale logout`) loses its box key at the next janitor pass and its name goes to quarantine (`SHARE_QUARANTINE`).
+On `/admin` (section 11): **Shared names** lists every claimed name with a Revoke button, and **Forbidden names** is your own deny list on top of the built-in reserved words (`www relay admin api mail ns ns1 box tunnel recasaos casaos localhost`). Revoking a name frees it from its box and forbids it; the box's tunnel closes within a minute. Details: README, "Public sharing". A box whose node no longer exists in Headscale (for instance after `tailscale logout`) loses its box key at the next janitor pass and its name goes to quarantine. The quarantine lasts 125 days (fixed: Let's Encrypt reuses a DNS-01 authorization for up to 30 days, so a former holder could still get a 90-day certificate for the name that long after); the box that released a name may take it back meanwhile, nobody else may. Removing a box from `/admin` drops its box key at once. Unbanning a name (Forbidden names, Remove) also lifts its quarantine: it undoes a misclicked Revoke.
