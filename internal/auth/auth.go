@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"sync"
@@ -19,8 +20,10 @@ import (
 
 const skew = 120 * time.Second
 
+// ErrUnauthorized wraps every VerifyBox failure; handlers answer 401 on errors.Is.
+var ErrUnauthorized = errors.New("auth: unauthorized")
+
 var (
-	errBadRequest = errors.New("auth: not a create-fleet request")
 	errBadHeaders = errors.New("auth: missing or malformed box headers")
 	errSkew       = errors.New("auth: box time outside accepted window")
 	errBadSig     = errors.New("auth: bad box signature")
@@ -52,14 +55,22 @@ func resetSeen() {
 	mu.Unlock()
 }
 
-// VerifyBox authenticates a POST /v1/fleets request signed by a box and returns
-// the box's public key. A signature is accepted once, within ±120 s of now.
+// Message is the string a box signs: method, path and box time (X-Box-Time).
+func Message(method, path, ts string) string { return method + " " + path + "\n" + ts }
+
+// VerifyBox authenticates a request signed by a box over Message(method, path, time)
+// and returns the box's public key. A signature is accepted once, within ±120 s of now.
 // Callers that key anything by box identity must use the returned decoded key
 // bytes, never the X-Box-Key header text.
 func VerifyBox(r *http.Request, now time.Time) (ed25519.PublicKey, error) {
-	if r.Method != http.MethodPost || r.URL.Path != "/v1/fleets" {
-		return nil, errBadRequest
+	pub, err := verifyBox(r, now)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrUnauthorized, err)
 	}
+	return pub, nil
+}
+
+func verifyBox(r *http.Request, now time.Time) (ed25519.PublicKey, error) {
 	pub, err := enc.DecodeString(r.Header.Get("X-Box-Key"))
 	if err != nil || len(pub) != ed25519.PublicKeySize {
 		return nil, errBadHeaders
@@ -80,7 +91,7 @@ func VerifyBox(r *http.Request, now time.Time) (ed25519.PublicKey, error) {
 	if d := now.Sub(boxTime); d > skew || d < -skew {
 		return nil, errSkew
 	}
-	if !ed25519.Verify(pub, []byte("POST /v1/fleets\n"+tsStr), sig) {
+	if !ed25519.Verify(pub, []byte(Message(r.Method, r.URL.Path, tsStr)), sig) {
 		return nil, errBadSig
 	}
 
