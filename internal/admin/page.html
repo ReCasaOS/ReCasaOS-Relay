@@ -92,7 +92,7 @@ polygon { fill:var(--c); fill-opacity:.8; }
 <h2>Shared names</h2>
 {{if .Names}}<table>
 {{range .Names}}<tr><td><code>{{.Name}}</code></td><td class="mut">fleet {{.FleetID}}</td><td class="mut">node {{.NodeID}}</td><td class="mut">since {{ago .ClaimedAt $.Now}}</td>
-<td style="text-align:right"><form method="post" action="/admin/share/names/{{.Name}}/revoke" onsubmit="return confirm('Revoke {{.Name}}? It joins the forbidden names and the tunnel closes.')">
+<td style="text-align:right"><form method="post" action="/admin/share/names/{{.Name}}/revoke">
 <input type="hidden" name="csrf" value="{{$.CSRF}}"><button>Revoke</button></form></td></tr>
 {{end}}</table>{{else}}<p class="mut">No shared name.</p>{{end}}
 <h2>Forbidden names</h2>

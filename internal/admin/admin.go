@@ -13,7 +13,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +23,7 @@ import (
 	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
 	"github.com/ReCasaOS/recasaos-relay/internal/meter"
 	"github.com/ReCasaOS/recasaos-relay/internal/ratelimit"
+	"github.com/ReCasaOS/recasaos-relay/internal/sharename"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
 )
 
@@ -425,10 +425,6 @@ func (h *handler) removeNode(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/", http.StatusSeeOther)
 }
 
-// label is the syntax of a share name; a banned name may be a reserved word, so sharename.Valid
-// (which refuses those) is not used.
-var label = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{1,30}[a-z0-9])?$`)
-
 // ban adds a name to the forbidden list and frees it from its holder: its box's tunnel closes at
 // the next revalidation. The name comes from the form (add) or from the path (revoke).
 func (h *handler) ban(w http.ResponseWriter, r *http.Request) {
@@ -436,7 +432,7 @@ func (h *handler) ban(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = r.PostFormValue("name")
 	}
-	if !label.MatchString(name) {
+	if sharename.ValidLabel(name) != nil {
 		http.Error(w, "invalid name", http.StatusBadRequest)
 		return
 	}
@@ -454,8 +450,14 @@ func (h *handler) ban(w http.ResponseWriter, r *http.Request) {
 func (h *handler) unban(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), opTimeout)
 	defer cancel()
-	if err := h.deps.Store.UnbanName(ctx, r.PathValue("name")); err != nil {
-		log.Printf("admin: unban %s: %v", r.PathValue("name"), err)
+	name := r.PathValue("name")
+	if sharename.ValidLabel(name) != nil {
+		http.Error(w, "invalid name", http.StatusBadRequest)
+		return
+	}
+	// Not found: a double click or the auto-reload raced the click; the name is gone, as asked.
+	if err := h.deps.Store.UnbanName(ctx, name); err != nil && !errors.Is(err, store.ErrNotFound) {
+		log.Printf("admin: unban %s: %v", name, err)
 		http.Error(w, "store error", http.StatusInternalServerError)
 		return
 	}

@@ -1,8 +1,8 @@
 package admin
 
 import (
-	"errors"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -543,8 +543,14 @@ func TestAdminBanAndUnban(t *testing.T) {
 	if w := e.do("POST", "/admin/share/banned/spam/delete", token, nil); w.Code != 400 {
 		t.Fatalf("unban without csrf: %d", w.Code)
 	}
+	if w := e.do("POST", "/admin/share/banned/Bad%20Name/delete", token, csrf(e)); w.Code != 400 {
+		t.Fatalf("unban of an invalid name: %d, want 400", w.Code)
+	}
 	if w := e.do("POST", "/admin/share/banned/spam/delete", token, csrf(e)); w.Code != 303 {
 		t.Fatalf("unban: %d", w.Code)
+	}
+	if w := e.do("POST", "/admin/share/banned/spam/delete", token, csrf(e)); w.Code != 303 {
+		t.Fatalf("second unban: %d, want 303", w.Code)
 	}
 	if got, _ := e.st.BannedNames(ctx); strings.Join(got, ",") != "www" {
 		t.Fatalf("banned after unban = %v", got)

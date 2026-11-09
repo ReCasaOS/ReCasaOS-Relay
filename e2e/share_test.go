@@ -201,10 +201,11 @@ func TestShareRoutesBySNIAndIsolates(t *testing.T) {
 
 	// Revoke boxa on /admin: the name joins the forbidden list, and within the 60 s revalidation its
 	// tunnel closes with 4403 and its names stop answering.
+	noRedirect := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	adminGet := func() string {
 		req, _ := http.NewRequest("GET", r.frontURL+"/admin/", nil)
 		req.SetBasicAuth("e2e", e2eAdminToken)
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := noRedirect.Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -219,7 +220,6 @@ func TestShareRoutesBySNIAndIsolates(t *testing.T) {
 	req, _ := http.NewRequest("POST", r.frontURL+"/admin/share/names/boxa/revoke", strings.NewReader(url.Values{"csrf": {tok[1]}}.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth("e2e", e2eAdminToken)
-	noRedirect := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err = noRedirect.Do(req)
 	if err != nil {
 		t.Fatal(err)
