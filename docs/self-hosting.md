@@ -59,6 +59,11 @@ relay.example.org {
 		respond 404
 	}
 
+	@tunnel path /v1/share/tunnel
+	handle @tunnel {
+		reverse_proxy share:8082
+	}
+
 	@enrolment path /v1/* /admin /admin/*
 	handle @enrolment {
 		reverse_proxy enrolment:8081 {

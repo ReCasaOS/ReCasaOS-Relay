@@ -1,5 +1,6 @@
 // Command share sits on the public 80/443 in front of Caddy: it reads the TLS server name of each
-// connection and forwards the bytes to Caddy, or (later) into a tunnel a box opened.
+// connection and forwards the bytes to Caddy, or into the tunnel the box of that name opened (served on
+// ListenTunnel, behind Caddy, at /v1/share/tunnel).
 package main
 
 import (
@@ -7,6 +8,7 @@ import (
 	"errors"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -14,7 +16,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/coder/websocket"
+
 	"github.com/ReCasaOS/recasaos-relay/internal/sni"
+	"github.com/ReCasaOS/recasaos-relay/internal/tunnel"
 )
 
 func main() {
@@ -37,14 +42,38 @@ func run() error {
 		lt.Close()
 		return err
 	}
+	ltun, err := net.Listen("tcp", cfg.ListenTunnel)
+	if err != nil {
+		lt.Close()
+		lh.Close()
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go func() { <-ctx.Done(); lt.Close(); lh.Close() }()
-	log.Printf("share listening on %s (TLS) and %s (HTTP)", cfg.ListenTLS, cfg.ListenHTTP)
+
+	reg, resolve := tunnel.NewRegistry(), resolver(cfg.EnrolmentURL)
+	mux := http.NewServeMux()
+	mux.Handle("GET "+tunnel.Path, tunnel.Handler(reg, resolve, time.Now))
+	tunSrv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	go tunSrv.Serve(ltun)
+	go every(ctx, 60*time.Second, func(ctx context.Context) { tunnel.Revalidate(ctx, reg, resolve) })
+	go every(ctx, 15*time.Second, newUsage(reg, cfg.EnrolmentURL).tick)
+	go func() {
+		<-ctx.Done()
+		lt.Close()
+		lh.Close()
+		tunSrv.Close() // hijacked tunnels are not closed by it: the boxes are told below
+		for _, n := range reg.Names() {
+			if t, ok := reg.Get(n); ok {
+				go t.Close(websocket.StatusGoingAway, "relay shutting down")
+			}
+		}
+	}()
+	log.Printf("share listening on %s (TLS), %s (HTTP) and %s (tunnels)", cfg.ListenTLS, cfg.ListenHTTP, cfg.ListenTunnel)
 
 	var inflight, acceptors sync.WaitGroup
 	acceptors.Add(2)
-	go func() { defer acceptors.Done(); accept(lt, &inflight, func(c net.Conn) { handleTLS(cfg, c) }) }()
+	go func() { defer acceptors.Done(); accept(lt, &inflight, func(c net.Conn) { handleTLS(cfg, reg, c) }) }()
 	go func() {
 		defer acceptors.Done()
 		accept(lh, &inflight, func(c net.Conn) { toFront(c, cfg.FrontHTTP) })
@@ -86,7 +115,7 @@ func accept(l net.Listener, wg *sync.WaitGroup, handle func(net.Conn)) {
 	}
 }
 
-func handleTLS(cfg Config, c net.Conn) {
+func handleTLS(cfg Config, reg *tunnel.Registry, c net.Conn) {
 	name, replay, err := sni.PeekServerName(c, cfg.PeekTimeout)
 	if err != nil && !errors.Is(err, sni.ErrNotTLS) {
 		return
@@ -96,7 +125,7 @@ func handleTLS(cfg Config, c net.Conn) {
 	case front: // non-TLS bytes (err == ErrNotTLS) go to front as well
 		toFront(replay, cfg.FrontTLS)
 	case box != "":
-		log.Printf("share: no tunnel for %q", box) // tunnels come with the tunnel listener
+		toTunnel(reg, box, c, replay)
 	}
 }
 

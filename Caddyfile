@@ -21,6 +21,13 @@
 		respond 404
 	}
 
+	# Box tunnels (a WebSocket) go to `share` (docker compose --profile share); without it Caddy answers 502.
+	# Caddy sorts path-matched handle blocks most specific first, so this wins over @enrolment's /v1/*.
+	@tunnel path /v1/share/tunnel
+	handle @tunnel {
+		reverse_proxy share:8082
+	}
+
 	# /admin is the operator page: the service answers 404 unless ADMIN_TOKEN is set.
 	@enrolment path /v1/* /admin /admin/*
 	handle @enrolment {
