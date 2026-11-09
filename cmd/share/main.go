@@ -18,6 +18,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/ReCasaOS/recasaos-relay/internal/proxyproto"
 	"github.com/ReCasaOS/recasaos-relay/internal/sni"
 	"github.com/ReCasaOS/recasaos-relay/internal/tunnel"
 )
@@ -83,7 +84,7 @@ func run() error {
 	go func() { defer acceptors.Done(); accept(lt, &inflight, func(c net.Conn) { handleTLS(cfg, reg, c) }) }()
 	go func() {
 		defer acceptors.Done()
-		accept(lh, &inflight, func(c net.Conn) { toFront(c, cfg.FrontHTTP) })
+		accept(lh, &inflight, func(c net.Conn) { toFront(c, cfg.FrontHTTP, cfg.FrontProxyProtocol) })
 	}()
 	acceptors.Wait()
 
@@ -135,19 +136,33 @@ func handleTLS(cfg Config, reg *tunnel.Registry, c net.Conn) {
 	box, front := route(name, cfg.RelayHost, cfg.ShareDomain)
 	switch {
 	case front: // non-TLS bytes (err == ErrNotTLS) go to front as well
-		toFront(replay, cfg.FrontTLS)
+		toFront(replay, cfg.FrontTLS, cfg.FrontProxyProtocol)
 	case box != "":
 		toTunnel(reg, box, c, replay)
 	}
 }
 
-func toFront(c net.Conn, addr string) {
+// toFront forwards c to Caddy at addr. With proxy, a PROXY v2 header carrying the visitor's address
+// goes first, before any (replayed) byte, so Caddy's {client_ip} is the visitor.
+func toFront(c net.Conn, addr string, proxy bool) {
 	f, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		log.Printf("share: dial %s: %v", addr, err)
 		return
 	}
 	defer f.Close()
+	if proxy {
+		src, ok1 := c.RemoteAddr().(*net.TCPAddr)
+		dst, ok2 := c.LocalAddr().(*net.TCPAddr)
+		if !ok1 || !ok2 {
+			log.Printf("share: PROXY header: %v -> %v are not TCP addresses", c.RemoteAddr(), c.LocalAddr())
+			return
+		}
+		if err := proxyproto.WriteV2(f, src, dst); err != nil {
+			log.Printf("share: PROXY header to %s: %v", addr, err)
+			return
+		}
+	}
 	sni.Forward(c, f)
 }
 

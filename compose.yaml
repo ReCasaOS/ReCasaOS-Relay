@@ -117,6 +117,7 @@ services:
       RELAY_HOST: ${RELAY_HOST:-}
       SHARE_DOMAIN: ${SHARE_DOMAIN:-}
       PEEK_TIMEOUT: ${PEEK_TIMEOUT:-5s}
+      FRONT_PROXY_PROTOCOL: ${FRONT_PROXY_PROTOCOL:-true}
     # ports:
     #   - "80:80"
     #   - "443:443"

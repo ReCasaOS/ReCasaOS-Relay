@@ -13,7 +13,7 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Config{ListenTLS: ":443", ListenHTTP: ":80", ListenTunnel: ":8082", FrontTLS: "front:443", FrontHTTP: "front:80",
-		EnrolmentURL: "http://enrolment:8081", RelayHost: "relay.test", ShareDomain: "box.relay.test", PeekTimeout: 5 * time.Second}
+		EnrolmentURL: "http://enrolment:8081", RelayHost: "relay.test", ShareDomain: "box.relay.test", PeekTimeout: 5 * time.Second, FrontProxyProtocol: true}
 	if c != want {
 		t.Fatalf("got %+v", c)
 	}

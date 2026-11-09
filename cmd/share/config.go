@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -16,6 +17,7 @@ type Config struct {
 	EnrolmentURL                        string
 	RelayHost, ShareDomain              string
 	PeekTimeout                         time.Duration
+	FrontProxyProtocol                  bool // send a PROXY v2 header to FrontTLS/FrontHTTP
 }
 
 func getenv(key, def string) string {
@@ -48,6 +50,9 @@ func ConfigFromEnv() (Config, error) {
 	var err error
 	if c.PeekTimeout, err = time.ParseDuration(getenv("PEEK_TIMEOUT", "5s")); err != nil || c.PeekTimeout <= 0 {
 		return Config{}, fmt.Errorf("PEEK_TIMEOUT: want a positive duration, got %q", os.Getenv("PEEK_TIMEOUT"))
+	}
+	if c.FrontProxyProtocol, err = strconv.ParseBool(getenv("FRONT_PROXY_PROTOCOL", "true")); err != nil {
+		return Config{}, fmt.Errorf("FRONT_PROXY_PROTOCOL: want true or false, got %q", os.Getenv("FRONT_PROXY_PROTOCOL"))
 	}
 	return c, nil
 }

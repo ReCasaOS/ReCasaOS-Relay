@@ -2,9 +2,45 @@
 {
 	local_certs
 	skip_install_trust
+
+	# share sends the visitor's address as a PROXY v2 header; before tls, since it precedes the handshake.
+	servers :443 {
+		listener_wrappers {
+			proxy_protocol {
+				allow 172.29.0.0/24
+			}
+			tls
+		}
+	}
+	servers :80 {
+		listener_wrappers {
+			proxy_protocol {
+				allow 172.29.0.0/24
+			}
+		}
+	}
+}
+
+# An explicit http:// site: the wrapper of `servers :80` only reaches a server defined by a site like this
+# one, not the redirect server Caddy adds by itself for relay.test (same site as section 14 of the docs).
+http://*.box.relay.test {
+	redir https://{host}{uri} 301
 }
 
 relay.test {
 	tls internal
-	reverse_proxy front:8080
+
+	# In production one Caddy terminates TLS and routes to enrolment itself. Here tlsfront stands in for it,
+	# so the login form goes straight to enrolment with the visitor's address (front, behind us, would see
+	# tlsfront as the peer).
+	@login path /register/*
+	handle @login {
+		reverse_proxy enrolment:8081 {
+			header_up X-Client-IP {client_ip}
+		}
+	}
+
+	handle {
+		reverse_proxy front:8080
+	}
 }

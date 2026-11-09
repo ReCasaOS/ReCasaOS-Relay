@@ -90,9 +90,10 @@ Fleet creation is limited per client IP (per /64 for IPv6, and in addition per /
 | `SHARE_ACME_RATE_PER_HOUR` | `20` | ACME TXT writes per hour per box |
 | `SHARE_PUBLIC_IP` | none, required when `SHARE_DOMAIN` is set | IPv4 the delegated DNS zone answers with; the service refuses to start without it |
 | `SHARE_PUBLIC_IP6` | empty | IPv6 address for `AAAA` answers; empty: none |
+| `SHARE_PSL_TXT` | empty | value of the `_psl.<SHARE_DOMAIN>` TXT record (Public Suffix List ownership proof); empty: no such record |
 | `LISTEN_DNS` | `:53` | UDP and TCP listen address of the DNS zone (only with `SHARE_DOMAIN`) |
 
-The `share` process (`cmd/share`, its own image) has its own environment: `RELAY_HOST` and `SHARE_DOMAIN` (required), `LISTEN_TLS` (`:443`), `LISTEN_HTTP` (`:80`), `LISTEN_TUNNEL` (`:8082`), `FRONT_TLS` (`front:443`), `FRONT_HTTP` (`front:80`), `ENROLMENT_URL` (`http://enrolment:8081`) and `PEEK_TIMEOUT` (`5s`). See "Public sharing".
+The `share` process (`cmd/share`, its own image) has its own environment: `RELAY_HOST` and `SHARE_DOMAIN` (required), `LISTEN_TLS` (`:443`), `LISTEN_HTTP` (`:80`), `LISTEN_TUNNEL` (`:8082`), `FRONT_TLS` (`front:443`), `FRONT_HTTP` (`front:80`), `ENROLMENT_URL` (`http://enrolment:8081`) `PEEK_TIMEOUT` (`5s`) and `FRONT_PROXY_PROTOCOL` (`true`: send a PROXY protocol v2 header with the visitor's address to `FRONT_TLS` / `FRONT_HTTP`; `front`'s Caddy must read it, see `docs/self-hosting.md` section 14). See "Public sharing".
 
 ### Capacity
 

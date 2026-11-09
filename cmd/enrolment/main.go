@@ -207,7 +207,7 @@ func listenZone(domain string, st store.Store) (*dnszone.Zone, net.PacketConn, n
 		pc.Close()
 		return nil, nil, nil, err
 	}
-	z := &dnszone.Zone{Origin: strings.ToLower(strings.TrimSpace(domain)), A: ip4, AAAA: ip6,
+	z := &dnszone.Zone{Origin: strings.ToLower(strings.TrimSpace(domain)), A: ip4, AAAA: ip6, PSLTXT: strings.TrimSpace(os.Getenv("SHARE_PSL_TXT")),
 		TXT: func(ctx context.Context, n string) (string, bool, error) { return st.ACMEValue(ctx, n, time.Now()) }}
 	return z, pc, l, nil
 }

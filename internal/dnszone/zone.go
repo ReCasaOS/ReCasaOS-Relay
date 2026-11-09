@@ -27,7 +27,9 @@ type Zone struct {
 	AAAA   netip.Addr // optional; the zero Addr means none
 	// TXT is given the full lowercase query name without trailing dot and returns the value to publish.
 	TXT func(ctx context.Context, name string) (string, bool, error)
-	Now func() time.Time // default time.Now
+	// PSLTXT, when set, is the value of _psl.<Origin> TXT (the Public Suffix List ownership proof).
+	PSLTXT string
+	Now    func() time.Time // default time.Now
 }
 
 // Answer turns one query (wire format) into its response. An error means the packet is not a
@@ -85,6 +87,8 @@ func (z *Zone) Answer(ctx context.Context, msg []byte) ([]byte, error) {
 			answers = append(answers, dnsmessage.Resource{Header: rh(dnsmessage.TypeA, 300), Body: &dnsmessage.AResource{A: z.A.As4()}})
 		case q.Type == dnsmessage.TypeAAAA && !apex && z.AAAA.IsValid() && !z.AAAA.Is4():
 			answers = append(answers, dnsmessage.Resource{Header: rh(dnsmessage.TypeAAAA, 300), Body: &dnsmessage.AAAAResource{AAAA: z.AAAA.As16()}})
+		case q.Type == dnsmessage.TypeTXT && rel == "_psl" && z.PSLTXT != "":
+			answers = append(answers, dnsmessage.Resource{Header: rh(dnsmessage.TypeTXT, 300), Body: &dnsmessage.TXTResource{TXT: []string{z.PSLTXT}}})
 		case q.Type == dnsmessage.TypeTXT && labels == 2 && strings.HasPrefix(rel, "_acme-challenge."):
 			v, ok, err := z.TXT(ctx, name)
 			if err != nil {

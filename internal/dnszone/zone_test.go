@@ -290,3 +290,20 @@ func TestServeSurvivesTransientAcceptError(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestPSLTXT(t *testing.T) {
+	z := newZone()
+	m := ask(t, z, "_psl."+origin, dnsmessage.TypeTXT)
+	if m.RCode != dnsmessage.RCodeSuccess || len(m.Answers) != 0 {
+		t.Fatalf("unset: %+v", m)
+	}
+	wantSOA(t, m)
+	z.PSLTXT = "https://github.com/publicsuffix/list/pull/1"
+	m = ask(t, z, "_psl."+origin, dnsmessage.TypeTXT)
+	if len(m.Answers) != 1 || m.Answers[0].Header.TTL != 300 || m.Answers[0].Body.(*dnsmessage.TXTResource).TXT[0] != z.PSLTXT {
+		t.Fatalf("set: %+v", m.Answers)
+	}
+	if m = ask(t, z, "_psl.boxa."+origin, dnsmessage.TypeTXT); len(m.Answers) != 0 {
+		t.Fatalf("deeper name answered: %+v", m.Answers)
+	}
+}
