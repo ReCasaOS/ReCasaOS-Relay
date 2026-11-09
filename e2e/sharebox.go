@@ -13,6 +13,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log"
@@ -28,6 +29,7 @@ import (
 	"github.com/ReCasaOS/recasaos-relay/internal/auth"
 	"github.com/ReCasaOS/recasaos-relay/internal/proxyproto"
 	"github.com/ReCasaOS/recasaos-relay/internal/tunnel"
+	"golang.org/x/crypto/acme"
 )
 
 // fakeBox is a box as the relay sees it: a signing key, a name, a certificate for *.<name>.box.relay.test
@@ -36,7 +38,8 @@ type fakeBox struct {
 	r       *rig
 	name    string
 	key     ed25519.PrivateKey
-	cert    tls.Certificate
+	cert    tls.Certificate                 // the self-signed one it starts with
+	cur     atomic.Pointer[tls.Certificate] // what the TLS server presents; obtainCert swaps it
 	sess    *tunnel.Session
 	streams atomic.Int32
 
@@ -77,6 +80,7 @@ func (r *rig) startBox(fleetID, secret, nodeID, name string) *fakeBox {
 		t.Fatal(err)
 	}
 	b.cert = tls.Certificate{Certificate: [][]byte{der}, PrivateKey: ck}
+	b.cur.Store(&b.cert)
 
 	pem, _ := os.ReadFile(r.caFile)
 	pool := x509.NewCertPool()
@@ -114,7 +118,7 @@ func (r *rig) startBox(fleetID, secret, nodeID, name string) *fakeBox {
 				b.srcs = append(b.srcs, src)
 				b.mu.Unlock()
 				select {
-				case ln.conns <- tls.Server(&restConn{Conn: s, r: rest}, &tls.Config{Certificates: []tls.Certificate{b.cert}}):
+				case ln.conns <- tls.Server(&restConn{Conn: s, r: rest}, &tls.Config{GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return b.cur.Load(), nil }}):
 				case <-ln.done:
 					s.Close()
 				}
@@ -181,3 +185,88 @@ func (l *chanListener) Accept() (net.Conn, error) {
 }
 func (l *chanListener) Close() error   { l.once.Do(func() { close(l.done) }); return nil }
 func (l *chanListener) Addr() net.Addr { return &net.TCPAddr{} }
+
+// obtainCert gets a certificate for *.<name>.box.relay.test from the ACME server at directoryURL by DNS-01:
+// the TXT goes through the relay (PUT /v1/share/acme), then the box serves the new chain.
+func (b *fakeBox) obtainCert(ctx context.Context, directoryURL string) error {
+	acctKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	cl := &acme.Client{Key: acctKey, DirectoryURL: directoryURL, HTTPClient: &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}} // Pebble's directory has a throwaway certificate
+	if _, err := cl.Register(ctx, &acme.Account{}, acme.AcceptTOS); err != nil {
+		return fmt.Errorf("register: %w", err)
+	}
+	domain := "*." + b.name + ".box.relay.test"
+	order, err := cl.AuthorizeOrder(ctx, acme.DomainIDs(domain))
+	if err != nil {
+		return fmt.Errorf("order: %w", err)
+	}
+	for _, u := range order.AuthzURLs {
+		if err := b.solveDNS01(ctx, cl, u); err != nil {
+			return err
+		}
+	}
+	if _, err = cl.WaitOrder(ctx, order.URI); err != nil {
+		return fmt.Errorf("wait order: %w", err)
+	}
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	csr, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{DNSNames: []string{domain}}, key)
+	if err != nil {
+		return err
+	}
+	chain, _, err := cl.CreateCertFromOrder(ctx, order, csr, true) // CreateOrderCert without the order URI cannot poll it
+	if err != nil {
+		return fmt.Errorf("finalize: %w", err)
+	}
+	b.cur.Store(&tls.Certificate{Certificate: chain, PrivateKey: key})
+	if code, out := b.signed("DELETE", "/v1/share/acme", ""); code != http.StatusNoContent {
+		return fmt.Errorf("delete acme: %d %s", code, out)
+	}
+	return nil
+}
+
+// solveDNS01 publishes the DNS-01 record of one authorization through the relay and waits for validation.
+func (b *fakeBox) solveDNS01(ctx context.Context, cl *acme.Client, authzURL string) error {
+	az, err := cl.GetAuthorization(ctx, authzURL)
+	if err != nil {
+		return fmt.Errorf("authorization: %w", err)
+	}
+	var chal *acme.Challenge
+	for _, c := range az.Challenges {
+		if c.Type == "dns-01" {
+			chal = c
+		}
+	}
+	if chal == nil {
+		return fmt.Errorf("no dns-01 challenge in %v", az.Challenges)
+	}
+	val, err := cl.DNS01ChallengeRecord(chal.Token)
+	if err != nil {
+		return err
+	}
+	if code, out := b.signed("PUT", "/v1/share/acme", fmt.Sprintf(`{"value":%q}`, val)); code != http.StatusNoContent {
+		return fmt.Errorf("put acme: %d %s", code, out)
+	}
+	if _, err := cl.Accept(ctx, chal); err != nil {
+		return fmt.Errorf("accept: %w", err)
+	}
+	if _, err := cl.WaitAuthorization(ctx, authzURL); err != nil {
+		return fmt.Errorf("wait authorization: %w", err)
+	}
+	return nil
+}
+
+// pebbleRoots fetches the CA Pebble signs with (it changes at each start) from its management port.
+func pebbleRoots(mgmtAddr string) (*x509.CertPool, error) {
+	c := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	resp, err := c.Get("https://" + mgmtAddr + "/roots/0")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	pool := x509.NewCertPool()
+	if blk, _ := pem.Decode(b); blk == nil || !pool.AppendCertsFromPEM(b) {
+		return nil, fmt.Errorf("no PEM root in %q", b)
+	}
+	return pool, nil
+}

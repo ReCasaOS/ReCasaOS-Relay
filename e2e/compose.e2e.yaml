@@ -27,6 +27,9 @@ services:
       - "127.0.0.1::8080"
 
   enrolment:
+    networks:
+      default:
+        ipv4_address: 172.29.0.11 # Pebble's -dnsserver
     environment:
       SHARE_DOMAIN: box.relay.test
       SHARE_PUBLIC_IP: 172.29.0.10 # `share`, below
@@ -39,6 +42,18 @@ services:
     ports:
       - "127.0.0.1::53/udp"
       - "127.0.0.1::53/tcp"
+
+  # ACME test server: validates DNS-01 only through enrolment's zone.
+  pebble:
+    image: ghcr.io/letsencrypt/pebble:2.10.1
+    command: ["-config", "/test/config/pebble-config.json", "-dnsserver", "172.29.0.11:53"]
+    environment:
+      PEBBLE_VA_NOSLEEP: "1"
+    depends_on:
+      - enrolment
+    ports:
+      - "127.0.0.1::14000"
+      - "127.0.0.1::15000"
 
   tlsfront:
     image: caddy:2.10.0-alpine

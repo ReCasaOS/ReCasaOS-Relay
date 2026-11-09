@@ -34,18 +34,23 @@ func (r *rig) boxNodeID(fleetName string) (id, secret, nodeID string) {
 // visit does GET / on host as a visitor of share's 443, pinning the box's own certificate; it returns the
 // body and the visitor's local port.
 func (r *rig) visit(host string, pin *fakeBox) (string, int, error) {
-	c, err := net.DialTimeout("tcp", r.shareAddr, 5*time.Second)
-	if err != nil {
-		return "", 0, err
-	}
-	port := c.LocalAddr().(*net.TCPAddr).Port
-	tc := tls.Client(c, &tls.Config{ServerName: host, InsecureSkipVerify: true,
+	return r.visitTLS(host, &tls.Config{ServerName: host, InsecureSkipVerify: true,
 		VerifyConnection: func(cs tls.ConnectionState) error {
 			if len(cs.PeerCertificates) == 0 || string(cs.PeerCertificates[0].Raw) != string(pin.cert.Certificate[0]) {
 				return fmt.Errorf("certificate is not %s's", pin.name)
 			}
 			return nil
 		}})
+}
+
+// visitTLS does GET / on host as a visitor of share's 443 with the given TLS config.
+func (r *rig) visitTLS(host string, cfg *tls.Config) (string, int, error) {
+	c, err := net.DialTimeout("tcp", r.shareAddr, 5*time.Second)
+	if err != nil {
+		return "", 0, err
+	}
+	port := c.LocalAddr().(*net.TCPAddr).Port
+	tc := tls.Client(c, cfg)
 	cl := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
 		DialTLSContext: func(context.Context, string, string) (net.Conn, error) { return tc, nil }}}
 	defer cl.CloseIdleConnections()
@@ -153,4 +158,29 @@ func TestShareRoutesBySNIAndIsolates(t *testing.T) {
 
 	// TODO(task 11): admin "Revoke" boxa -> within 70 s its names are closed and its session reports 4403.
 	// TODO(task 10): after a 20 MiB download from boxa, /admin/ shows boxa's shared volume within +-10 %.
+}
+
+func TestShareCertificateViaDNS01(t *testing.T) {
+	r := newRig(t)
+	r.up()
+	ida, seca, na := r.boxNodeID("A")
+	boxa := r.startBox(ida, seca, na, "boxa")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := boxa.obtainCert(ctx, "https://"+r.pebbleACME+"/dir"); err != nil {
+		t.Fatal(err)
+	}
+	roots, err := pebbleRoots(r.pebbleMgmt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No InsecureSkipVerify: the chain must verify against Pebble's root for the visited name.
+	body, _, err := r.visitTLS("app.boxa.box.relay.test", &tls.Config{ServerName: "app.boxa.box.relay.test", RootCAs: roots})
+	if err != nil || body != "hello from boxa" {
+		t.Fatalf("visit with the ACME certificate: %q, %v", body, err)
+	}
+	if got := r.txt("_acme-challenge.boxa.box.relay.test"); len(got) != 0 {
+		t.Fatalf("TXT after DELETE = %v, want none", got)
+	}
 }

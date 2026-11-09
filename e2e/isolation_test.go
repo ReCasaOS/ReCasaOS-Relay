@@ -46,19 +46,20 @@ const (
 )
 
 type rig struct {
-	t         *testing.T
-	proj      string
-	root      string // repository root (compose project directory)
-	apiKey    string
-	hs        *headscale.Client
-	hsURL     string // Headscale on loopback (admin API; the test's own way in)
-	frontURL  string // the public front, as boxes reach it
-	shareAddr string // share's public 443, mapped on loopback
-	caFile    string
-	ts        map[string]*node
-	fleetUser map[string]string // fleet name -> Headscale user
-	env       []string          // extra variables for docker compose (compose.yaml interpolates them)
-	nodeEnv   []string          // extra variables for every tailscaled container (docker create -e)
+	t                      *testing.T
+	proj                   string
+	root                   string // repository root (compose project directory)
+	apiKey                 string
+	hs                     *headscale.Client
+	hsURL                  string // Headscale on loopback (admin API; the test's own way in)
+	frontURL               string // the public front, as boxes reach it
+	pebbleACME, pebbleMgmt string // Pebble's ACME directory and management ports, mapped on loopback
+	shareAddr              string // share's public 443, mapped on loopback
+	caFile                 string
+	ts                     map[string]*node
+	fleetUser              map[string]string // fleet name -> Headscale user
+	env                    []string          // extra variables for docker compose (compose.yaml interpolates them)
+	nodeEnv                []string          // extra variables for every tailscaled container (docker create -e)
 }
 
 type node struct {
@@ -146,10 +147,12 @@ func (r *rig) up() {
 		r.apiKey = strings.TrimSpace(lines[len(lines)-1])
 		return nil
 	})
-	r.mustCompose("up", "-d", "--build", "derper", "enrolment", "front", "tlsfront", "share")
+	r.mustCompose("up", "-d", "--build", "derper", "enrolment", "front", "tlsfront", "share", "pebble")
 	r.hsURL = "http://" + r.mustCompose("port", "headscale", "8080")
 	r.frontURL = "http://" + r.mustCompose("port", "front", "8080")
 	r.shareAddr = r.mustCompose("port", "share", "443")
+	r.pebbleACME = r.mustCompose("port", "pebble", "14000")
+	r.pebbleMgmt = r.mustCompose("port", "pebble", "15000")
 	r.hs = headscale.New(r.hsURL, r.apiKey, nil)
 
 	// The service must not answer before the deny-by-default policy is in place.
