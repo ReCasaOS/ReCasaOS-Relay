@@ -52,6 +52,8 @@ relay.example.org {
 		respond 404
 	}
 
+	# /internal/* (the enrolment service's share routes) is deliberately not routed either: it falls through
+	# to Headscale and answers 404, like /api. Only services on the compose network reach it.
 	@api path /api /api/*
 	handle @api {
 		respond 404

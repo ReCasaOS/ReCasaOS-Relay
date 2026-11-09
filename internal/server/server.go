@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
@@ -33,6 +34,11 @@ type Config struct {
 	DeviceCodeTTL         time.Duration // validity of a device code
 	MaxPendingDeviceCodes int           // unused device codes a fleet may hold (409 beyond)
 	LoginRatePerHour      int           // device-code logins per hour, per IP
+
+	ShareDomain          string        // public sharing: boxes get <name>.<ShareDomain>; empty disables every share route (503)
+	ShareQuarantine      time.Duration // a released name cannot be claimed again for this long
+	ShareACMETTL         time.Duration // validity of an _acme-challenge TXT value
+	ShareACMERatePerHour int           // ACME TXT writes per hour, per box
 }
 
 // prefix48Factor: an IPv6 /48 may create this many times CREATE_RATE_PER_HOUR fleets per hour in
@@ -83,6 +89,20 @@ func New(cfg Config, deps Deps) http.Handler {
 		mux.HandleFunc("GET /v1/fleets/{id}", h.fleetStatus)
 		mux.HandleFunc("DELETE /v1/fleets/{id}/nodes/{hostname}", h.removeNode)
 		mux.HandleFunc("DELETE /v1/fleets/{id}", h.deleteFleet)
+		mux.HandleFunc("PUT /v1/fleets/{id}/nodes/{node}/box-key", cfg.shareEnabled(h.setBoxKey))
+		beats := &heartbeats{}
+		sh := &shareHandler{cfg: cfg, deps: deps, beats: beats,
+			authLimiter: ratelimit.New(cfg.AuthRatePerHour, deps.Now),
+			acmeLimiter: ratelimit.New(cfg.ShareACMERatePerHour, deps.Now),
+		}
+		mux.HandleFunc("PUT /v1/share/name", cfg.shareEnabled(sh.putName))
+		mux.HandleFunc("DELETE /v1/share/name", cfg.shareEnabled(sh.deleteName))
+		mux.HandleFunc("GET /v1/share", cfg.shareEnabled(sh.status))
+		mux.HandleFunc("PUT /v1/share/acme", cfg.shareEnabled(sh.putACME))
+		mux.HandleFunc("DELETE /v1/share/acme", cfg.shareEnabled(sh.deleteACME))
+		in := &internalHandler{deps: deps, beats: beats}
+		mux.Handle("GET /internal/share/boxes/{key}", internalOnly(cfg.TrustedProxyHeader, in.boxByKey))
+		mux.Handle("POST /internal/share/usage", internalOnly(cfg.TrustedProxyHeader, in.usage))
 		login := &loginHandler{cfg: cfg, deps: deps,
 			limiter:   ratelimit.New(cfg.LoginRatePerHour, deps.Now),
 			limiter48: ratelimit.New(prefix48Factor*cfg.LoginRatePerHour, deps.Now),
@@ -144,6 +164,16 @@ func ConfigFromEnv() (Config, error) {
 		return c, err
 	}
 	if c.LoginRatePerHour, err = envInt("LOGIN_RATE_PER_HOUR", 20); err != nil {
+		return c, err
+	}
+	c.ShareDomain = strings.ToLower(strings.TrimSpace(os.Getenv("SHARE_DOMAIN")))
+	if c.ShareQuarantine, err = envDuration("SHARE_QUARANTINE", 2160*time.Hour); err != nil {
+		return c, err
+	}
+	if c.ShareACMETTL, err = envDuration("SHARE_ACME_TTL", 10*time.Minute); err != nil {
+		return c, err
+	}
+	if c.ShareACMERatePerHour, err = envInt("SHARE_ACME_RATE_PER_HOUR", 20); err != nil {
 		return c, err
 	}
 	return c, nil

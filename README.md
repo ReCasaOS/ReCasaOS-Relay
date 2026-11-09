@@ -84,6 +84,10 @@ Fleet creation is limited per client IP (per /64 for IPv6, and in addition per /
 | `STORE_PATH` | `/data/relay.db` | SQLite file (a volume in compose) |
 | `TRUSTED_PROXY_HEADER` | empty (compose: `X-Client-IP`) | header set by the trusted proxy in front of the service; its last value is the client IP used for rate limits. Empty: the TCP peer address is used |
 | `LISTEN_ADDR` | `:8081` | listen address |
+| `SHARE_DOMAIN` | empty | public sharing domain (lowercased); empty disables sharing, see "Public sharing" |
+| `SHARE_QUARANTINE` | `2160h` | how long a released name cannot be claimed again |
+| `SHARE_ACME_TTL` | `10m` | validity of an `_acme-challenge` TXT value |
+| `SHARE_ACME_RATE_PER_HOUR` | `20` | ACME TXT writes per hour per box |
 
 ### Capacity
 
@@ -121,6 +125,28 @@ The first three take the fleet secret (`401` wrong secret, `404` unknown fleet, 
 ### Janitor
 
 Every `GC_INTERVAL` the service (1) marks every fleet that has an online node as seen, (2) deletes, with the routine behind `DELETE /v1/fleets/{id}`, the fleets that have had no online node for longer than `IDLE_AFTER` (a fleet whose nodes could not be read in that pass is never deleted), (3) deletes the used and the expired pre-auth keys of all fleets (Headscale never prunes them, and the key quota reads them all), (4) deletes the fleets that have no node at all, were created more than twice `JOIN_KEY_TTL` ago (48 h by default) and hold no unused, unexpired join key, however recently they asked for a key (a key request refreshes the row the `IDLE_AFTER` rule reads, so without this an owner who keeps asking for keys but never enrols a box would keep the fleet forever), and (5) rewrites the access policy, which also repairs a hand edit. Devices (remote access) are nodes of the fleet like boxes: an online device keeps its fleet alive under the `IDLE_AFTER` rule, and a fleet with only devices is not "empty" for rule (4). Deletions re-check, under the fleet's lock, that the fleet is still idle (or still empty and untouched since the pass began). A failure for one fleet is logged and the pass goes on; a panic in a pass is logged and the next pass runs.
+
+## Public sharing
+
+A box can publish a service under `<name>.<SHARE_DOMAIN>`. This is the relay side: names, the DNS-01 challenge records and the box registry. Sharing is off while `SHARE_DOMAIN` is empty: every `/v1/share*` route and the `box-key` route answer `503 {"error":"sharing not enabled"}`.
+
+Box-signed routes carry `X-Box-Key` (ed25519 public key, base64url raw, 32 bytes), `X-Box-Time` (unix seconds, +-120 s) and `X-Box-Signature` (base64url raw, ed25519 over `"<METHOD> <PATH>
+" + <X-Box-Time>`); a signature is accepted once. A key must first be linked to one of the fleet's nodes by the fleet owner. Errors are `{"error": "<message>"}`: `400 invalid name`, `401 unauthorized`, `403 box key not linked`, `404`, `409` (`name taken`, `name reserved`, `name revoked`, `name in quarantine`), `413`, `429` with `Retry-After`.
+
+| Call | Auth | Success |
+|---|---|---|
+| `PUT /v1/fleets/{id}/nodes/{node}/box-key` `{"box_key": "<base64url ed25519 pub>"}` | Bearer fleet secret | `204`. Links the key to that node (`{node}` is the Headscale node id); `404 node not found`, `409 box key already linked`, `400` if the key is not 32 bytes base64url |
+| `PUT /v1/share/name` `{"name": "<box>"}` | box signature | `201 {"name", "host", "domain"}`; the same box claiming the same name again: `200` |
+| `DELETE /v1/share/name` | box signature | `204`; the name is quarantined for `SHARE_QUARANTINE`; `204` too when the box had no name |
+| `GET /v1/share` | box signature | `200 {"name", "host", "domain", "tunnel_online"}`; `404 no name` |
+| `PUT /v1/share/acme` `{"value": "<token>"}` | box signature | `204`: `_acme-challenge.<name>.<SHARE_DOMAIN>` TXT answers `value` for `SHARE_ACME_TTL`; `404 no name`; `429` beyond `SHARE_ACME_RATE_PER_HOUR` per box |
+| `DELETE /v1/share/acme` | box signature | `204` |
+
+A name is 3 to 32 characters of `a-z0-9-`, not starting or ending with `-`; `www relay admin api mail ns ns1 box tunnel recasaos casaos localhost` are reserved. `AUTH_RATE_PER_HOUR` applies per client IP before the signature is checked.
+
+`tunnel_online` is true when the box's node appeared in a `share` usage post less than 45 s ago (kept in memory: false after an enrolment restart until the next post, at most 15 s).
+
+Internal routes, for the `share` service on the compose network only: `GET /internal/share/boxes/{key}` answers `200 {"name","node_id","fleet_id"}` (`404` when the key is unknown or has no name), and `POST /internal/share/usage` takes `[{"fleet_id","node_id","rx","tx"}]` (64 KiB at most) and answers `204`. Both answer `404` to a request carrying `TRUSTED_PROXY_HEADER`, which only `front` sets, and `front` does not route `/internal/*` at all.
 
 ## Fleet isolation
 

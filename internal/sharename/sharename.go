@@ -1,0 +1,29 @@
+// Package sharename validates the public names a box claims for sharing (<name>.<share domain>).
+package sharename
+
+import (
+	"errors"
+	"regexp"
+	"slices"
+)
+
+var (
+	ErrInvalid  = errors.New("sharename: invalid name")
+	ErrReserved = errors.New("sharename: reserved name")
+)
+
+// 3 to 32 characters of [a-z0-9-], not starting or ending with "-"; "a--b" is a valid DNS label.
+var re = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{1,30}[a-z0-9])?$`)
+
+var reserved = []string{"www", "relay", "admin", "api", "mail", "ns", "ns1", "box", "tunnel", "recasaos", "casaos", "localhost"}
+
+// Valid returns ErrInvalid when name is not an acceptable label and ErrReserved when it is on the built-in list.
+func Valid(name string) error {
+	if !re.MatchString(name) {
+		return ErrInvalid
+	}
+	if slices.Contains(reserved, name) {
+		return ErrReserved
+	}
+	return nil
+}
