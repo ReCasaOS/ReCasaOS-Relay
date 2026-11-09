@@ -2,9 +2,9 @@ package server
 
 import (
 	"context"
-	"strconv"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -92,4 +92,15 @@ func TestUsagePostAppliesDeltas(t *testing.T) {
 	if rel, _ := e.st.UsageTotals(context.Background(), time.Unix(0, 0)); len(rel) != 0 {
 		t.Fatalf("shared bytes leaked into the relayed totals: %+v", rel)
 	}
+}
+
+func TestInternalUsageRefusesBadSamplesAndStoreFailure(t *testing.T) {
+	e := setupShare(t, nil)
+	wantStatus(t, e.internal("POST", "/internal/share/usage", `[{"fleet_id":"f","node_id":"1","rx":-5,"tx":0}]`, nil), 400, `{"error":"invalid request"}`)
+	wantStatus(t, e.internal("POST", "/internal/share/usage", `[{"fleet_id":"","node_id":"1","rx":1,"tx":0}]`, nil), 400, `{"error":"invalid request"}`)
+	if got, _ := e.st.ShareTotals(context.Background(), time.Unix(0, 0)); len(got) != 0 {
+		t.Fatalf("a refused post stored %+v", got)
+	}
+	e.st.Close()
+	wantStatus(t, e.internal("POST", "/internal/share/usage", `[{"fleet_id":"f","node_id":"1","rx":1,"tx":0}]`, nil), 500, `{"error":"internal error"}`)
 }

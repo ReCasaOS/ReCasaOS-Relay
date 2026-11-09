@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/fakes"
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
@@ -453,13 +454,17 @@ func TestAdminShowsSharedThisMonth(t *testing.T) {
 	e.usage(t, store.UsageSample{FleetID: "aaaa", NodeID: one, Rx: 2e9})
 	e.shared(t, t0.Add(-5*time.Minute), store.UsageSample{FleetID: "bbbb", NodeID: two, Rx: 3e9, Tx: 7})
 	e.shared(t, t0.Add(-4*time.Minute), store.UsageSample{FleetID: "bbbb", NodeID: two, Rx: 1e9})
+	e.shared(t, t0.Add(-3*time.Minute), store.UsageSample{FleetID: "zzzz", NodeID: "99", Rx: 2e9})
 	e.shared(t, t0.AddDate(0, -1, 0), store.UsageSample{FleetID: "bbbb", NodeID: two, Rx: 9e9})
 	body := e.do("GET", "/admin/", token, nil).Body.String()
 
-	for _, want := range []string{"<b>4.0 GB</b><span>shared this month</span>", "<b>2.0 GB</b><span>relayed this month</span>"} {
+	for _, want := range []string{"<b>6.0 GB</b><span>shared this month</span>", "<b>2.0 GB</b><span>relayed this month</span>"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page lacks %q", want)
 		}
+	}
+	if line := between(t, body, "deleted fleets", "</p>"); !strings.Contains(line, "0 B relayed") || !strings.Contains(line, "2.0 GB shared") {
+		t.Errorf("deleted fleets line: %s", line)
 	}
 	if head := between(t, body, "<code>bbbb</code>", "</summary>"); !strings.Contains(head, "4.0 GB shared") {
 		t.Errorf("fleet bbbb (shared only) header lacks its shared volume: %s", head)
@@ -499,5 +504,11 @@ func TestAdminShowsSharedThisMonth(t *testing.T) {
 	}
 	if p := e.do("GET", "/admin/?range=24h", token, nil).Body.String(); !strings.Contains(p, `<a href="?range=24h&amp;kind=shared">shared</a>`) {
 		t.Error("no toggle to the shared chart")
+	}
+}
+
+func TestPageTemplateIsUTF8(t *testing.T) {
+	if !utf8.ValidString(pageHTML) {
+		t.Fatal("page.html is not valid UTF-8")
 	}
 }

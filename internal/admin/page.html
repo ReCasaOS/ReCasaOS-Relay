@@ -80,14 +80,14 @@ polygon { fill:var(--c); fill-opacity:.8; }
 {{$fid := .ID}}{{range .Devices}}{{template "row" dict "N" . "R" $ "F" $fid}}{{end}}
 </table>{{end}}
 <div class="chart">
-<div class="tabs"><a href="?range=1h{{if eq $.Kind "shared"}}&amp;kind=shared{{end}}"{{if eq $.Range "1h"}} class="cur" aria-current="page"{{end}}>1 h</a><a href="?range=24h{{if eq $.Kind "shared"}}&amp;kind=shared{{end}}"{{if eq $.Range "24h"}} class="cur" aria-current="page"{{end}}>24 h</a><a href="?range=30d{{if eq $.Kind "shared"}}&amp;kind=shared{{end}}"{{if eq $.Range "30d"}} class="cur" aria-current="page"{{end}}>30 d</a> · <a href="?range={{$.Range}}"{{if ne $.Kind "shared"}} class="cur" aria-current="page"{{end}}>relayed</a><a href="?range={{$.Range}}&amp;kind=shared"{{if eq $.Kind "shared"}} class="cur" aria-current="page"{{end}}>shared</a></div>
+<div class="tabs"><a href="?range=1h{{if eq $.Kind "shared"}}&amp;kind=shared{{end}}"{{if eq $.Range "1h"}} class="cur" aria-current="page"{{end}}>1 h</a><a href="?range=24h{{if eq $.Kind "shared"}}&amp;kind=shared{{end}}"{{if eq $.Range "24h"}} class="cur" aria-current="page"{{end}}>24 h</a><a href="?range=30d{{if eq $.Kind "shared"}}&amp;kind=shared{{end}}"{{if eq $.Range "30d"}} class="cur" aria-current="page"{{end}}>30 d</a> &middot; <a href="?range={{$.Range}}"{{if ne $.Kind "shared"}} class="cur" aria-current="page"{{end}}>relayed</a><a href="?range={{$.Range}}&amp;kind=shared"{{if eq $.Kind "shared"}} class="cur" aria-current="page"{{end}}>shared</a></div>
 {{.Chart}}
 <div class="lg">{{range $i, $s := .Series}}<span><b class="c{{$i}}"></b>{{$s.Name}}</span>{{else}}<span>no {{$.Kind}} traffic in this range</span>{{end}}</div>
 </div>
 </div>
 </details>
 {{else}}<p class="mut">No fleet yet.</p>{{end}}
-{{if .Deleted}}<p class="mut">deleted fleets: {{bytes .Deleted}} this month</p>{{end}}
+{{if or .Deleted .DeletedShared}}<p class="mut">deleted fleets: {{bytes .Deleted}} relayed &middot; {{bytes .DeletedShared}} shared this month</p>{{end}}
 <script>
 // First, so nothing below can stop the reload.
 setInterval(function(){ if (!document.hidden) location.reload() }, 15000)

@@ -252,7 +252,7 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 	for _, f := range all {
 		known[f.ID] = true
 	}
-	var monthTotal, deleted int64
+	var monthTotal, deleted, deletedShared int64
 	var upNow float64
 	fleetMonth, nodeMonth := map[string]int64{}, map[[2]string]int64{}
 	for _, t := range totals {
@@ -267,6 +267,9 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 	fleetShared, nodeShared := map[string]int64{}, map[[2]string]int64{}
 	for _, t := range sharedTotals {
 		sharedTotal += t.Rx
+		if !known[t.FleetID] {
+			deletedShared += t.Rx
+		}
 		fleetShared[t.FleetID] += t.Rx
 		nodeShared[[2]string{t.FleetID, t.NodeID}] += t.Rx
 	}
@@ -342,7 +345,7 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 	if err := page.Execute(w, map[string]any{
 		"Fleets": views, "Nodes": nodes, "DeviceCount": deviceCount, "Online": online, "Now": now,
 		"MaxFleets": h.cfg.MaxFleets, "NodesPerFleet": h.cfg.NodesPerFleet, "CSRF": h.csrf,
-		"Month": monthTotal, "SharedMonth": sharedTotal, "Kind": kind, "UpNow": upNow, "Live": live.OK, "Deleted": deleted,
+		"Month": monthTotal, "SharedMonth": sharedTotal, "Kind": kind, "UpNow": upNow, "Live": live.OK, "Deleted": deleted, "DeletedShared": deletedShared,
 		"Reference": h.cfg.MonthlyReference, "Range": rangeKey,
 	}); err != nil {
 		log.Printf("admin: render: %v", err)
