@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -33,7 +34,7 @@ func ConfigFromEnv() (Config, error) {
 		FrontHTTP:    getenv("FRONT_HTTP", "front:80"),
 		EnrolmentURL: getenv("ENROLMENT_URL", "http://enrolment:8081"),
 		RelayHost:    os.Getenv("RELAY_HOST"),
-		ShareDomain:  os.Getenv("SHARE_DOMAIN"),
+		ShareDomain:  strings.ToLower(os.Getenv("SHARE_DOMAIN")),
 	}
 	if c.RelayHost == "" || c.ShareDomain == "" {
 		return Config{}, errors.New("RELAY_HOST and SHARE_DOMAIN are required")

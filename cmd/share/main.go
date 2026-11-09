@@ -63,14 +63,24 @@ func run() error {
 
 // accept serves l until it is closed.
 func accept(l net.Listener, wg *sync.WaitGroup, handle func(net.Conn)) {
+	var delay time.Duration
 	for {
 		c, err := l.Accept()
 		if err != nil {
-			if !errors.Is(err, net.ErrClosed) {
-				log.Printf("accept: %v", err)
+			if errors.Is(err, net.ErrClosed) {
+				return
 			}
-			return
+			// EMFILE, ECONNABORTED...: back off and keep serving, like net/http.Server.Serve.
+			if delay == 0 {
+				delay = 50 * time.Millisecond
+			} else if delay *= 2; delay > time.Second {
+				delay = time.Second
+			}
+			log.Printf("accept: %v; retrying in %v", err, delay)
+			time.Sleep(delay)
+			continue
 		}
+		delay = 0
 		wg.Add(1)
 		go func() { defer wg.Done(); defer c.Close(); handle(c) }()
 	}
@@ -86,7 +96,7 @@ func handleTLS(cfg Config, c net.Conn) {
 	case front: // non-TLS bytes (err == ErrNotTLS) go to front as well
 		toFront(replay, cfg.FrontTLS)
 	case box != "":
-		log.Printf("share: no tunnel for %s", box) // tunnels come with the tunnel listener
+		log.Printf("share: no tunnel for %q", box) // tunnels come with the tunnel listener
 	}
 }
 
