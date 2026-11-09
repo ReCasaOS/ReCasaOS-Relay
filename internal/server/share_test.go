@@ -272,6 +272,8 @@ func TestShareRoutesAre503WithoutDomain(t *testing.T) {
 	for _, c := range [][2]string{{"PUT", "/v1/share/name"}, {"DELETE", "/v1/share/name"}, {"GET", "/v1/share"}, {"PUT", "/v1/share/acme"}, {"DELETE", "/v1/share/acme"}} {
 		wantStatus(t, e.as(b, c[0], c[1], `{}`), 503, `{"error":"sharing not enabled"}`)
 	}
+	wantStatus(t, e.internal("GET", "/internal/share/boxes/"+b.key, "", nil), 404, "")
+	wantStatus(t, e.internal("POST", "/internal/share/usage", `[]`, nil), 404, "")
 }
 
 func TestRemoveNodeDropsItsBoxKey(t *testing.T) {
@@ -287,4 +289,22 @@ func TestRemoveNodeDropsItsBoxKey(t *testing.T) {
 		t.Fatalf("other box lost its key: %v", err)
 	}
 	wantStatus(t, e.as(a, "GET", "/v1/share", ""), 403, `{"error":"box key not linked"}`)
+}
+
+func TestDeleteFleetDropsBoxKeysAndQuarantinesNames(t *testing.T) {
+	e := setupShare(t, nil)
+	a := e.linked(t, "box-a")
+	wantStatus(t, e.as(a, "PUT", "/v1/share/name", `{"name":"abc"}`), 201, "")
+	wantStatus(t, e.deleteFleet(e.secret), 204, "")
+	if _, err := e.st.BoxByKey(t.Context(), a.key); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("box key survives its fleet: %v", err)
+	}
+	// the row cascade released the name into quarantine: another fleet's node cannot take it
+	addFleet(t, e.st, "fleet0002")
+	if err := e.st.SetBoxKey(t.Context(), "fleet0002", "77", "otherkey", now0); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.ClaimName(t.Context(), "77", "abc", now0); !errors.Is(err, store.ErrQuarantined) {
+		t.Fatalf("ClaimName = %v, want ErrQuarantined", err)
+	}
 }

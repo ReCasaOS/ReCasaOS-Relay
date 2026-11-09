@@ -100,9 +100,11 @@ func New(cfg Config, deps Deps) http.Handler {
 		mux.HandleFunc("GET /v1/share", cfg.shareEnabled(sh.status))
 		mux.HandleFunc("PUT /v1/share/acme", cfg.shareEnabled(sh.putACME))
 		mux.HandleFunc("DELETE /v1/share/acme", cfg.shareEnabled(sh.deleteACME))
-		in := &internalHandler{deps: deps, beats: beats}
-		mux.Handle("GET /internal/share/boxes/{key}", internalOnly(cfg.TrustedProxyHeader, in.boxByKey))
-		mux.Handle("POST /internal/share/usage", internalOnly(cfg.TrustedProxyHeader, in.usage))
+		if cfg.ShareDomain != "" { // like the /v1/share routes, absent (404) while sharing is off
+			in := &internalHandler{deps: deps, beats: beats}
+			mux.Handle("GET /internal/share/boxes/{key}", internalOnly(cfg.TrustedProxyHeader, in.boxByKey))
+			mux.Handle("POST /internal/share/usage", internalOnly(cfg.TrustedProxyHeader, in.usage))
+		}
 		login := &loginHandler{cfg: cfg, deps: deps,
 			limiter:   ratelimit.New(cfg.LoginRatePerHour, deps.Now),
 			limiter48: ratelimit.New(prefix48Factor*cfg.LoginRatePerHour, deps.Now),
