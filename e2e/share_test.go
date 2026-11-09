@@ -64,7 +64,7 @@ func (r *rig) visitTLS(host string, cfg *tls.Config) (string, int, error) {
 }
 
 // txt asks the zone (enrolment's DNS on loopback) for the TXT records of name.
-func (r *rig) txt(name string) []string {
+func (r *rig) txt(name string) ([]string, dnsmessage.RCode) {
 	r.t.Helper()
 	addr := r.mustCompose("port", "--protocol", "udp", "enrolment", "53")
 	q := dnsmessage.Message{Header: dnsmessage.Header{ID: 7}, Questions: []dnsmessage.Question{{
@@ -92,7 +92,15 @@ func (r *rig) txt(name string) []string {
 			out = append(out, strings.Join(t.TXT, ""))
 		}
 	}
-	return out
+	return out, m.Header.RCode
+}
+
+// mustNoTXT fails unless the zone answers NOERROR with an empty answer section (not SERVFAIL, not a timeout).
+func (r *rig) mustNoTXT(name string) {
+	r.t.Helper()
+	if got, rc := r.txt(name); rc != dnsmessage.RCodeSuccess || len(got) != 0 {
+		r.t.Fatalf("%s TXT = %v, rcode %v; want NOERROR and no answer", name, got, rc)
+	}
 }
 
 func TestShareRoutesBySNIAndIsolates(t *testing.T) {
@@ -135,14 +143,12 @@ func TestShareRoutesBySNIAndIsolates(t *testing.T) {
 		t.Fatalf("boxb acme: %d %s", code, out)
 	}
 	eventually(t, "boxb TXT published", 10*time.Second, func() error {
-		if got := r.txt("_acme-challenge.boxb.box.relay.test"); len(got) != 1 || got[0] != "token-of-b" {
-			return fmt.Errorf("boxb TXT = %v", got)
+		if got, rc := r.txt("_acme-challenge.boxb.box.relay.test"); rc != dnsmessage.RCodeSuccess || len(got) != 1 || got[0] != "token-of-b" {
+			return fmt.Errorf("boxb TXT = %v, rcode %v", got, rc)
 		}
 		return nil
 	})
-	if got := r.txt("_acme-challenge.boxa.box.relay.test"); len(got) != 0 {
-		t.Fatalf("boxa TXT = %v, want none", got)
-	}
+	r.mustNoTXT("_acme-challenge.boxa.box.relay.test")
 
 	// The internal API is not reachable through the public front.
 	tr := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
@@ -180,7 +186,5 @@ func TestShareCertificateViaDNS01(t *testing.T) {
 	if err != nil || body != "hello from boxa" {
 		t.Fatalf("visit with the ACME certificate: %q, %v", body, err)
 	}
-	if got := r.txt("_acme-challenge.boxa.box.relay.test"); len(got) != 0 {
-		t.Fatalf("TXT after DELETE = %v, want none", got)
-	}
+	r.mustNoTXT("_acme-challenge.boxa.box.relay.test")
 }

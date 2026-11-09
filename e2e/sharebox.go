@@ -218,14 +218,11 @@ func (b *fakeBox) obtainCert(ctx context.Context, directoryURL string) error {
 		return fmt.Errorf("finalize: %w", err)
 	}
 	b.cur.Store(&tls.Certificate{Certificate: chain, PrivateKey: key})
-	if code, out := b.signed("DELETE", "/v1/share/acme", ""); code != http.StatusNoContent {
-		return fmt.Errorf("delete acme: %d %s", code, out)
-	}
 	return nil
 }
 
 // solveDNS01 publishes the DNS-01 record of one authorization through the relay and waits for validation.
-func (b *fakeBox) solveDNS01(ctx context.Context, cl *acme.Client, authzURL string) error {
+func (b *fakeBox) solveDNS01(ctx context.Context, cl *acme.Client, authzURL string) (err error) {
 	az, err := cl.GetAuthorization(ctx, authzURL)
 	if err != nil {
 		return fmt.Errorf("authorization: %w", err)
@@ -246,6 +243,11 @@ func (b *fakeBox) solveDNS01(ctx context.Context, cl *acme.Client, authzURL stri
 	if code, out := b.signed("PUT", "/v1/share/acme", fmt.Sprintf(`{"value":%q}`, val)); code != http.StatusNoContent {
 		return fmt.Errorf("put acme: %d %s", code, out)
 	}
+	defer func() { // the TXT must not outlive the attempt, whatever happens
+		if code, out := b.signed("DELETE", "/v1/share/acme", ""); code != http.StatusNoContent && err == nil {
+			err = fmt.Errorf("delete acme: %d %s", code, out)
+		}
+	}()
 	if _, err := cl.Accept(ctx, chal); err != nil {
 		return fmt.Errorf("accept: %w", err)
 	}
