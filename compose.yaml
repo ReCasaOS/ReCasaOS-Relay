@@ -88,6 +88,34 @@ services:
       - "8081"
     stop_grace_period: 40s # in-flight create-fleet calls may take up to 30 s
 
+  # Optional (docker compose --profile share): reads the TLS server name on 80/443 and forwards to `front`
+  # (or, for shared boxes, into their tunnel). In production its ports are 80/443 and the `front` ports move
+  # here (the docs override does that); never publish them from both.
+  share:
+    build:
+      context: .
+      args:
+        CMD: share
+    profiles: ["share"]
+    restart: unless-stopped
+    depends_on:
+      - front
+      - enrolment
+    environment:
+      LISTEN_TLS: ":443"
+      LISTEN_HTTP: ":80"
+      LISTEN_TUNNEL: ":8082"
+      FRONT_TLS: front:443
+      FRONT_HTTP: front:80
+      ENROLMENT_URL: http://enrolment:8081
+      RELAY_HOST: ${RELAY_HOST:-}
+      SHARE_DOMAIN: ${SHARE_DOMAIN:-}
+      PEEK_TIMEOUT: ${PEEK_TIMEOUT:-5s}
+    # ports:
+    #   - "80:80"
+    #   - "443:443"
+    stop_grace_period: 40s
+
 volumes:
   headscale-data:
   enrolment-data:

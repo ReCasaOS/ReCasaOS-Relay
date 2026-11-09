@@ -43,3 +43,28 @@ services:
       default:
         aliases:
           - relay.test
+
+  # Always on in the test network: the tunnel and sharing tests go through it.
+  share:
+    build:
+      context: .
+      args:
+        CMD: share
+    profiles: !reset []
+    depends_on:
+      - front
+      - enrolment
+      - tlsfront
+    environment:
+      RELAY_HOST: relay.test
+      SHARE_DOMAIN: box.relay.test
+      FRONT_TLS: tlsfront:443
+      FRONT_HTTP: tlsfront:80
+    ports:
+      - "127.0.0.1::443"
+      - "127.0.0.1::80"
+      - "127.0.0.1::8082"
+    networks:
+      default:
+        aliases:
+          - share.relay.test
