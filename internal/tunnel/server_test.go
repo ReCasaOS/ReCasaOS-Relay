@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/proxyproto"
+	"github.com/ReCasaOS/recasaos-relay/internal/ratelimit"
 	"github.com/hashicorp/yamux"
 )
 
@@ -66,7 +67,7 @@ func newBox(t *testing.T, f *fakeEnrolment, name string) ed25519.PrivateKey {
 func newRelay(t *testing.T) (*Registry, *fakeEnrolment, string) {
 	t.Helper()
 	reg, f := NewRegistry(), &fakeEnrolment{boxes: map[string]Box{}}
-	srv := httptest.NewServer(Handler(reg, f.resolve, time.Now))
+	srv := httptest.NewServer(Handler(reg, f.resolve, ratelimit.New(1000, time.Now), time.Now))
 	t.Cleanup(srv.Close)
 	return reg, f, srv.URL
 }
@@ -330,5 +331,69 @@ func TestOpenHonoursContext(t *testing.T) {
 	}
 	if sess.IsClosed() {
 		t.Fatal("an open timeout closed the session")
+	}
+}
+
+// The limit runs before the signature check (an unsigned flood is counted), per X-Client-IP when
+// front sets it, else per TCP peer.
+func TestTunnelRateLimited(t *testing.T) {
+	srv := httptest.NewServer(Handler(NewRegistry(), (&fakeEnrolment{boxes: map[string]Box{}}).resolve, ratelimit.New(2, time.Now), time.Now))
+	defer srv.Close()
+	get := func(clientIP string) *http.Response {
+		req, _ := http.NewRequest("GET", srv.URL+Path, nil)
+		if clientIP != "" {
+			req.Header.Set("X-Client-IP", clientIP)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp
+	}
+	for _, ip := range []string{"203.0.113.1", "203.0.113.1"} {
+		if r := get(ip); r.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("status %d, want 401", r.StatusCode)
+		}
+	}
+	r := get("203.0.113.1")
+	if ra, err := strconv.Atoi(r.Header.Get("Retry-After")); r.StatusCode != http.StatusTooManyRequests || err != nil || ra < 1 {
+		t.Fatalf("3rd = %d Retry-After %q, want 429", r.StatusCode, r.Header.Get("Retry-After"))
+	}
+	if r := get("203.0.113.2"); r.StatusCode != http.StatusUnauthorized { // another client
+		t.Fatalf("other client = %d, want 401", r.StatusCode)
+	}
+	for i := 0; i < 2; i++ { // no header: the TCP peer
+		get("")
+	}
+	if r := get(""); r.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("peer = %d, want 429", r.StatusCode)
+	}
+}
+
+// The relay opens every stream; a box that opens one loses its tunnel instead of making the relay buffer it.
+func TestBoxOpenedStreamsAreRefused(t *testing.T) {
+	reg, f, url := newRelay(t)
+	box := dial(t, url, newBox(t, f, "alpha"), DialOptions{})
+	waitTunnel(t, reg, "alpha", nil)
+	s, err := box.sess.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.Write([]byte("x"))
+	s.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, err = io.ReadAll(s)
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		t.Fatalf("box-opened stream still open: %v", err)
+	}
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		if _, ok := reg.Get("alpha"); !ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("tunnel still registered")
+		}
 	}
 }

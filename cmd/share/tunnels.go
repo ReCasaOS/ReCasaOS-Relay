@@ -148,30 +148,47 @@ func (u *usage) tick(ctx context.Context) {
 		s.FleetID, s.NodeID, s.RX, s.TX = t.FleetID, t.NodeID, s.RX+rx, s.TX+tx
 		u.pending[k] = s
 	}
-	if len(u.pending) == 0 {
-		return
-	}
 	body := make([]sample, 0, len(u.pending))
 	for _, s := range u.pending {
 		body = append(body, s)
 	}
-	b, _ := json.Marshal(body)
+	for len(body) > 0 {
+		chunk := body[:min(len(body), postChunk)]
+		body = body[len(chunk):]
+		switch code := u.post(ctx, chunk); code {
+		case http.StatusNoContent:
+		case http.StatusRequestEntityTooLarge: // never accepted: retrying would block every later post
+			log.Printf("share: usage: HTTP 413, dropping %d samples", len(chunk))
+		default:
+			return // the rest stays pending for the next tick
+		}
+		for _, s := range chunk {
+			delete(u.pending, [2]string{s.FleetID, s.NodeID})
+		}
+	}
+}
+
+// postChunk samples per post: about 100 bytes each, well under enrolment's 64 KiB body cap.
+const postChunk = 400
+
+// post sends samples and returns the HTTP status, 0 when there was none.
+func (u *usage) post(ctx context.Context, samples []sample) int {
+	b, _ := json.Marshal(samples)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.url, bytes.NewReader(b))
 	if err != nil {
-		return
+		return 0
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := do(req)
 	if err != nil {
 		log.Printf("share: usage: %v", err)
-		return
+		return 0
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		log.Printf("share: usage: HTTP %d", resp.StatusCode)
-		return
 	}
-	clear(u.pending)
+	return resp.StatusCode
 }
 
 // every runs f every d until ctx ends.

@@ -118,6 +118,7 @@ services:
       SHARE_DOMAIN: ${SHARE_DOMAIN:-}
       PEEK_TIMEOUT: ${PEEK_TIMEOUT:-5s}
       FRONT_PROXY_PROTOCOL: ${FRONT_PROXY_PROTOCOL:-true}
+      TUNNEL_RATE_PER_HOUR: ${TUNNEL_RATE_PER_HOUR:-60}
     # ports:
     #   - "80:80"
     #   - "443:443"

@@ -40,6 +40,14 @@ relay.test {
 		}
 	}
 
+	# Box tunnels, likewise: share rate-limits them per client IP.
+	@tunnel path /v1/share/tunnel
+	handle @tunnel {
+		reverse_proxy share:8082 {
+			header_up X-Client-IP {client_ip}
+		}
+	}
+
 	handle {
 		reverse_proxy front:8080
 	}

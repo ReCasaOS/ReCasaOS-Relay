@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -46,6 +47,10 @@ var (
 
 // sweepEvery bounds how often seen is scanned, keeping verification amortised O(1).
 const sweepEvery = time.Second
+
+// maxSeen caps seen so a flood of fresh signatures (keys are free to mint) cannot grow it without
+// bound; when full, the tenth of entries closest to expiry is dropped. A var for tests.
+var maxSeen = 100_000
 
 func resetSeen() {
 	mu.Lock()
@@ -109,8 +114,27 @@ func verifyBox(r *http.Request, now time.Time) (ed25519.PublicKey, error) {
 	if _, dup := seen[string(sig)]; dup {
 		return nil, errReplay
 	}
+	if len(seen) >= maxSeen {
+		dropOldest()
+	}
 	seen[string(sig)] = boxTime.Add(skew)
 	return ed25519.PublicKey(pub), nil
+}
+
+// dropOldest deletes the tenth (at least one) of seen closest to expiry: those signatures are the
+// nearest to failing the time check anyway. O(n log n) once per maxSeen/10 insertions. mu is held.
+func dropOldest() {
+	exps := make([]time.Time, 0, len(seen))
+	for _, exp := range seen {
+		exps = append(exps, exp)
+	}
+	slices.SortFunc(exps, time.Time.Compare)
+	cut := exps[len(exps)/10]
+	for k, exp := range seen {
+		if !exp.After(cut) {
+			delete(seen, k)
+		}
+	}
 }
 
 // NewSecret returns a random fleet secret and its sha256 hex hash (the only form stored).

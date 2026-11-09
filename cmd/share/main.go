@@ -19,6 +19,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/proxyproto"
+	"github.com/ReCasaOS/recasaos-relay/internal/ratelimit"
 	"github.com/ReCasaOS/recasaos-relay/internal/sni"
 	"github.com/ReCasaOS/recasaos-relay/internal/tunnel"
 )
@@ -54,7 +55,7 @@ func run() error {
 
 	reg, resolve := tunnel.NewRegistry(), resolver(cfg.EnrolmentURL)
 	mux := http.NewServeMux()
-	mux.Handle("GET "+tunnel.Path, tunnel.Handler(reg, resolve, time.Now))
+	mux.Handle("GET "+tunnel.Path, tunnel.Handler(reg, resolve, ratelimit.New(cfg.TunnelRatePerHour, time.Now), time.Now))
 	tunSrv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	tunErr := make(chan error, 1)
 	go func() {

@@ -7,10 +7,14 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/netip"
+	"strconv"
 	"time"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/auth"
+	"github.com/ReCasaOS/recasaos-relay/internal/ratelimit"
 	"github.com/coder/websocket"
 	"github.com/hashicorp/yamux"
 )
@@ -34,11 +38,18 @@ func yamuxConfig() *yamux.Config {
 	return c
 }
 
-// Handler serves GET Path: it verifies the box signature, resolves the key, upgrades to a WebSocket and
-// registers the tunnel until the box goes away. Failures before the upgrade are plain HTTP statuses
-// (401, 403, 503): the contract's 4401/4403 close codes only exist once the WebSocket is up.
-func Handler(reg *Registry, resolve Resolver, now func() time.Time) http.Handler {
+// Handler serves GET Path: it rate-limits the client, verifies the box signature, resolves the key,
+// upgrades to a WebSocket and registers the tunnel until the box goes away. Failures before the
+// upgrade are plain HTTP statuses (401, 403, 429, 503): the contract's 4401/4403 close codes only
+// exist once the WebSocket is up. limit counts every request before the signature check (keys are
+// free to mint), keyed by clientKey.
+func Handler(reg *Registry, resolve Resolver, limit *ratelimit.Limiter, now func() time.Time) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ok, retry := limit.Allow(clientKey(r)); !ok {
+			w.Header().Set("Retry-After", strconv.Itoa(max(int((retry+time.Second-1)/time.Second), 1)))
+			httpError(w, http.StatusTooManyRequests, "rate limit exceeded")
+			return
+		}
 		pub, err := auth.VerifyBox(r, now())
 		if err != nil {
 			httpError(w, http.StatusUnauthorized, "unauthorized")
@@ -66,6 +77,15 @@ func Handler(reg *Registry, resolve Resolver, now func() time.Time) http.Handler
 			ws.CloseNow()
 			return
 		}
+		// Only the relay opens streams. A box that opens one breaks the protocol: end the tunnel. (Closing
+		// just the stream is not enough: yamux still buffers a 256 KiB window into a half-closed stream
+		// for StreamCloseTimeout, and an accept loop lifts the AcceptBacklog cap on their number.)
+		go func() {
+			if _, err := sess.Accept(); err == nil {
+				log.Printf("tunnel: %q opened a stream: closing it", box.Name)
+				sess.Close()
+			}
+		}()
 		t := newTunnel(box, key, ws, sess)
 		if old := reg.Put(box.Name, t); old != nil {
 			old.Close(StatusReplaced, "replaced")
@@ -77,6 +97,24 @@ func Handler(reg *Registry, resolve Resolver, now func() time.Time) http.Handler
 		ws.CloseNow()
 		log.Printf("tunnel: %q down", box.Name)
 	})
+}
+
+// clientKey is the visitor's address: X-Client-IP, which front sets (header_up replaces a client's
+// value), else the TCP peer; an IPv6 address counts as its /64, as the enrolment limits do.
+func clientKey(r *http.Request) string {
+	s := r.Header.Get("X-Client-IP")
+	if s == "" {
+		s, _, _ = net.SplitHostPort(r.RemoteAddr)
+	}
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return "unknown"
+	}
+	if a = a.Unmap().WithZone(""); a.Is6() {
+		p, _ := a.Prefix(64)
+		return p.String()
+	}
+	return a.String()
 }
 
 func httpError(w http.ResponseWriter, code int, msg string) {

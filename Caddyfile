@@ -25,7 +25,10 @@
 	# Caddy sorts path-matched handle blocks most specific first, so this wins over @enrolment's /v1/*.
 	@tunnel path /v1/share/tunnel
 	handle @tunnel {
-		reverse_proxy share:8082
+		reverse_proxy share:8082 {
+			# share rate-limits tunnel dials per client IP, before checking the signature.
+			header_up X-Client-IP {client_ip}
+		}
 	}
 
 	# /admin is the operator page: the service answers 404 unless ADMIN_TOKEN is set.

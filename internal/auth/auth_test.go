@@ -381,3 +381,27 @@ func TestReplayIsPerSignatureNotPerPath(t *testing.T) {
 		t.Fatalf("same request twice: err = %v, want ErrUnauthorized wrapping errReplay", err)
 	}
 }
+
+// A flood of fresh signatures cannot grow seen past maxSeen; the newest entries stay.
+func TestSeenIsBounded(t *testing.T) {
+	resetSeen()
+	defer func(n int) { maxSeen = n }(maxSeen)
+	maxSeen = 20
+	pub, priv := keys(t)
+	var last *http.Request
+	for i := 59; i >= 0; i-- { // oldest box time first
+		last = signed(t, pub, priv, t0.Add(-time.Duration(i)*time.Second))
+		if _, err := VerifyBox(last, t0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mu.Lock()
+	n := len(seen)
+	mu.Unlock()
+	if n > 20 {
+		t.Fatalf("seen has %d entries, cap 20", n)
+	}
+	if _, err := VerifyBox(last, t0); !errors.Is(err, errReplay) {
+		t.Fatalf("newest signature replayed: %v", err)
+	}
+}

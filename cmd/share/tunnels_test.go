@@ -10,12 +10,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/proxyproto"
+	"github.com/ReCasaOS/recasaos-relay/internal/ratelimit"
 	"github.com/ReCasaOS/recasaos-relay/internal/tunnel"
 )
 
@@ -25,6 +27,7 @@ type fakeEnrolment struct {
 	key       string
 	mu        sync.Mutex
 	failUsage bool
+	tooLarge  bool // answer usage posts 413
 	posts     [][]sample
 }
 
@@ -39,6 +42,10 @@ func (f *fakeEnrolment) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer f.mu.Unlock()
 		if f.failUsage {
 			http.Error(w, "down", http.StatusBadGateway)
+			return
+		}
+		if f.tooLarge {
+			http.Error(w, "too large", http.StatusRequestEntityTooLarge)
 			return
 		}
 		var s []sample
@@ -57,7 +64,7 @@ func rig(t *testing.T) (*fakeEnrolment, string, *tunnel.Registry, *tunnel.Sessio
 	enr := httptest.NewServer(f)
 	t.Cleanup(enr.Close)
 	reg := tunnel.NewRegistry()
-	relay := httptest.NewServer(tunnel.Handler(reg, resolver(enr.URL), time.Now))
+	relay := httptest.NewServer(tunnel.Handler(reg, resolver(enr.URL), ratelimit.New(1000, time.Now), time.Now))
 	t.Cleanup(relay.Close)
 	box, err := tunnel.Dial(context.Background(), relay.URL, priv, tunnel.DialOptions{})
 	if err != nil {
@@ -170,6 +177,34 @@ func TestUsageKeepsBytesUntilPosted(t *testing.T) {
 	want := [][]sample{{{FleetID: "f1", NodeID: "7"}}, {{FleetID: "f1", NodeID: "7", TX: 5}}}
 	if len(f.posts) != 2 || f.posts[0][0] != want[0][0] || len(f.posts[1]) != 1 || f.posts[1][0] != want[1][0] {
 		t.Fatalf("posts = %+v, want %+v", f.posts, want)
+	}
+}
+
+// enrolment caps the usage body at 64 KiB: a large backlog goes in chunks, and a refused chunk is
+// dropped instead of failing every later post.
+func TestUsagePostsAreChunked(t *testing.T) {
+	f, enrURL, reg, _ := rig(t)
+	u := newUsage(reg, enrURL)
+	for i := range 999 { // plus alpha's heartbeat: 1 000
+		k := [2]string{"f1", strconv.Itoa(1000 + i)}
+		u.pending[k] = sample{FleetID: k[0], NodeID: k[1], RX: 1}
+	}
+	u.tick(context.Background())
+	f.mu.Lock()
+	n := 0
+	for _, p := range f.posts {
+		n += len(p)
+	}
+	if len(f.posts) != 3 || n != 1000 || len(u.pending) != 0 {
+		f.mu.Unlock()
+		t.Fatalf("%d posts, %d samples, %d pending; want 3, 1000, 0", len(f.posts), n, len(u.pending))
+	}
+	f.tooLarge = true
+	f.mu.Unlock()
+	u.pending[[2]string{"f1", "9"}] = sample{FleetID: "f1", NodeID: "9", RX: 1}
+	u.tick(context.Background())
+	if len(u.pending) != 0 {
+		t.Fatalf("a refused chunk stayed pending: %+v", u.pending)
 	}
 }
 
