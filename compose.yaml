@@ -86,6 +86,8 @@ services:
     # Reached only through `front` (Caddyfile): never publish this port, the rate limiter trusts X-Client-IP.
     expose:
       - "8081"
+    # With SHARE_DOMAIN set it also serves the delegated DNS zone on 53 (UDP and TCP; SHARE_PUBLIC_IP required).
+    # Port 53 is published only by the `compose.share.yaml` override of the docs, on the public IP explicitly.
     stop_grace_period: 40s # in-flight create-fleet calls may take up to 30 s
 
   # Optional (docker compose --profile share): reads the TLS server name on 80/443 and forwards to `front`

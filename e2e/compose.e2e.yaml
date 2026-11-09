@@ -28,10 +28,17 @@ services:
 
   enrolment:
     environment:
+      SHARE_DOMAIN: box.relay.test
+      SHARE_PUBLIC_IP: 172.29.0.10 # `share`, below
       LOGIN_SERVER: https://relay.test
       ADMIN_TOKEN: e2e-admin-token-0123456789abcdef
       AUTH_RATE_PER_HOUR: "1000"
       KEY_RATE_PER_HOUR: "100"
+
+    # The test reads the zone through these (random loopback ports, nothing on 53 of the host).
+    ports:
+      - "127.0.0.1::53/udp"
+      - "127.0.0.1::53/tcp"
 
   tlsfront:
     image: caddy:2.10.0-alpine
@@ -62,6 +69,13 @@ services:
       - "127.0.0.1::8082"
     networks:
       default:
+        ipv4_address: 172.29.0.10 # SHARE_PUBLIC_IP of enrolment: the zone answers with it
         aliases:
           - share.relay.test
           - relay.test # the tailscale containers reach the relay through share
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24
