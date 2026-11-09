@@ -99,8 +99,8 @@ func run() error {
 	var zone *dnszone.Zone
 	var dnsPC net.PacketConn
 	var dnsL net.Listener
-	if dom := os.Getenv("SHARE_DOMAIN"); dom != "" {
-		zone, dnsPC, dnsL, err = listenZone(dom, st)
+	if cfg.ShareDomain != "" { // validated by ConfigFromEnv
+		zone, dnsPC, dnsL, err = listenZone(cfg.ShareDomain, st)
 		if err != nil {
 			return err
 		}
@@ -197,6 +197,10 @@ func listenZone(domain string, st store.Store) (*dnszone.Zone, net.PacketConn, n
 			return nil, nil, nil, fmt.Errorf("SHARE_PUBLIC_IP6: %q is not an IPv6 address", v)
 		}
 	}
+	psl := strings.TrimSpace(os.Getenv("SHARE_PSL_TXT"))
+	if len(psl) > 255 { // one TXT character-string
+		return nil, nil, nil, fmt.Errorf("SHARE_PSL_TXT: %d bytes, at most 255", len(psl))
+	}
 	addr := getenv("LISTEN_DNS", ":53")
 	pc, err := net.ListenPacket("udp", addr)
 	if err != nil {
@@ -207,7 +211,7 @@ func listenZone(domain string, st store.Store) (*dnszone.Zone, net.PacketConn, n
 		pc.Close()
 		return nil, nil, nil, err
 	}
-	z := &dnszone.Zone{Origin: strings.ToLower(strings.TrimSpace(domain)), A: ip4, AAAA: ip6, PSLTXT: strings.TrimSpace(os.Getenv("SHARE_PSL_TXT")),
+	z := &dnszone.Zone{Origin: strings.ToLower(strings.TrimSpace(domain)), A: ip4, AAAA: ip6, PSLTXT: psl,
 		TXT: func(ctx context.Context, n string) (string, bool, error) { return st.ACMEValue(ctx, n, time.Now()) }}
 	return z, pc, l, nil
 }

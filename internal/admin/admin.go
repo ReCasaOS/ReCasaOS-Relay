@@ -413,11 +413,14 @@ func (h *handler) removeNode(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "upstream error, retry", http.StatusBadGateway)
 				return
 			}
-			// A box has no row: DeleteDevice is a no-op for it.
-			if err := h.deps.Store.DeleteDevice(ctx, n.ID); err != nil {
-				log.Printf("admin: fleet %s: delete device row %s: %v", f.ID, n.ID, err)
-				http.Error(w, "store error", http.StatusInternalServerError)
-				return
+			// A box has no device row and a device no box key: each delete is a no-op for the other.
+			// Dropping the key now (its name cascades to quarantine) closes the tunnel at the next revalidation.
+			for _, del := range []func(context.Context, string) error{h.deps.Store.DeleteDevice, h.deps.Store.DeleteBoxKey} {
+				if err := del(ctx, n.ID); err != nil {
+					log.Printf("admin: fleet %s: delete store rows of %s: %v", f.ID, n.ID, err)
+					http.Error(w, "store error", http.StatusInternalServerError)
+					return
+				}
 			}
 			log.Printf("admin: fleet %s: node %s removed", f.ID, n.Hostname)
 		}

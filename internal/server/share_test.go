@@ -32,7 +32,6 @@ func setupShare(t *testing.T, mutate func(*Config)) *shareEnv {
 	t.Helper()
 	return &shareEnv{delEnv: setupDel(t, func(c *Config) {
 		c.ShareDomain = "share.example"
-		c.ShareQuarantine = 24 * time.Hour
 		c.ShareACMETTL = 10 * time.Minute
 		c.ShareACMERatePerHour = 20
 		c.TrustedProxyHeader = "X-Client-IP"
@@ -130,20 +129,32 @@ func TestBoxKeyRouteNeedsSecretAndNodeInFleet(t *testing.T) {
 	if err != nil || ref.NodeID != b.node || ref.FleetID != e.id || ref.Name != "" {
 		t.Fatalf("BoxByKey = %+v, %v", ref, err)
 	}
-	// upsert by node: a new key replaces the old one
-	b2 := e.newBox(t, "box-b")
-	wantStatus(t, put(e.secret, b.node, b2.key), 204, "")
-	if _, err := e.st.BoxByKey(t.Context(), b.key); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("old key still linked: %v", err)
-	}
+	wantStatus(t, put(e.secret, b.node, b.key), 204, "") // the same key again: no-op
 	// a key already linked to another node
-	wantStatus(t, put(e.secret, b2.node, b2.key), 409, `{"error":"box key already linked"}`)
+	b2 := e.newBox(t, "box-b")
+	wantStatus(t, put(e.secret, b2.node, b.key), 409, `{"error":"box key already linked"}`)
 	big := httptest.NewRequest(http.MethodPut, "/v1/fleets/"+e.id+"/nodes/"+b.node+"/box-key", strings.NewReader(`{"box_key":"`+strings.Repeat("a", 2000)+`"}`))
 	big.RemoteAddr = ip1
 	big.Header.Set("Authorization", "Bearer "+e.secret)
 	rec = httptest.NewRecorder()
 	e.h.ServeHTTP(rec, big)
 	wantStatus(t, rec, 413, "")
+}
+
+// A fleet-secret holder cannot swap a keyed node's key and so take over its name.
+func TestBoxKeyRouteRefusesRekey(t *testing.T) {
+	e := setupShare(t, nil)
+	a := e.linked(t, "box-a")
+	wantStatus(t, e.as(a, "PUT", "/v1/share/name", `{"name":"acme1"}`), 201, "")
+	other := e.newBox(t, "box-b")
+	other.node = a.node
+	wantStatus(t, e.link(other), 409, `{"error":"box key already linked"}`)
+	if ref, err := e.st.BoxByKey(t.Context(), a.key); err != nil || ref.NodeID != a.node || ref.Name != "acme1" {
+		t.Fatalf("BoxByKey(A) = %+v, %v", ref, err)
+	}
+	if _, err := e.st.BoxByKey(t.Context(), other.key); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("BoxByKey(B) = %v, want ErrNotFound", err)
+	}
 }
 
 func TestClaimNameFlow(t *testing.T) {
@@ -170,7 +181,7 @@ func TestClaimNameFlow(t *testing.T) {
 	}
 	wantStatus(t, e.as(b, "PUT", "/v1/share/name", `not json`), 400, "")
 
-	// a releases abc: quarantined for ShareQuarantine
+	// a releases abc: quarantined for store.Quarantine
 	wantStatus(t, e.as(a, "DELETE", "/v1/share/name", ""), 204, "")
 	wantStatus(t, e.as(a, "DELETE", "/v1/share/name", ""), 204, "") // no name: still 204
 	wantStatus(t, e.as(b, "PUT", "/v1/share/name", `{"name":"abc"}`), 409, `{"error":"name in quarantine"}`)

@@ -20,3 +20,16 @@ func TestSharenameValid(t *testing.T) {
 		}
 	}
 }
+
+func TestValidHost(t *testing.T) {
+	for _, h := range []string{"box.recasaos.org", "relay.test", "a-b.c1", strings.Repeat("a", 63) + ".x"} {
+		if ValidHost(h) != nil {
+			t.Errorf("ValidHost(%q) refused", h)
+		}
+	}
+	for _, h := range []string{"", "Box.org", "https://box.org", "box.org.", "box .org", "box..org", "-box.org", "box-.org", "box_1.org", "box.org:443", strings.Repeat("a", 64) + ".x"} {
+		if ValidHost(h) == nil {
+			t.Errorf("ValidHost(%q) accepted", h)
+		}
+	}
+}

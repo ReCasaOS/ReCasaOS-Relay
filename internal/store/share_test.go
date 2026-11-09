@@ -25,30 +25,33 @@ func TestBoxKeyIsUniquePerNode(t *testing.T) {
 	ctx := context.Background()
 	s := openTmp(t)
 	shareBox(t, s, "f1", "n1", "k1")
-	if err := s.SetBoxKey(ctx, "f1", "n1", "k1b", t0); err != nil { // upsert by node
+	if err := s.SetBoxKey(ctx, "f1", "n1", "k1", t0); err != nil { // same key again: no-op
 		t.Fatal(err)
 	}
-	if err := s.SetBoxKey(ctx, "f1", "n2", "k1b", t0); !errors.Is(err, ErrExists) {
+	if err := s.SetBoxKey(ctx, "f1", "n1", "k1b", t0); !errors.Is(err, ErrExists) { // linked once
+		t.Fatalf("rekey = %v, want ErrExists", err)
+	}
+	if err := s.SetBoxKey(ctx, "f1", "n2", "k1", t0); !errors.Is(err, ErrExists) {
 		t.Fatalf("key on two nodes = %v, want ErrExists", err)
 	}
-	if _, err := s.BoxByKey(ctx, "k1"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("replaced key = %v, want ErrNotFound", err)
+	if _, err := s.BoxByKey(ctx, "k1b"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("refused key = %v, want ErrNotFound", err)
 	}
 	if err := s.ClaimName(ctx, "n1", "alice", t0); err != nil {
 		t.Fatal(err)
 	}
-	ref, err := s.BoxByKey(ctx, "k1b")
+	ref, err := s.BoxByKey(ctx, "k1")
 	if err != nil || ref != (BoxRef{"f1", "n1", "alice"}) {
 		t.Fatalf("BoxByKey = %+v, %v", ref, err)
 	}
 	keys, err := s.BoxKeysOf(ctx, "f1")
-	if err != nil || len(keys) != 1 || keys["n1"] != "k1b" {
+	if err != nil || len(keys) != 1 || keys["n1"] != "k1" {
 		t.Fatalf("BoxKeysOf = %v, %v", keys, err)
 	}
 	if err := s.DeleteBoxKey(ctx, "n1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.BoxByKey(ctx, "k1b"); !errors.Is(err, ErrNotFound) {
+	if _, err := s.BoxByKey(ctx, "k1"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleted key = %v", err)
 	}
 	if names, _ := s.ListNames(ctx); len(names) != 0 {
@@ -152,6 +155,83 @@ func TestBanReleasesTheHolder(t *testing.T) {
 	}
 	if b, _ := s.BannedNames(ctx); len(b) != 0 {
 		t.Fatalf("still banned: %v", b)
+	}
+}
+
+// An unban undoes a misclicked revoke: the name leaves quarantine too.
+func TestUnbanLiftsTheQuarantine(t *testing.T) {
+	ctx := context.Background()
+	s := openTmp(t)
+	shareBox(t, s, "f1", "n1", "k1")
+	shareBox(t, s, "f1", "n2", "k2")
+	now := time.Now()
+	if err := s.ClaimName(ctx, "n1", "alice", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BanName(ctx, "alice", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UnbanName(ctx, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := s.(*sqlStore).db.QueryRow(`SELECT COUNT(*) FROM share_quarantine WHERE name = 'alice'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("quarantine rows = %d, %v", n, err)
+	}
+	if err := s.ClaimName(ctx, "n1", "alice", now); err != nil {
+		t.Fatalf("previous holder after unban = %v", err)
+	}
+}
+
+// A box that stops sharing may take its own name back during the quarantine; nobody else may.
+func TestReleasingNodeReclaimsDuringQuarantine(t *testing.T) {
+	ctx := context.Background()
+	s := openTmp(t)
+	shareBox(t, s, "f1", "n1", "k1")
+	shareBox(t, s, "f1", "n2", "k2")
+	now := time.Now()
+	for _, release := range []func() error{
+		func() error { return s.ReleaseName(ctx, "n1", now.Add(Quarantine)) },
+		func() error { // the trigger path
+			_, err := s.(*sqlStore).db.Exec(`DELETE FROM share_names WHERE node_id = 'n1'`)
+			return err
+		},
+	} {
+		if err := s.ClaimName(ctx, "n1", "alice", now); err != nil {
+			t.Fatal(err)
+		}
+		if err := release(); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ClaimName(ctx, "n2", "alice", now); !errors.Is(err, ErrQuarantined) {
+			t.Fatalf("other node = %v, want ErrQuarantined", err)
+		}
+		if err := s.ClaimName(ctx, "n1", "alice", now); err != nil {
+			t.Fatalf("releasing node = %v", err)
+		}
+		if err := s.ReleaseName(ctx, "n1", now.Add(Quarantine)); err != nil { // reset for the next path
+			t.Fatal(err)
+		}
+	}
+}
+
+// The delete trigger and Quarantine agree on 125 days.
+func TestTriggerQuarantineIsTheConstant(t *testing.T) {
+	ctx := context.Background()
+	s := openTmp(t)
+	shareBox(t, s, "f1", "n1", "k1")
+	if err := s.ClaimName(ctx, "n1", "alice", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteBoxKey(ctx, "n1"); err != nil {
+		t.Fatal(err)
+	}
+	var until int64
+	if err := s.(*sqlStore).db.QueryRow(`SELECT until FROM share_quarantine WHERE name = 'alice'`).Scan(&until); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Until(time.Unix(0, until)) - Quarantine; d > time.Minute || d < -time.Minute {
+		t.Fatalf("trigger quarantine off by %v", d)
 	}
 }
 

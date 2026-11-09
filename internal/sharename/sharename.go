@@ -5,6 +5,7 @@ import (
 	"errors"
 	"regexp"
 	"slices"
+	"strings"
 )
 
 var (
@@ -32,6 +33,22 @@ func Valid(name string) error {
 	}
 	if slices.Contains(reserved, name) {
 		return ErrReserved
+	}
+	return nil
+}
+
+var hostLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// ValidHost checks an operator-given host name (SHARE_DOMAIN, RELAY_HOST): lowercase DNS labels
+// joined by dots, no scheme, port, trailing dot or space.
+func ValidHost(h string) error {
+	if h == "" || len(h) > 253 {
+		return ErrInvalid
+	}
+	for _, l := range strings.Split(h, ".") {
+		if !hostLabel.MatchString(l) {
+			return ErrInvalid
+		}
 	}
 	return nil
 }

@@ -161,6 +161,23 @@ func TestRemoveNodeOnlyInItsFleet(t *testing.T) {
 	}
 }
 
+// A box removed from /admin loses its box key at once (its name goes to quarantine), not at the next gc.
+func TestRemoveNodeDropsItsBoxKey(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	nodes, _ := e.hs.ListNodes(ctx, "f-bbbb")
+	id := nodes[0].ID
+	if err := e.st.SetBoxKey(ctx, "bbbb", id, "keyb", t0); err != nil {
+		t.Fatal(err)
+	}
+	if w := e.do("POST", "/admin/fleets/bbbb/nodes/"+id+"/remove", token, csrf(e)); w.Code != 303 {
+		t.Fatalf("%d", w.Code)
+	}
+	if _, err := e.st.BoxByKey(ctx, "keyb"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("BoxByKey after remove = %v, want ErrNotFound", err)
+	}
+}
+
 func TestRateLimited(t *testing.T) {
 	e := setup(t)
 	var last int

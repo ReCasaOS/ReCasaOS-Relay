@@ -13,6 +13,7 @@ import (
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
 	"github.com/ReCasaOS/recasaos-relay/internal/ratelimit"
+	"github.com/ReCasaOS/recasaos-relay/internal/sharename"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
 )
 
@@ -36,7 +37,6 @@ type Config struct {
 	LoginRatePerHour      int           // device-code logins per hour, per IP
 
 	ShareDomain          string        // public sharing: boxes get <name>.<ShareDomain>; empty disables every share route (503)
-	ShareQuarantine      time.Duration // a released name cannot be claimed again for this long
 	ShareACMETTL         time.Duration // validity of an _acme-challenge TXT value
 	ShareACMERatePerHour int           // ACME TXT writes per hour, per box
 }
@@ -169,8 +169,8 @@ func ConfigFromEnv() (Config, error) {
 		return c, err
 	}
 	c.ShareDomain = strings.ToLower(strings.TrimSpace(os.Getenv("SHARE_DOMAIN")))
-	if c.ShareQuarantine, err = envDuration("SHARE_QUARANTINE", 2160*time.Hour); err != nil {
-		return c, err
+	if c.ShareDomain != "" && sharename.ValidHost(c.ShareDomain) != nil {
+		return c, fmt.Errorf("SHARE_DOMAIN: %q is not a bare DNS name (no scheme, port or trailing dot)", c.ShareDomain)
 	}
 	if c.ShareACMETTL, err = envDuration("SHARE_ACME_TTL", 10*time.Minute); err != nil {
 		return c, err

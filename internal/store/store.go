@@ -21,6 +21,11 @@ var (
 	ErrQuarantined  = errors.New("store: name quarantined")
 )
 
+// Quarantine is how long a released name stays unclaimable by other boxes: Let's Encrypt reuses
+// a DNS-01 authorization for up to 30 days, so this outlasts a 90-day certificate issued on it.
+// The share_names_quarantine trigger hard-codes the same value (10800000 s).
+const Quarantine = 125 * 24 * time.Hour
+
 type Fleet struct {
 	ID, SecretHash, HeadscaleUser string
 	CreatedAt, LastOnline         time.Time
@@ -60,7 +65,8 @@ type Store interface {
 	// DeleteDevice removes a device; an unknown id is not an error.
 	DeleteDevice(ctx context.Context, nodeID string) error
 
-	// SetBoxKey upserts the box key of a node; ErrExists when key already belongs to another node.
+	// SetBoxKey links key to a node once: the same key again is a no-op; ErrExists when the node
+	// already has another key or key belongs to another node.
 	SetBoxKey(ctx context.Context, fleetID, nodeID, key string, at time.Time) error
 	DeleteBoxKey(ctx context.Context, nodeID string) error
 	// BoxKeysOf maps node id to box key.
@@ -141,13 +147,15 @@ CREATE TABLE IF NOT EXISTS share_names (
 	fleet_id TEXT NOT NULL,
 	claimed_at INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS share_quarantine (name TEXT PRIMARY KEY, until INTEGER NOT NULL);
+-- node_id: the releasing box, which may take its name back during the quarantine. The table and
+-- trigger were changed in place, not migrated: no deployed database has the share tables yet.
+CREATE TABLE IF NOT EXISTS share_quarantine (name TEXT PRIMARY KEY, until INTEGER NOT NULL, node_id TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS share_banned (name TEXT PRIMARY KEY, added INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS acme_txt (name TEXT PRIMARY KEY, value TEXT NOT NULL, expires INTEGER NOT NULL);
--- Any removal of a name (release, fleet or box deletion by cascade) quarantines it for 90 days.
+-- Any removal of a name (release, fleet or box deletion by cascade) quarantines it for 125 days (store.Quarantine).
 CREATE TRIGGER IF NOT EXISTS share_names_quarantine BEFORE DELETE ON share_names
 BEGIN
-	INSERT OR REPLACE INTO share_quarantine (name, until) VALUES (OLD.name, (strftime('%s','now') + 7776000) * 1000000000);
+	INSERT OR REPLACE INTO share_quarantine (name, until, node_id) VALUES (OLD.name, (strftime('%s','now') + 10800000) * 1000000000, OLD.node_id);
 END;
 CREATE TABLE IF NOT EXISTS share_minute (
 	fleet_id TEXT NOT NULL, node_id TEXT NOT NULL, minute INTEGER NOT NULL,
@@ -586,16 +594,17 @@ func (s *sqlStore) SetBoxKey(ctx context.Context, fleetID, nodeID, key string, a
 		return fmt.Errorf("store: set box key: %w", err)
 	}
 	defer tx.Rollback()
+	// Linked once: a different key on a keyed node would let a fleet-secret holder take over the
+	// node's name. Rotation goes through node removal, which quarantines the name.
 	var taken bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM box_keys WHERE box_key = ? AND node_id <> ?)`, key, nodeID).Scan(&taken); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM box_keys WHERE (box_key = ?) <> (node_id = ?))`, key, nodeID).Scan(&taken); err != nil {
 		return fmt.Errorf("store: set box key: %w", err)
 	}
 	if taken {
 		return ErrExists
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO box_keys (node_id, fleet_id, box_key, added) VALUES (?, ?, ?, ?)
-		 ON CONFLICT(node_id) DO UPDATE SET fleet_id = excluded.fleet_id, box_key = excluded.box_key, added = excluded.added`,
+		`INSERT INTO box_keys (node_id, fleet_id, box_key, added) VALUES (?, ?, ?, ?) ON CONFLICT(node_id) DO NOTHING`,
 		nodeID, fleetID, key, ts(at)); err != nil {
 		return fmt.Errorf("store: set box key: %w", err)
 	}
@@ -675,7 +684,7 @@ func (s *sqlStore) ClaimName(ctx context.Context, nodeID, name string, at time.T
 	if banned {
 		return ErrBanned
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(until), 0) FROM share_quarantine WHERE name = ?`, name).Scan(&until); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(until), 0) FROM share_quarantine WHERE name = ? AND node_id <> ?`, name, nodeID).Scan(&until); err != nil {
 		return fmt.Errorf("store: claim name: %w", err)
 	}
 	if until > ts(at) {
@@ -704,14 +713,14 @@ func (s *sqlStore) ReleaseName(ctx context.Context, nodeID string, quarantineUnt
 	}
 	defer tx.Rollback()
 	var name string
-	// The delete trigger quarantines for 90 days; the caller's date then overrides it.
+	// The delete trigger quarantines for Quarantine; the caller's date then overrides it.
 	switch err := tx.QueryRowContext(ctx, `DELETE FROM share_names WHERE node_id = ? RETURNING name`, nodeID).Scan(&name); {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil
 	case err != nil:
 		return fmt.Errorf("store: release name: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO share_quarantine (name, until) VALUES (?, ?)`, name, ts(quarantineUntil)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO share_quarantine (name, until, node_id) VALUES (?, ?, ?)`, name, ts(quarantineUntil), nodeID); err != nil {
 		return fmt.Errorf("store: release name: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -758,7 +767,18 @@ func (s *sqlStore) BanName(ctx context.Context, name string, at time.Time) error
 }
 
 func (s *sqlStore) UnbanName(ctx context.Context, name string) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM share_banned WHERE name = ?`, name); err != nil {
+	// An unban is the operator undoing a revoke: lift the quarantine the revoke started too.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: unban name: %w", err)
+	}
+	defer tx.Rollback()
+	for _, q := range []string{`DELETE FROM share_banned WHERE name = ?`, `DELETE FROM share_quarantine WHERE name = ?`} {
+		if _, err := tx.ExecContext(ctx, q, name); err != nil {
+			return fmt.Errorf("store: unban name: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("store: unban name: %w", err)
 	}
 	return nil

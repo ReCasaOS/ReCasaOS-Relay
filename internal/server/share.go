@@ -196,7 +196,7 @@ func (h *shareHandler) deleteName(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := opCtx(r)
 	defer cancel()
-	if err := h.deps.Store.ReleaseName(ctx, ref.NodeID, h.deps.Now().Add(h.cfg.ShareQuarantine)); err != nil {
+	if err := h.deps.Store.ReleaseName(ctx, ref.NodeID, h.deps.Now().Add(store.Quarantine)); err != nil {
 		internalError(w, "release name", err)
 		return
 	}
