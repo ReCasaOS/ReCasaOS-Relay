@@ -2,7 +2,7 @@
 #   docker compose -p <name> -f compose.yaml -f e2e/compose.e2e.yaml up -d
 #
 # The tailscale client insists on a TLS control connection (port 443), so the test network gets a
-# second Caddy, `tlsfront`, that answers to relay.test with a certificate from Caddy's own CA and
+# second Caddy, `tlsfront` (behind `share`, which owns the name relay.test here), that answers to relay.test with a certificate from Caddy's own CA and
 # forwards to the real, unchanged `front`. The test installs that CA in its tailscale containers.
 services:
   headscale:
@@ -39,10 +39,6 @@ services:
       - front
     volumes:
       - ./e2e/Caddyfile.tls:/etc/caddy/Caddyfile:ro
-    networks:
-      default:
-        aliases:
-          - relay.test
 
   # Always on in the test network: the tunnel and sharing tests go through it.
   share:
@@ -68,3 +64,4 @@ services:
       default:
         aliases:
           - share.relay.test
+          - relay.test # the tailscale containers reach the relay through share

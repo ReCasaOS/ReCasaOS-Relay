@@ -18,11 +18,14 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -50,6 +53,7 @@ type rig struct {
 	hs        *headscale.Client
 	hsURL     string // Headscale on loopback (admin API; the test's own way in)
 	frontURL  string // the public front, as boxes reach it
+	shareAddr string // share's public 443, mapped on loopback
 	caFile    string
 	ts        map[string]*node
 	fleetUser map[string]string // fleet name -> Headscale user
@@ -142,9 +146,10 @@ func (r *rig) up() {
 		r.apiKey = strings.TrimSpace(lines[len(lines)-1])
 		return nil
 	})
-	r.mustCompose("up", "-d", "--build", "derper", "enrolment", "front", "tlsfront")
+	r.mustCompose("up", "-d", "--build", "derper", "enrolment", "front", "tlsfront", "share")
 	r.hsURL = "http://" + r.mustCompose("port", "headscale", "8080")
 	r.frontURL = "http://" + r.mustCompose("port", "front", "8080")
+	r.shareAddr = r.mustCompose("port", "share", "443")
 	r.hs = headscale.New(r.hsURL, r.apiKey, nil)
 
 	// The service must not answer before the deny-by-default policy is in place.
@@ -173,6 +178,23 @@ func (r *rig) up() {
 		}
 		return nil
 	})
+}
+
+// dialSNI opens a TCP connection to share's 443 and returns it as a TLS client for serverName (trusting
+// tlsfront's CA). The handshake is lazy (first Read/Write), so a peer that closes without answering shows
+// up as io.EOF on Read.
+func (r *rig) dialSNI(serverName string) (*tls.Conn, error) {
+	pem, err := os.ReadFile(r.caFile)
+	if err != nil {
+		return nil, err
+	}
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(pem)
+	c, err := net.DialTimeout("tcp", r.shareAddr, 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	return tls.Client(c, &tls.Config{ServerName: serverName, RootCAs: pool}), nil
 }
 
 func (r *rig) hsDo(method, path string, body any) []byte {
