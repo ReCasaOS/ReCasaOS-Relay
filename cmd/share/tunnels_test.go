@@ -99,7 +99,9 @@ func TestVisitorGoesThroughTunnel(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer l.Close()
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		c, err := l.Accept()
 		if err != nil {
 			return
@@ -107,6 +109,7 @@ func TestVisitorGoesThroughTunnel(t *testing.T) {
 		defer c.Close()
 		toTunnel(reg, "alpha", c, c)
 	}()
+	defer func() { <-done }()
 	visitor, err := net.Dial("tcp", l.Addr().String())
 	if err != nil {
 		t.Fatal(err)
@@ -168,4 +171,146 @@ func TestUsageKeepsBytesUntilPosted(t *testing.T) {
 	if len(f.posts) != 2 || f.posts[0][0] != want[0][0] || len(f.posts[1]) != 1 || f.posts[1][0] != want[1][0] {
 		t.Fatalf("posts = %+v, want %+v", f.posts, want)
 	}
+}
+
+// acceptAll makes the box accept (and hold) every stream until the test ends.
+func acceptAll(t *testing.T, box *tunnel.Session) {
+	var mu sync.Mutex
+	var held []net.Conn
+	go func() {
+		for {
+			c, err := box.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, c)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range held {
+			c.Close()
+		}
+	})
+}
+
+func TestTunnelStreamCap(t *testing.T) {
+	_, _, reg, box := rig(t)
+	acceptAll(t, box)
+	tun, _ := reg.Get("alpha")
+	var streams []net.Conn
+	defer func() {
+		for _, s := range streams {
+			s.Close()
+		}
+	}()
+	for range tunnel.MaxStreams {
+		s, err := tun.Open(context.Background())
+		if err != nil {
+			t.Fatalf("stream %d: %v", len(streams)+1, err)
+		}
+		streams = append(streams, s)
+	}
+
+	visitor, c := tcpPair(t)
+	defer visitor.Close()
+	done := make(chan struct{})
+	go func() { defer close(done); defer c.Close(); toTunnel(reg, "alpha", c, c) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("the visitor past the cap was not turned away at once")
+	}
+	if _, err := tun.Open(context.Background()); !errors.Is(err, tunnel.ErrFull) {
+		t.Fatalf("Open past the cap: %v, want ErrFull", err)
+	}
+
+	streams[0].Close() // frees a slot
+	s, err := tun.Open(context.Background())
+	if err != nil {
+		t.Fatalf("Open after a stream closed: %v", err)
+	}
+	streams[0] = s
+}
+
+func TestIdleVisitorIsClosed(t *testing.T) {
+	old := idleTimeout
+	idleTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { idleTimeout = old })
+	_, _, reg, box := rig(t)
+
+	visitor, c := tcpPair(t)
+	defer visitor.Close()
+	done := make(chan struct{})
+	start := time.Now()
+	go func() { defer close(done); defer c.Close(); toTunnel(reg, "alpha", c, c) }()
+	in, err := box.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("idle visitor still connected")
+	}
+	if d := time.Since(start); d < idleTimeout {
+		t.Fatalf("visitor closed after %v, before the idle timeout", d)
+	}
+	in.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadAll(in); err != nil { // EOF: the relay closed its end of the stream
+		t.Fatalf("box stream after the idle timeout: %v", err)
+	}
+}
+
+func TestClosedTunnelIsReported(t *testing.T) {
+	f, enrURL, reg, box := rig(t)
+	tun, _ := reg.Get("alpha")
+	s, err := tun.Open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Write([]byte("12345"))
+	in, err := box.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadFull(in, make([]byte, 5))
+	box.Close() // the tunnel goes away before any usage tick
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		if _, ok := reg.Get("alpha"); !ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("tunnel still registered")
+		}
+	}
+
+	newUsage(reg, enrURL).tick(context.Background())
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.posts) != 1 || len(f.posts[0]) != 1 || f.posts[0][0] != (sample{FleetID: "f1", NodeID: "7", TX: 5}) {
+		t.Fatalf("posts = %+v, want one sample with tx 5", f.posts)
+	}
+}
+
+// tcpPair returns both ends of a loopback TCP connection (toTunnel needs TCP addresses).
+func tcpPair(t *testing.T) (client, server net.Conn) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	client, err = net.Dial("tcp", l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err = l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client, server
 }

@@ -46,7 +46,7 @@ func Handler(reg *Registry, resolve Resolver, now func() time.Time) http.Handler
 		}
 		key := base64.RawURLEncoding.EncodeToString(pub)
 		box, err := resolve(r.Context(), key)
-		if errors.Is(err, ErrNotFound) {
+		if errors.Is(err, ErrNotFound) || (err == nil && box.Name == "") { // never register under ""
 			httpError(w, http.StatusForbidden, "box not shared")
 			return
 		}
@@ -66,12 +66,13 @@ func Handler(reg *Registry, resolve Resolver, now func() time.Time) http.Handler
 			ws.CloseNow()
 			return
 		}
-		t := &Tunnel{Name: box.Name, NodeID: box.NodeID, FleetID: box.FleetID, Key: key, ws: ws, sess: sess}
+		t := newTunnel(box, key, ws, sess)
 		if old := reg.Put(box.Name, t); old != nil {
 			old.Close(StatusReplaced, "replaced")
 		}
 		log.Printf("tunnel: %q up", box.Name)
 		<-sess.CloseChan()
+		reg.retire(t) // before Remove: whoever no longer sees it registered finds it retired
 		reg.Remove(box.Name, t)
 		ws.CloseNow()
 		log.Printf("tunnel: %q down", box.Name)

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/hashicorp/yamux"
@@ -22,6 +23,15 @@ const (
 	StatusReplaced     websocket.StatusCode = 4409
 )
 
+// Limits on a tunnel's visitor streams.
+const (
+	MaxStreams  = 256              // concurrent streams per tunnel (yamux blocks beyond 256 un-ACKed opens)
+	OpenTimeout = 10 * time.Second // to open one stream
+)
+
+// ErrFull: the tunnel already carries MaxStreams streams.
+var ErrFull = errors.New("tunnel: too many open streams")
+
 // Tunnel is one box's live connection. Key is the box key as X-Box-Key spells it (never log it).
 type Tunnel struct {
 	Name, NodeID, FleetID string
@@ -29,21 +39,53 @@ type Tunnel struct {
 
 	ws   *websocket.Conn
 	sess *yamux.Session
+	sem  chan struct{} // one slot per open stream
 
 	rx, tx           atomic.Int64 // rx: bytes the box sent; tx: bytes sent to the box
 	takenRx, takenTx atomic.Int64
+	fullLogged       atomic.Int64 // unix time of the last "full" log line
 }
 
-// Open opens a stream to the box.
+func newTunnel(box Box, key string, ws *websocket.Conn, sess *yamux.Session) *Tunnel {
+	return &Tunnel{Name: box.Name, NodeID: box.NodeID, FleetID: box.FleetID, Key: key, ws: ws, sess: sess,
+		sem: make(chan struct{}, MaxStreams)}
+}
+
+// Open opens a stream to the box, within ctx and OpenTimeout. It fails at once with ErrFull when the
+// tunnel already carries MaxStreams streams; a timeout leaves the session up.
 func (t *Tunnel) Open(ctx context.Context) (net.Conn, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	select {
+	case t.sem <- struct{}{}:
+	default:
+		if last, now := t.fullLogged.Load(), time.Now().Unix(); now-last >= 60 && t.fullLogged.CompareAndSwap(last, now) {
+			log.Printf("tunnel: %q full (%d streams)", t.Name, MaxStreams)
+		}
+		return nil, ErrFull
 	}
-	s, err := t.sess.Open()
-	if err != nil {
-		return nil, err
+	ctx, cancel := context.WithTimeout(ctx, OpenTimeout)
+	defer cancel()
+	type result struct {
+		s   net.Conn
+		err error
 	}
-	return &counted{Conn: s, t: t}, nil
+	ch := make(chan result, 1)
+	go func() { s, err := t.sess.Open(); ch <- result{s, err} }()
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			<-t.sem
+			return nil, r.err
+		}
+		return &counted{Conn: r.s, t: t}, nil
+	case <-ctx.Done():
+		go func() { // a stream opened too late is closed, and only then is its slot freed
+			if r := <-ch; r.err == nil {
+				r.s.Close()
+			}
+			<-t.sem
+		}()
+		return nil, ctx.Err()
+	}
 }
 
 // Close sends code to the box and closes the session and every open stream.
@@ -62,10 +104,17 @@ func (t *Tunnel) Take() (rx, tx int64) {
 	return r - t.takenRx.Swap(r), w - t.takenTx.Swap(w)
 }
 
-// counted adds what crosses a stream to its tunnel's counters as it goes.
+// counted adds what crosses a stream to its tunnel's counters as it goes, and frees its slot on Close.
 type counted struct {
 	net.Conn
-	t *Tunnel
+	t    *Tunnel
+	once sync.Once
+}
+
+func (c *counted) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(func() { <-c.t.sem })
+	return err
 }
 
 func (c *counted) Read(p []byte) (int, error) {
@@ -80,10 +129,34 @@ func (c *counted) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// Registry maps a share name to its live tunnel.
+// MaxRetired bounds the closed tunnels waiting for TakeRetired.
+const MaxRetired = 10000
+
+// Registry maps a share name to its live tunnel, and keeps the tunnels that closed since the last
+// TakeRetired so their final bytes are still reported.
 type Registry struct {
-	mu sync.Mutex
-	m  map[string]*Tunnel
+	mu      sync.Mutex
+	m       map[string]*Tunnel
+	retired []*Tunnel
+}
+
+func (r *Registry) retire(t *Tunnel) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.retired) >= MaxRetired {
+		log.Printf("tunnel: retired backlog full, dropping %q's last bytes", t.Name)
+		return
+	}
+	r.retired = append(r.retired, t)
+}
+
+// TakeRetired returns the tunnels closed since the previous call, and forgets them.
+func (r *Registry) TakeRetired() []*Tunnel {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t := r.retired
+	r.retired = nil
+	return t
 }
 
 func NewRegistry() *Registry { return &Registry{m: map[string]*Tunnel{}} }

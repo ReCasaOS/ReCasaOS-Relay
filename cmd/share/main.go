@@ -55,7 +55,14 @@ func run() error {
 	mux := http.NewServeMux()
 	mux.Handle("GET "+tunnel.Path, tunnel.Handler(reg, resolve, time.Now))
 	tunSrv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	go tunSrv.Serve(ltun)
+	tunErr := make(chan error, 1)
+	go func() {
+		if err := tunSrv.Serve(ltun); !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("share: tunnel listener: %v", err)
+			tunErr <- err
+			stop() // no tunnels, no share process: shut down and exit with the error
+		}
+	}()
 	go every(ctx, 60*time.Second, func(ctx context.Context) { tunnel.Revalidate(ctx, reg, resolve) })
 	go every(ctx, 15*time.Second, newUsage(reg, cfg.EnrolmentURL).tick)
 	go func() {
@@ -87,7 +94,12 @@ func run() error {
 	case <-time.After(30 * time.Second):
 		log.Printf("shutdown: connections still open after 30s")
 	}
-	return nil
+	select {
+	case err := <-tunErr:
+		return err
+	default:
+		return nil
+	}
 }
 
 // accept serves l until it is closed.

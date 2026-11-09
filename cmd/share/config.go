@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -38,6 +39,11 @@ func ConfigFromEnv() (Config, error) {
 	}
 	if c.RelayHost == "" || c.ShareDomain == "" {
 		return Config{}, errors.New("RELAY_HOST and SHARE_DOMAIN are required")
+	}
+	// Checked once here: resolve requests carry the box key in their path, and a URL that fails to parse
+	// later would print it in the error.
+	if u, err := url.Parse(c.EnrolmentURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return Config{}, errors.New("ENROLMENT_URL: want an http(s) URL with a host")
 	}
 	var err error
 	if c.PeekTimeout, err = time.ParseDuration(getenv("PEEK_TIMEOUT", "5s")); err != nil || c.PeekTimeout <= 0 {

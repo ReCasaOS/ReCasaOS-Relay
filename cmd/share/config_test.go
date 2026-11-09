@@ -17,6 +17,11 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 	if c != want {
 		t.Fatalf("got %+v", c)
 	}
+	t.Setenv("ENROLMENT_URL", "enrolment:8081")
+	if _, err := ConfigFromEnv(); err == nil {
+		t.Fatal("ENROLMENT_URL without a scheme was accepted")
+	}
+	t.Setenv("ENROLMENT_URL", "")
 	t.Setenv("SHARE_DOMAIN", "")
 	if _, err := ConfigFromEnv(); err == nil {
 		t.Fatal("SHARE_DOMAIN should be required")

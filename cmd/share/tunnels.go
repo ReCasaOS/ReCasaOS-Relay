@@ -34,8 +34,8 @@ func do(req *http.Request) (*http.Response, error) {
 func resolver(enrolmentURL string) tunnel.Resolver {
 	return func(ctx context.Context, key string) (tunnel.Box, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, enrolmentURL+"/internal/share/boxes/"+url.PathEscape(key), nil)
-		if err != nil {
-			return tunnel.Box{}, err
+		if err != nil { // its *url.Error would print the URL, which holds the key
+			return tunnel.Box{}, errors.New("enrolment: cannot build the resolve request")
 		}
 		resp, err := do(req)
 		if err != nil {
@@ -69,7 +69,9 @@ func toTunnel(reg *tunnel.Registry, box string, c, replay net.Conn) {
 	}
 	stream, err := t.Open(context.Background())
 	if err != nil {
-		log.Printf("share: open stream to %q: %v", box, err)
+		if !errors.Is(err, tunnel.ErrFull) { // Open logs that one, at most once a minute
+			log.Printf("share: open stream to %q: %v", box, err)
+		}
 		return
 	}
 	defer stream.Close()
@@ -78,7 +80,31 @@ func toTunnel(reg *tunnel.Registry, box string, c, replay net.Conn) {
 	if src == nil || dst == nil || proxyproto.WriteV2(stream, src, dst) != nil {
 		return
 	}
-	sni.Forward(replay, stream) // the stream counts the bytes into t
+	// Idle for idleTimeout either way: close both ends, or the stream would stay held forever.
+	idle := time.AfterFunc(idleTimeout, func() { c.Close(); stream.SetDeadline(time.Now()) })
+	defer idle.Stop()
+	sni.Forward(&idleConn{Conn: replay, t: idle}, stream) // the stream counts the bytes into t
+}
+
+// idleTimeout closes a visitor connection that moved no byte in either direction for that long.
+var idleTimeout = 5 * time.Minute
+
+// idleConn pushes its timer back on every read and write: it carries both directions of the visitor.
+type idleConn struct {
+	net.Conn
+	t *time.Timer
+}
+
+func (c *idleConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	c.t.Reset(idleTimeout)
+	return n, err
+}
+
+func (c *idleConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	c.t.Reset(idleTimeout)
+	return n, err
 }
 
 // sample is one line of POST /internal/share/usage.
@@ -97,29 +123,21 @@ const maxPending = 10000
 type usage struct {
 	reg     *tunnel.Registry
 	url     string
-	seen    map[*tunnel.Tunnel]bool // last tick's tunnels: a tunnel gone since still has its final bytes
-	pending map[[2]string]sample    // by fleet, node
+	pending map[[2]string]sample // by fleet, node
 }
 
 func newUsage(reg *tunnel.Registry, enrolmentURL string) *usage {
-	return &usage{reg: reg, url: enrolmentURL + "/internal/share/usage", seen: map[*tunnel.Tunnel]bool{}, pending: map[[2]string]sample{}}
+	return &usage{reg: reg, url: enrolmentURL + "/internal/share/usage", pending: map[[2]string]sample{}}
 }
 
 func (u *usage) tick(ctx context.Context) {
-	now := map[*tunnel.Tunnel]bool{}
+	tunnels := u.reg.TakeRetired() // closed since the last tick: their final bytes
 	for _, n := range u.reg.Names() {
 		if t, ok := u.reg.Get(n); ok {
-			now[t] = true
+			tunnels = append(tunnels, t)
 		}
 	}
-	for t := range u.seen {
-		now[t] = true
-	}
-	u.seen = map[*tunnel.Tunnel]bool{}
-	for t := range now {
-		if cur, ok := u.reg.Get(t.Name); ok && cur == t {
-			u.seen[t] = true
-		}
+	for _, t := range tunnels {
 		rx, tx := t.Take()
 		k := [2]string{t.FleetID, t.NodeID}
 		s, ok := u.pending[k]

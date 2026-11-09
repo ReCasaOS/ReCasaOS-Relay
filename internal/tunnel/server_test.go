@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/proxyproto"
+	"github.com/hashicorp/yamux"
 )
 
 // fakeEnrolment answers resolve for the keys it knows; err, when set, is returned for every key.
@@ -175,7 +176,7 @@ func TestTunnelRoundTrip(t *testing.T) {
 	}
 }
 
-func TestUnknownKeyIsClosed4403(t *testing.T) {
+func TestUnknownKeyIs403(t *testing.T) {
 	reg, _, url := newRelay(t)
 	_, priv, _ := ed25519.GenerateKey(nil)
 	_, err := Dial(context.Background(), url, priv, DialOptions{})
@@ -190,7 +191,7 @@ func TestUnknownKeyIsClosed4403(t *testing.T) {
 
 // Refused before the upgrade, a bad signature is a plain 401: the 4401 close code is for a failure
 // detected once the WebSocket is up, which this handler never has.
-func TestBadSignatureIs4401(t *testing.T) {
+func TestBadSignatureIs401(t *testing.T) {
 	_, f, url := newRelay(t)
 	key := newBox(t, f, "alpha")
 	pub := key.Public().(ed25519.PublicKey)
@@ -254,14 +255,14 @@ func TestRevokedNameClosesTunnel(t *testing.T) {
 	if code := waitClosed(t, box); code != int(StatusRevoked) {
 		t.Fatalf("box session closed with %d, want 4403", code)
 	}
-	buf := make([]byte, 8)
-	in.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if _, err := io.ReadFull(in, buf); err == nil || errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("box stream still open: %v", err)
-	}
-	stream.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if _, err := stream.Read(buf); err == nil {
-		t.Fatal("relay stream still open")
+	// Both ends of the open stream must fail with a closed-stream error, not a timeout.
+	for side, c := range map[string]net.Conn{"box": in, "relay": stream} {
+		c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, err := io.ReadAll(c)
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			t.Fatalf("%s stream still open after the revocation: %v", side, err)
+		}
 	}
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
 		if _, ok := reg.Get("alpha"); !ok {
@@ -304,5 +305,30 @@ func TestBytesAreCounted(t *testing.T) {
 	}
 	if rx, tx := tun.Take(); rx != 0 || tx != 0 {
 		t.Fatalf("second Take = %d, %d; want 0, 0", rx, tx)
+	}
+}
+
+// A stalled box: Open gives up at ctx's deadline and leaves the session up.
+func TestOpenHonoursContext(t *testing.T) {
+	a, b := net.Pipe() // nobody reads b: the SYN never leaves
+	defer b.Close()
+	sess, err := yamux.Client(a, yamuxConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	tun := newTunnel(Box{Name: "alpha"}, "", nil, sess)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := tun.Open(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Open = %v, want DeadlineExceeded", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("Open took %v", d)
+	}
+	if sess.IsClosed() {
+		t.Fatal("an open timeout closed the session")
 	}
 }
