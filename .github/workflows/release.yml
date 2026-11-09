@@ -1,8 +1,8 @@
 name: release
 
-# Builds the `enrolment` and `derper` images and pushes them to GHCR when a version tag is pushed.
-# Images: ghcr.io/<owner>/<repository>-enrolment and -derper, lowercased (for this repository
-# ghcr.io/recasaos/recasaos-relay-enrolment and ghcr.io/recasaos/recasaos-relay-derper), tagged with the
+# Builds the `enrolment`, `derper` and `share` images and pushes them to GHCR when a version tag is pushed.
+# Images: ghcr.io/<owner>/<repository>-enrolment, -derper and -share, lowercased (for this repository
+# ghcr.io/recasaos/recasaos-relay-enrolment, -derper and -share), tagged with the
 # git tag and, for a final release, `latest`.
 # Only the built-in GITHUB_TOKEN is used; the only actions are actions/checkout@v4 and
 # actions/setup-go@v5 (first-party, pinned by major version tag, like ci.yml); the image is built with plain `docker`.
@@ -40,17 +40,17 @@ jobs:
         run: |
           set -euo pipefail
           echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          # <image suffix> <build context>. Build every image before pushing any: a failed build must not
-          # leave a half-published release (one image pushed, `latest` moved).
-          pairs=("enrolment ." "derper ./derper")
+          # <image suffix> <build context> [extra docker build args]. Build every image before pushing any: a
+          # failed build must not leave a half-published release (one image pushed, `latest` moved).
+          pairs=("enrolment ." "derper ./derper" "share . --build-arg CMD=share")
           for pair in "${pairs[@]}"; do
-            read -r name context <<<"$pair"
+            read -r name context extra <<<"$pair"
             image="ghcr.io/${GITHUB_REPOSITORY,,}-$name"
             tags=(-t "$image:$VERSION")
             # A pre-release tag (v1.2.0-rc1) must not move `latest`.
             case "$VERSION" in *-*) ;; *) tags+=(-t "$image:latest") ;; esac
             docker build --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
-              --label "org.opencontainers.image.version=$VERSION" "${tags[@]}" "$context"
+              --label "org.opencontainers.image.version=$VERSION" "${tags[@]}" $extra "$context"
           done
           for pair in "${pairs[@]}"; do
             read -r name _ <<<"$pair"

@@ -88,6 +88,11 @@ Fleet creation is limited per client IP (per /64 for IPv6, and in addition per /
 | `SHARE_QUARANTINE` | `2160h` | how long a released name cannot be claimed again |
 | `SHARE_ACME_TTL` | `10m` | validity of an `_acme-challenge` TXT value |
 | `SHARE_ACME_RATE_PER_HOUR` | `20` | ACME TXT writes per hour per box |
+| `SHARE_PUBLIC_IP` | none, required when `SHARE_DOMAIN` is set | IPv4 the delegated DNS zone answers with; the service refuses to start without it |
+| `SHARE_PUBLIC_IP6` | empty | IPv6 address for `AAAA` answers; empty: none |
+| `LISTEN_DNS` | `:53` | UDP and TCP listen address of the DNS zone (only with `SHARE_DOMAIN`) |
+
+The `share` process (`cmd/share`, its own image) has its own environment: `RELAY_HOST` and `SHARE_DOMAIN` (required), `LISTEN_TLS` (`:443`), `LISTEN_HTTP` (`:80`), `LISTEN_TUNNEL` (`:8082`), `FRONT_TLS` (`front:443`), `FRONT_HTTP` (`front:80`), `ENROLMENT_URL` (`http://enrolment:8081`) and `PEEK_TIMEOUT` (`5s`). See "Public sharing".
 
 ### Capacity
 
@@ -145,6 +150,8 @@ A name is 3 to 32 characters of `a-z0-9-`, not starting or ending with `-`; `www
 
 `tunnel_online` is true when the box's node appeared in a `share` usage post less than 45 s ago (kept in memory: false after an enrolment restart until the next post, at most 15 s).
 
+**Operating it.** Delegation of the zone, the Public Suffix List request, ports (53 on the public IP, 80/443 moved from `front` to `share`), the `compose.share.yaml` override, the migration of a running relay, verification and rollback: [docs/self-hosting.md, section 14](docs/self-hosting.md#14-public-sharing). Three images are built from this repository: `ghcr.io/recasaos/recasaos-relay-enrolment`, `-derper` and `-share` (the same `Dockerfile` as `enrolment`, with `--build-arg CMD=share`).
+
 Operator side, on `/admin`: **Shared names** lists every claimed name (fleet, node, since) with a Revoke button, and **Forbidden names** is the operator's own list on top of the built-in reserved words (add a name, or remove it again). Revoking a name (no confirmation; undo it with Forbidden names, Remove) adds it to the forbidden list and frees it from its box; the `share` process revalidates every tunnel each 60 s, so within a minute the box's tunnel closes with WebSocket code `4403 "name revoked"` and the box sees `409 name revoked` if it claims the name again. The janitor also deletes the box key of a node that no longer exists in Headscale (for instance after `tailscale logout`): its name then goes to quarantine like a released one.
 
 Internal routes, for the `share` service on the compose network only: `GET /internal/share/boxes/{key}` answers `200 {"name","node_id","fleet_id"}` (`404` when the key is unknown or has no name), and `POST /internal/share/usage` takes `[{"fleet_id","node_id","rx","tx"}]` (64 KiB at most) and answers `204`. Both answer `404` to a request carrying `TRUSTED_PROXY_HEADER`, which only `front` sets, and `front` does not route `/internal/*` at all.
@@ -159,7 +166,7 @@ Relayed (DERP) traffic goes through a standalone `derper` and is metered per box
 
 ## Releases
 
-Pushing a tag `v*` runs `.github/workflows/release.yml`: `go vet` and `go test`, then the `enrolment` and `derper` images are built and pushed to `ghcr.io/<owner>/<repository>-enrolment` and `-derper` (lowercased; `ghcr.io/recasaos/recasaos-relay-enrolment` here) tagged with the version and, unless the tag has a `-` suffix (a pre-release), `latest`. It uses only the built-in `GITHUB_TOKEN`. To run the published image instead of building it, see [docs/self-hosting.md](docs/self-hosting.md#using-the-published-image).
+Pushing a tag `v*` runs `.github/workflows/release.yml`: `go vet` and `go test`, then the `enrolment`, `derper` and `share` images are built and pushed to `ghcr.io/<owner>/<repository>-enrolment`, `-derper` and `-share` (lowercased; `ghcr.io/recasaos/recasaos-relay-enrolment` here) tagged with the version and, unless the tag has a `-` suffix (a pre-release), `latest`. It uses only the built-in `GITHUB_TOKEN`. To run the published image instead of building it, see [docs/self-hosting.md](docs/self-hosting.md#using-the-published-image).
 
 ## Development
 
