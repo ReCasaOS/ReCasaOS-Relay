@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"strconv"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -72,5 +74,22 @@ func TestHeartbeatsExpireAfter45s(t *testing.T) {
 	b.record([]string{"2"}, t0.Add(50*time.Second))
 	if len(b.seen) != 1 {
 		t.Fatalf("stale entry kept: %v", b.seen)
+	}
+}
+
+func TestUsagePostAppliesDeltas(t *testing.T) {
+	e := setupShare(t, nil)
+	post := func(rx, tx int) {
+		body := `[{"fleet_id":"fleet0001","node_id":"7","rx":` + strconv.Itoa(rx) + `,"tx":` + strconv.Itoa(tx) + `}]`
+		wantStatus(t, e.internal("POST", "/internal/share/usage", body, nil), 204, "")
+	}
+	post(100, 10)
+	post(250, 5)
+	got, err := e.st.ShareTotals(context.Background(), time.Unix(0, 0))
+	if err != nil || len(got) != 1 || got[0].Rx != 350 || got[0].Tx != 15 || got[0].NodeID != "7" {
+		t.Fatalf("ShareTotals = %+v, %v; want one node 7 with rx 350 tx 15", got, err)
+	}
+	if rel, _ := e.st.UsageTotals(context.Background(), time.Unix(0, 0)); len(rel) != 0 {
+		t.Fatalf("shared bytes leaked into the relayed totals: %+v", rel)
 	}
 }

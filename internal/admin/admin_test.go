@@ -438,3 +438,66 @@ func TestRemoveDevice(t *testing.T) {
 		t.Fatalf("store row left: %v", all)
 	}
 }
+
+func (e env) shared(t *testing.T, at time.Time, samples ...store.UsageSample) {
+	t.Helper()
+	if err := e.st.ApplyShareUsage(context.Background(), at, samples); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAdminShowsSharedThisMonth(t *testing.T) {
+	e := setup(t)
+	one, two := e.nodeID(t, "f-aaaa", "b-one"), e.nodeID(t, "f-bbbb", "b-two")
+	// aaaa has relayed traffic, bbbb only shared traffic; the last sample is last month's.
+	e.usage(t, store.UsageSample{FleetID: "aaaa", NodeID: one, Rx: 2e9})
+	e.shared(t, t0.Add(-5*time.Minute), store.UsageSample{FleetID: "bbbb", NodeID: two, Rx: 3e9, Tx: 7})
+	e.shared(t, t0.Add(-4*time.Minute), store.UsageSample{FleetID: "bbbb", NodeID: two, Rx: 1e9})
+	e.shared(t, t0.AddDate(0, -1, 0), store.UsageSample{FleetID: "bbbb", NodeID: two, Rx: 9e9})
+	body := e.do("GET", "/admin/", token, nil).Body.String()
+
+	for _, want := range []string{"<b>4.0 GB</b><span>shared this month</span>", "<b>2.0 GB</b><span>relayed this month</span>"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	if head := between(t, body, "<code>bbbb</code>", "</summary>"); !strings.Contains(head, "4.0 GB shared") {
+		t.Errorf("fleet bbbb (shared only) header lacks its shared volume: %s", head)
+	}
+	if head := between(t, body, "<code>aaaa</code>", "</summary>"); !strings.Contains(head, "0 B shared") {
+		t.Errorf("fleet aaaa header: %s", head)
+	}
+	if row := between(t, body, `data-node-id="`+two+`"`, "</tr>"); !strings.Contains(row, `data-shared-bytes="4000000000"`) ||
+		!strings.Contains(row, "4.0 GB shared") || !strings.Contains(row, `data-up-month="0"`) {
+		t.Errorf("node row: %s", row)
+	}
+	if row := between(t, body, `data-node-id="`+one+`"`, "</tr>"); !strings.Contains(row, `data-shared-bytes="0"`) {
+		t.Errorf("node row without shared traffic: %s", row)
+	}
+	if a, b := strings.Index(body, "<code>aaaa</code>"), strings.Index(body, "<code>bbbb</code>"); a < 0 || b < a {
+		t.Error("fleets are not sorted by relayed volume")
+	}
+
+	// The chart: relayed by default (and with kind=relayed), shared with kind=shared.
+	chart := func(fleet, path string) string {
+		return between(t, e.do("GET", path, token, nil).Body.String(), `<details data-id="`+fleet+`"`, "</svg>")
+	}
+	if none, relayed := chart("aaaa", "/admin/?range=24h"), chart("aaaa", "/admin/?range=24h&kind=relayed"); none != relayed || !strings.Contains(none, "<polygon") {
+		t.Error("no kind is not the relayed chart of aaaa")
+	}
+	if chart("bbbb", "/admin/?range=24h") == chart("bbbb", "/admin/?range=24h&kind=shared") {
+		t.Error("kind=shared did not change bbbb's chart")
+	}
+	if !strings.Contains(chart("bbbb", "/admin/?range=24h&kind=shared"), "<polygon") || strings.Contains(chart("aaaa", "/admin/?range=24h&kind=shared"), "<polygon") {
+		t.Error("the shared chart does not follow the shared series")
+	}
+	sharedPage := e.do("GET", "/admin/?range=24h&kind=shared", token, nil).Body.String()
+	for _, want := range []string{`<a href="?range=24h&amp;kind=shared" class="cur" aria-current="page">24 h</a>`, `<a href="?range=24h">relayed</a>`, `class="cur" aria-current="page">shared</a>`, "b-two"} {
+		if !strings.Contains(sharedPage, want) {
+			t.Errorf("shared chart page lacks %q", want)
+		}
+	}
+	if p := e.do("GET", "/admin/?range=24h", token, nil).Body.String(); !strings.Contains(p, `<a href="?range=24h&amp;kind=shared">shared</a>`) {
+		t.Error("no toggle to the shared chart")
+	}
+}

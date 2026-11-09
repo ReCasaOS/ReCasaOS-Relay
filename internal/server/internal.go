@@ -77,8 +77,8 @@ func (h *internalHandler) boxByKey(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// usage handles POST /internal/share/usage. For now it validates the samples and records the
-// heartbeat; the bytes are not stored yet.
+// usage handles POST /internal/share/usage: it validates the samples, adds their deltas to the
+// shared-traffic buckets and records the heartbeat.
 func (h *internalHandler) usage(w http.ResponseWriter, r *http.Request) {
 	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
 	if err != nil {
@@ -96,13 +96,21 @@ func (h *internalHandler) usage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ids := make([]string, 0, len(samples))
+	us := make([]store.UsageSample, 0, len(samples))
 	for _, s := range samples {
 		if s.FleetID == "" || s.NodeID == "" || s.Rx < 0 || s.Tx < 0 {
 			writeError(w, http.StatusBadRequest, "invalid request")
 			return
 		}
 		ids = append(ids, s.NodeID)
+		us = append(us, store.UsageSample{FleetID: s.FleetID, NodeID: s.NodeID, Rx: s.Rx, Tx: s.Tx})
 	}
-	h.beats.record(ids, h.deps.Now())
+	now := h.deps.Now()
+	if err := h.deps.Store.ApplyShareUsage(r.Context(), now, us); err != nil {
+		log.Printf("internal: apply share usage: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	h.beats.record(ids, now)
 	w.WriteHeader(http.StatusNoContent)
 }

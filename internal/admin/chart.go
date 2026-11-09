@@ -89,8 +89,8 @@ const chartW, chartBase, chartTop = 600.0, 110.0, 16.0
 
 // stackedChart draws the series stacked, the first at the bottom, as one band polygon each (class
 // c0..c5, c5 being "others"). The SVG holds only numbers and fixed attributes: names go in the
-// page's legend, through the template.
-func stackedChart(series []chartSeries, buckets int) template.HTML {
+// page's legend, through the template. kind ("relayed" or "shared") only labels the chart.
+func stackedChart(series []chartSeries, buckets int, kind string) template.HTML {
 	buckets = max(buckets, 2)
 	cum := make([][]float64, len(series)+1) // cum[s+1][k]: top of series s; cum[0]: the baseline
 	cum[0] = make([]float64, buckets)
@@ -114,7 +114,7 @@ func stackedChart(series []chartSeries, buckets int) template.HTML {
 		return num(chartBase - v/top*(chartBase-chartTop))
 	}
 	var b strings.Builder
-	b.WriteString(`<svg viewBox="0 0 600 120" width="100%" role="img" aria-label="relayed rate per node" data-buckets="` + strconv.Itoa(buckets) + `">`)
+	b.WriteString(`<svg viewBox="0 0 600 120" width="100%" role="img" aria-label="` + kind + ` rate per node" data-buckets="` + strconv.Itoa(buckets) + `">`)
 	b.WriteString(`<line x1="0" y1="110" x2="600" y2="110" class="axis"/>`)
 	if top > 0 {
 		b.WriteString(`<line x1="0" y1="16" x2="600" y2="16" class="axis grid"/><text x="2" y="12" class="lbl">` + humanRate(top) + `</text>`)

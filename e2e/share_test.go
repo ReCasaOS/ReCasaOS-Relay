@@ -9,6 +9,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -45,6 +47,11 @@ func (r *rig) visit(host string, pin *fakeBox) (string, int, error) {
 
 // visitTLS does GET / on host as a visitor of share's 443 with the given TLS config.
 func (r *rig) visitTLS(host string, cfg *tls.Config) (string, int, error) {
+	return r.visitPath(host, "/", cfg)
+}
+
+// visitPath does GET path on host as a visitor of share's 443 with the given TLS config.
+func (r *rig) visitPath(host, path string, cfg *tls.Config) (string, int, error) {
 	c, err := net.DialTimeout("tcp", r.shareAddr, 5*time.Second)
 	if err != nil {
 		return "", 0, err
@@ -54,7 +61,7 @@ func (r *rig) visitTLS(host string, cfg *tls.Config) (string, int, error) {
 	cl := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
 		DialTLSContext: func(context.Context, string, string) (net.Conn, error) { return tc, nil }}}
 	defer cl.CloseIdleConnections()
-	resp, err := cl.Get("https://" + host + "/")
+	resp, err := cl.Get("https://" + host + path)
 	if err != nil {
 		return "", port, err
 	}
@@ -163,7 +170,33 @@ func TestShareRoutesBySNIAndIsolates(t *testing.T) {
 	}
 
 	// TODO(task 11): admin "Revoke" boxa -> within 70 s its names are closed and its session reports 4403.
-	// TODO(task 10): after a 20 MiB download from boxa, /admin/ shows boxa's shared volume within +-10 %.
+	// Shared traffic is metered: the `share` process posts its deltas every 15 s, and /admin/ shows
+	// boxa's node with the volume it sent (data-shared-bytes), within +-10 % of the 20 MiB downloaded.
+	const big = 20 << 20
+	pin := &tls.Config{ServerName: "app.boxa.box.relay.test", InsecureSkipVerify: true}
+	if got, _, err := r.visitPath("app.boxa.box.relay.test", "/big", pin); err != nil || len(got) != big {
+		t.Fatalf("download /big: %d bytes, %v", len(got), err)
+	}
+	row := regexp.MustCompile(`(?s)data-node-id="` + na + `".*?data-shared-bytes="(\d+)"`)
+	eventually(t, "boxa's shared volume on /admin", 45*time.Second, func() error {
+		req, _ := http.NewRequest("GET", r.frontURL+"/admin/", nil)
+		req.SetBasicAuth("e2e", e2eAdminToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		page, _ := io.ReadAll(resp.Body)
+		m := row.FindSubmatch(page)
+		if m == nil {
+			return fmt.Errorf("no shared volume for node %s on /admin (status %d)", na, resp.StatusCode)
+		}
+		v, _ := strconv.ParseInt(string(m[1]), 10, 64)
+		if v < big*90/100 || v > big*110/100 {
+			return fmt.Errorf("shared volume %d, want %d +-10 %%", v, big)
+		}
+		return nil
+	})
 }
 
 func TestShareCertificateViaDNS01(t *testing.T) {

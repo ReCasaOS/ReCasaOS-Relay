@@ -179,6 +179,7 @@ type fleetView struct {
 	Online              int
 	Err                 bool    // its nodes could not be listed
 	Month               int64   // relayed bytes this month (Rx: what its nodes sent to the relay)
+	Shared              int64   // shared bytes this month (Rx: what its boxes sent to visitors)
 	Up                  float64 // live bytes/s: the sum of its listed nodes' Up
 	RefPct              int     // Month against Config.MonthlyReference, capped at 100
 	RefClass            string  // "", "warn" (>= 80 %) or "over" (>= 100 %)
@@ -189,7 +190,8 @@ type fleetView struct {
 type nodeView struct {
 	headscale.Node
 	meter.Rate
-	UpMonth int64
+	UpMonth     int64
+	SharedMonth int64
 }
 
 // Idle: under 1 kB/s both ways, which a node's DERP keepalive alone produces.
@@ -205,6 +207,10 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 		rangeKey, cr = "1h", chartRanges["1h"]
 	}
 	start := cr.start(now)
+	kind, series := "relayed", h.deps.Store.UsageSeries
+	if r.URL.Query().Get("kind") == "shared" {
+		kind, series = "shared", h.deps.Store.ShareSeries
+	}
 	all, err := h.deps.Store.ListFleets(ctx)
 	if err != nil {
 		log.Printf("admin: list fleets: %v", err)
@@ -218,9 +224,15 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "store error", http.StatusInternalServerError)
 		return
 	}
-	points, err := h.deps.Store.UsageSeries(ctx, cr.res, start)
+	points, err := series(ctx, cr.res, start)
 	if err != nil {
 		log.Printf("admin: usage series: %v", err)
+		http.Error(w, "store error", http.StatusInternalServerError)
+		return
+	}
+	sharedTotals, err := h.deps.Store.ShareTotals(ctx, time.Date(y, m, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		log.Printf("admin: share totals: %v", err)
 		http.Error(w, "store error", http.StatusInternalServerError)
 		return
 	}
@@ -251,6 +263,13 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 			deleted += t.Rx
 		}
 	}
+	var sharedTotal int64
+	fleetShared, nodeShared := map[string]int64{}, map[[2]string]int64{}
+	for _, t := range sharedTotals {
+		sharedTotal += t.Rx
+		fleetShared[t.FleetID] += t.Rx
+		nodeShared[[2]string{t.FleetID, t.NodeID}] += t.Rx
+	}
 	for _, rt := range live.Nodes {
 		upNow += rt.Up
 	}
@@ -262,12 +281,15 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 		if a, b := fleetMonth[all[i].ID], fleetMonth[all[j].ID]; a != b {
 			return a > b
 		}
+		if a, b := fleetShared[all[i].ID], fleetShared[all[j].ID]; a != b {
+			return a > b
+		}
 		return all[i].LastOnline.After(all[j].LastOnline)
 	})
 	views := make([]fleetView, len(all))
 	var wg sync.WaitGroup
 	for i, f := range all {
-		views[i] = fleetView{ID: f.ID, Created: f.CreatedAt, LastOnline: f.LastOnline, Month: fleetMonth[f.ID]}
+		views[i] = fleetView{ID: f.ID, Created: f.CreatedAt, LastOnline: f.LastOnline, Month: fleetMonth[f.ID], Shared: fleetShared[f.ID]}
 		if ref := h.cfg.MonthlyReference; ref > 0 {
 			pct := float64(views[i].Month) / float64(ref) * 100
 			views[i].RefPct = int(min(pct, 100))
@@ -290,7 +312,7 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			for _, n := range ns {
-				nv := nodeView{Node: n, Rate: live.Nodes[n.ID], UpMonth: nodeMonth[[2]string{f.ID, n.ID}]}
+				nv := nodeView{Node: n, Rate: live.Nodes[n.ID], UpMonth: nodeMonth[[2]string{f.ID, n.ID}], SharedMonth: nodeShared[[2]string{f.ID, n.ID}]}
 				views[i].Up += nv.Up
 				if devices[n.ID] == f.ID {
 					views[i].Devices = append(views[i].Devices, nv)
@@ -314,13 +336,13 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 			names[n.ID] = n.Hostname
 		}
 		views[i].Series = fleetSeries(fleetPoints[v.ID], names, cr, start)
-		views[i].Chart = stackedChart(views[i].Series, cr.n)
+		views[i].Chart = stackedChart(views[i].Series, cr.n, kind)
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := page.Execute(w, map[string]any{
 		"Fleets": views, "Nodes": nodes, "DeviceCount": deviceCount, "Online": online, "Now": now,
 		"MaxFleets": h.cfg.MaxFleets, "NodesPerFleet": h.cfg.NodesPerFleet, "CSRF": h.csrf,
-		"Month": monthTotal, "UpNow": upNow, "Live": live.OK, "Deleted": deleted,
+		"Month": monthTotal, "SharedMonth": sharedTotal, "Kind": kind, "UpNow": upNow, "Live": live.OK, "Deleted": deleted,
 		"Reference": h.cfg.MonthlyReference, "Range": rangeKey,
 	}); err != nil {
 		log.Printf("admin: render: %v", err)

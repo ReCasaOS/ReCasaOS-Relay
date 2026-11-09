@@ -97,7 +97,11 @@ func (r *rig) startBox(fleetID, secret, nodeID, name string) *fakeBox {
 	}
 
 	ln := &chanListener{conns: make(chan net.Conn), done: make(chan struct{})}
-	srv := &http.Server{ErrorLog: log.New(io.Discard, "", 0), Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := &http.Server{ErrorLog: log.New(io.Discard, "", 0), Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/big" { // 20 MiB, for the shared-volume check on /admin
+			io.CopyN(w, zeroReader{}, 20<<20)
+			return
+		}
 		fmt.Fprintf(w, "hello from %s", name)
 	})}
 	go srv.Serve(ln)
@@ -160,6 +164,10 @@ func (b *fakeBox) sources() []*net.TCPAddr {
 	defer b.mu.Unlock()
 	return append([]*net.TCPAddr(nil), b.srcs...)
 }
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) { clear(p); return len(p), nil }
 
 // restConn reads from r (the bytes after the PROXY header) and writes to the stream.
 type restConn struct {

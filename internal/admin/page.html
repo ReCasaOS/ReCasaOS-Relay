@@ -44,6 +44,7 @@ polygon { fill:var(--c); fill-opacity:.8; }
 <div class="stat"><b>{{.DeviceCount}}</b><span>devices</span></div>
 <div class="stat"><b>{{.NodesPerFleet}}</b><span>nodes max per fleet</span></div>
 <div class="stat"><b>{{bytes .Month}}</b><span>relayed this month</span></div>
+<div class="stat"><b>{{bytes .SharedMonth}}</b><span>shared this month</span></div>
 <div class="stat"><b>{{if .Live}}{{rate .UpNow}}{{else}}–{{end}}</b><span>relayed now{{if not .Live}} · metering unavailable{{end}}</span></div>
 </div>
 {{define "row"}}<tr data-node-id="{{.N.ID}}" data-up-month="{{.N.UpMonth}}">
@@ -51,6 +52,7 @@ polygon { fill:var(--c); fill-opacity:.8; }
 <td>{{if .N.Online}}<span class="on">online</span>{{else}}<span class="off">offline</span>{{if not .N.LastSeen.IsZero}} · {{ago .N.LastSeen .R.Now}}{{end}}{{end}}</td>
 <td class="rt">{{if .R.Live}}{{if .N.Idle}}<span class="mut">≈ 0 relayed</span>{{else}}<span class="dn">↓ {{rate .N.Down}}</span> <span class="up">↑ {{rate .N.Up}}</span>{{end}}{{end}}</td>
 <td class="mut rt">{{bytes .N.UpMonth}} this month</td>
+<td class="mut rt" data-shared-bytes="{{.N.SharedMonth}}">{{bytes .N.SharedMonth}} shared</td>
 <td class="mut">{{if not .N.Expiry.IsZero}}<span class="{{if expired .N.Expiry .R.Now}}err{{end}}">key {{if expired .N.Expiry .R.Now}}expired{{else}}expires {{until .N.Expiry .R.Now}}{{end}}</span>{{end}}</td>
 <td style="text-align:right"><form method="post" action="/admin/fleets/{{.F}}/nodes/{{.N.ID}}/remove" onsubmit="return confirm('Remove this node?')">
 <input type="hidden" name="csrf" value="{{.R.CSRF}}"><button>Remove</button></form></td>
@@ -61,6 +63,7 @@ polygon { fill:var(--c); fill-opacity:.8; }
 <code>{{.ID}}</code>
 {{if .Err}}<span class="err">nodes unavailable</span>{{else}}<span>{{.Online}} / {{len .Nodes}} online</span>{{if .Devices}}<span>{{len .Devices}} devices</span>{{end}}{{end}}
 {{if $.Reference}}<span class="bar {{.RefClass}}"><i style="width:{{.RefPct}}%"></i></span><span>{{bytes .Month}} / {{bytes $.Reference}}</span>{{else}}<span>{{bytes .Month}} this month</span>{{end}}
+<span>{{bytes .Shared}} shared</span>
 {{if $.Live}}<span class="rt">{{rate .Up}} now</span>{{end}}
 <span class="mut">created {{ago .Created $.Now}} · last activity {{ago .LastOnline $.Now}}</span>
 <span class="sp"></span>
@@ -77,9 +80,9 @@ polygon { fill:var(--c); fill-opacity:.8; }
 {{$fid := .ID}}{{range .Devices}}{{template "row" dict "N" . "R" $ "F" $fid}}{{end}}
 </table>{{end}}
 <div class="chart">
-<div class="tabs"><a href="?range=1h"{{if eq $.Range "1h"}} class="cur" aria-current="page"{{end}}>1 h</a><a href="?range=24h"{{if eq $.Range "24h"}} class="cur" aria-current="page"{{end}}>24 h</a><a href="?range=30d"{{if eq $.Range "30d"}} class="cur" aria-current="page"{{end}}>30 d</a></div>
+<div class="tabs"><a href="?range=1h{{if eq $.Kind "shared"}}&amp;kind=shared{{end}}"{{if eq $.Range "1h"}} class="cur" aria-current="page"{{end}}>1 h</a><a href="?range=24h{{if eq $.Kind "shared"}}&amp;kind=shared{{end}}"{{if eq $.Range "24h"}} class="cur" aria-current="page"{{end}}>24 h</a><a href="?range=30d{{if eq $.Kind "shared"}}&amp;kind=shared{{end}}"{{if eq $.Range "30d"}} class="cur" aria-current="page"{{end}}>30 d</a> � <a href="?range={{$.Range}}"{{if ne $.Kind "shared"}} class="cur" aria-current="page"{{end}}>relayed</a><a href="?range={{$.Range}}&amp;kind=shared"{{if eq $.Kind "shared"}} class="cur" aria-current="page"{{end}}>shared</a></div>
 {{.Chart}}
-<div class="lg">{{range $i, $s := .Series}}<span><b class="c{{$i}}"></b>{{$s.Name}}</span>{{else}}<span>no relayed traffic in this range</span>{{end}}</div>
+<div class="lg">{{range $i, $s := .Series}}<span><b class="c{{$i}}"></b>{{$s.Name}}</span>{{else}}<span>no {{$.Kind}} traffic in this range</span>{{end}}</div>
 </div>
 </div>
 </details>
