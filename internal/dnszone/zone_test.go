@@ -64,6 +64,18 @@ func ask(t *testing.T, z *Zone, name string, typ dnsmessage.Type) dnsmessage.Mes
 	return m
 }
 
+// wantSOA checks the negative-caching SOA in the authority section.
+func wantSOA(t *testing.T, m dnsmessage.Message) {
+	t.Helper()
+	if len(m.Authorities) != 1 || m.Authorities[0].Header.Name.String() != origin+"." {
+		t.Fatalf("authority = %+v", m.Authorities)
+	}
+	soa, ok := m.Authorities[0].Body.(*dnsmessage.SOAResource)
+	if !ok || soa.NS.String() != "ns."+origin+"." || soa.MinTTL != 60 || soa.Serial != 7200 {
+		t.Fatalf("authority SOA = %+v", m.Authorities[0].Body)
+	}
+}
+
 func TestApexSOAandNS(t *testing.T) {
 	z := newZone()
 	m := ask(t, z, origin, dnsmessage.TypeSOA)
@@ -106,6 +118,7 @@ func TestWildcardAUnderZone(t *testing.T) {
 	if m.RCode != dnsmessage.RCodeSuccess || len(m.Answers) != 0 {
 		t.Fatalf("no AAAA configured: %+v", m)
 	}
+	wantSOA(t, m)
 }
 
 func TestTXTOnlyForAcmeChallenge(t *testing.T) {
@@ -122,14 +135,16 @@ func TestTXTOnlyForAcmeChallenge(t *testing.T) {
 	if m.RCode != dnsmessage.RCodeSuccess || len(m.Answers) != 0 {
 		t.Fatalf("foo.boxa: %+v", m)
 	}
+	wantSOA(t, m)
 }
 
 func TestNXDomainAndRefused(t *testing.T) {
 	z := newZone()
 	m := ask(t, z, "a.b.c."+origin, dnsmessage.TypeA)
-	if m.RCode != dnsmessage.RCodeNameError || len(m.Answers) != 0 || len(m.Authorities) != 1 || m.Authorities[0].Header.Type != dnsmessage.TypeSOA {
+	if m.RCode != dnsmessage.RCodeNameError || !m.Authoritative || len(m.Answers) != 0 {
 		t.Fatalf("%+v", m)
 	}
+	wantSOA(t, m)
 	m = ask(t, z, "example.org", dnsmessage.TypeA)
 	if m.RCode != dnsmessage.RCodeRefused {
 		t.Fatalf("%+v", m)
@@ -194,5 +209,84 @@ func TestServeUDPAndTCP(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Serve did not stop")
+	}
+}
+
+func TestHostileInput(t *testing.T) {
+	z := newZone()
+	ctx := context.Background()
+	q := query(t, "boxa."+origin, dnsmessage.TypeA)
+	for name, pkt := range map[string][]byte{
+		"empty": nil, "short": q[:5], "truncated question": q[:15],
+		"response bit": func() []byte { r := append([]byte(nil), q...); r[2] |= 0x80; return r }(),
+	} {
+		if out, err := z.Answer(ctx, pkt); err == nil {
+			t.Errorf("%s: answered with %x", name, out)
+		}
+	}
+	rcode := func(pkt []byte) dnsmessage.RCode {
+		out, err := z.Answer(ctx, pkt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m dnsmessage.Message
+		if err := m.Unpack(out); err != nil {
+			t.Fatal(err)
+		}
+		return m.RCode
+	}
+	op := append([]byte(nil), q...)
+	op[2] |= 4 << 3 // opcode NOTIFY
+	if rc := rcode(op); rc != dnsmessage.RCodeNotImplemented {
+		t.Errorf("opcode: %v", rc)
+	}
+	for _, n := range []byte{0, 2} {
+		bad := append([]byte(nil), q...)
+		bad[5] = n
+		if rc := rcode(bad); rc != dnsmessage.RCodeFormatError {
+			t.Errorf("QDCount %d: %v", n, rc)
+		}
+	}
+}
+
+type flakyListener struct {
+	net.Listener
+	failed bool
+}
+
+type tempErr struct{}
+
+func (tempErr) Error() string { return "too many open files" }
+
+func (l *flakyListener) Accept() (net.Conn, error) {
+	if !l.failed {
+		l.failed = true
+		return nil, tempErr{}
+	}
+	return l.Listener.Accept()
+}
+
+func TestServeSurvivesTransientAcceptError(t *testing.T) {
+	z := newZone()
+	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	l, _ := net.Listen("tcp", "127.0.0.1:0")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- z.Serve(ctx, pc, &flakyListener{Listener: l}) }()
+	q := query(t, "boxa."+origin, dnsmessage.TypeA)
+	tc, err := net.Dial("tcp", l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tc.Close()
+	tc.SetDeadline(time.Now().Add(5 * time.Second))
+	tc.Write(append(binary.BigEndian.AppendUint16(nil, uint16(len(q))), q...))
+	var hdr [2]byte
+	if _, err := io.ReadFull(tc, hdr[:]); err != nil {
+		t.Fatalf("no answer after a transient Accept error: %v", err)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/netip"
 	"strings"
@@ -37,12 +38,16 @@ func (z *Zone) Answer(ctx context.Context, msg []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if h.Response {
+		return nil, errors.New("not a query")
+	}
+	if binary.BigEndian.Uint16(msg[4:6]) != 1 { // Start succeeded: msg has its 12-byte header
+		b := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: h.ID, Response: true, RecursionDesired: h.RecursionDesired, RCode: dnsmessage.RCodeFormatError})
+		return b.Finish()
+	}
 	q, err := p.Question()
 	if err != nil {
 		return nil, err
-	}
-	if h.Response {
-		return nil, errors.New("not a query")
 	}
 	origin := strings.ToLower(strings.TrimSuffix(z.Origin, "."))
 	name := strings.ToLower(strings.TrimSuffix(q.Name.String(), "."))
@@ -146,16 +151,18 @@ func (z *Zone) soa(owner dnsmessage.Name, origin string) dnsmessage.Resource {
 	}
 }
 
+const maxTCPConns = 256
+
 // Serve answers on pc (UDP) and l (TCP, 2-byte length prefix) until ctx is done, then closes both
 // and waits for the connections in flight. A UDP query is answered inline: the TXT lookup is one
 // SQLite read, so a flood slows the zone down rather than growing goroutines (shortcut: no
-// per-source rate limit, add one if the port is abused).
+// per-source rate limit, add one if the port is abused). Transient read/accept errors are retried
+// with a backoff; Serve returns an error only when a socket is closed under it, and nil on ctx.Done.
 func (z *Zone) Serve(ctx context.Context, pc net.PacketConn, l net.Listener) error {
 	var wg sync.WaitGroup
 	conns := map[net.Conn]struct{}{}
 	var mu sync.Mutex
-	go func() {
-		<-ctx.Done()
+	closeAll := func() {
 		pc.Close()
 		l.Close()
 		mu.Lock()
@@ -163,19 +170,34 @@ func (z *Zone) Serve(ctx context.Context, pc net.PacketConn, l net.Listener) err
 			c.Close()
 		}
 		mu.Unlock()
+	}
+	stopWatch := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			closeAll()
+		case <-stopWatch:
+		}
 	}()
 
 	errc := make(chan error, 2)
+	slots := make(chan struct{}, maxTCPConns)
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		buf := make([]byte, 4096)
+		var bo backoff
 		for {
 			n, addr, err := pc.ReadFrom(buf)
 			if err != nil {
-				errc <- err
-				return
+				if errors.Is(err, net.ErrClosed) {
+					errc <- err
+					return
+				}
+				bo.wait("udp read", err)
+				continue
 			}
+			bo = backoff{}
 			if out, err := z.Answer(ctx, buf[:n]); err == nil {
 				pc.WriteTo(out, addr)
 			}
@@ -183,15 +205,28 @@ func (z *Zone) Serve(ctx context.Context, pc net.PacketConn, l net.Listener) err
 	}()
 	go func() {
 		defer wg.Done()
+		var bo backoff
 		for {
 			c, err := l.Accept()
 			if err != nil {
-				errc <- err
-				return
+				if errors.Is(err, net.ErrClosed) {
+					errc <- err
+					return
+				}
+				bo.wait("tcp accept", err) // EMFILE, ECONNABORTED...
+				continue
+			}
+			bo = backoff{}
+			select {
+			case slots <- struct{}{}:
+			default:
+				c.Close() // too many connections open
+				continue
 			}
 			mu.Lock()
 			if ctx.Err() != nil {
 				mu.Unlock()
+				<-slots
 				c.Close()
 				continue
 			}
@@ -204,20 +239,32 @@ func (z *Zone) Serve(ctx context.Context, pc net.PacketConn, l net.Listener) err
 				mu.Lock()
 				delete(conns, c)
 				mu.Unlock()
+				<-slots
 			}()
 		}
 	}()
 
 	err := <-errc
-	if ctx.Err() == nil { // a listener died on its own: stop the other one too
-		pc.Close()
-		l.Close()
-	}
+	close(stopWatch)
+	closeAll() // one listener is gone: the other and the open connections go too, so Wait returns
 	wg.Wait()
 	if ctx.Err() != nil {
 		return nil
 	}
 	return err
+}
+
+// backoff sleeps 50 ms, doubling to 1 s, on consecutive errors (like cmd/share).
+type backoff struct{ d time.Duration }
+
+func (b *backoff) wait(what string, err error) {
+	if b.d == 0 {
+		b.d = 50 * time.Millisecond
+	} else if b.d *= 2; b.d > time.Second {
+		b.d = time.Second
+	}
+	log.Printf("dns %s: %v; retrying in %v", what, err, b.d)
+	time.Sleep(b.d)
 }
 
 func (z *Zone) serveConn(ctx context.Context, c net.Conn) {

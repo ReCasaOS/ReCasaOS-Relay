@@ -125,6 +125,7 @@ func run() error {
 	janitorStarted, janitorDone := false, make(chan struct{})
 	meterStarted, meterDone := false, make(chan struct{})
 	zoneStarted, zoneDone := false, make(chan struct{})
+	var zoneErr error // written by the zone goroutine, read after zoneDone is closed
 	waitJanitor := func() {
 		if zone != nil {
 			<-zoneDone
@@ -152,6 +153,18 @@ func run() error {
 					mtr.Run(ctx, 15*time.Second)
 				}()
 			}
+			if zone != nil {
+				zoneStarted = true
+				go func() {
+					defer close(zoneDone)
+					if err := zone.Serve(ctx, dnsPC, dnsL); err != nil {
+						zoneErr = err
+						log.Printf("dns: %v", err)
+						stop() // shuts the HTTP server down too
+					}
+				}()
+				log.Printf("dns zone %s listening on %s", zone.Origin, dnsPC.LocalAddr())
+			}
 			log.Printf("enrolment listening on %s", srv.Addr)
 			return srv.ListenAndServe()
 		})
@@ -168,7 +181,7 @@ func run() error {
 	}
 	<-done
 	waitJanitor()
-	return nil
+	return zoneErr // non-nil only if the DNS server died and took the process down
 }
 
 // listenZone builds the zone for domain (SHARE_DOMAIN is the delegated zone itself, e.g. box.recasaos.org; the TXT answers come from the store) and binds UDP and TCP
