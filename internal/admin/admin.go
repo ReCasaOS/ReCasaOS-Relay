@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -121,6 +122,9 @@ func New(cfg Config, deps Deps) (http.Handler, error) {
 	mux.HandleFunc("GET /admin/{$}", h.index)
 	mux.HandleFunc("POST /admin/fleets/{id}/delete", h.deleteFleet)
 	mux.HandleFunc("POST /admin/fleets/{id}/nodes/{node}/remove", h.removeNode)
+	mux.HandleFunc("POST /admin/share/banned", h.ban)
+	mux.HandleFunc("POST /admin/share/names/{name}/revoke", h.ban)
+	mux.HandleFunc("POST /admin/share/banned/{name}/delete", h.unban)
 	return h.guard(mux), nil
 }
 
@@ -216,6 +220,15 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 		log.Printf("admin: list fleets: %v", err)
 		http.Error(w, "store error", http.StatusInternalServerError)
 		return
+	}
+	// Like the devices below, a failure must not take the fleets down.
+	names, err := h.deps.Store.ListNames(ctx)
+	if err != nil {
+		log.Printf("admin: list names: %v", err)
+	}
+	banned, err := h.deps.Store.BannedNames(ctx)
+	if err != nil {
+		log.Printf("admin: banned names: %v", err)
 	}
 	y, m, _ := now.UTC().Date()
 	totals, err := h.deps.Store.UsageTotals(ctx, time.Date(y, m, 1, 0, 0, 0, 0, time.UTC))
@@ -347,6 +360,7 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 		"MaxFleets": h.cfg.MaxFleets, "NodesPerFleet": h.cfg.NodesPerFleet, "CSRF": h.csrf,
 		"Month": monthTotal, "SharedMonth": sharedTotal, "Kind": kind, "UpNow": upNow, "Live": live.OK, "Deleted": deleted, "DeletedShared": deletedShared,
 		"Reference": h.cfg.MonthlyReference, "Range": rangeKey,
+		"Names": names, "Banned": banned,
 	}); err != nil {
 		log.Printf("admin: render: %v", err)
 	}
@@ -407,6 +421,43 @@ func (h *handler) removeNode(w http.ResponseWriter, r *http.Request) {
 			}
 			log.Printf("admin: fleet %s: node %s removed", f.ID, n.Hostname)
 		}
+	}
+	http.Redirect(w, r, "/admin/", http.StatusSeeOther)
+}
+
+// label is the syntax of a share name; a banned name may be a reserved word, so sharename.Valid
+// (which refuses those) is not used.
+var label = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{1,30}[a-z0-9])?$`)
+
+// ban adds a name to the forbidden list and frees it from its holder: its box's tunnel closes at
+// the next revalidation. The name comes from the form (add) or from the path (revoke).
+func (h *handler) ban(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		name = r.PostFormValue("name")
+	}
+	if !label.MatchString(name) {
+		http.Error(w, "invalid name", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), opTimeout)
+	defer cancel()
+	if err := h.deps.Store.BanName(ctx, name, h.deps.Now()); err != nil {
+		log.Printf("admin: ban %s: %v", name, err)
+		http.Error(w, "store error", http.StatusInternalServerError)
+		return
+	}
+	log.Printf("admin: name %s forbidden", name)
+	http.Redirect(w, r, "/admin/", http.StatusSeeOther)
+}
+
+func (h *handler) unban(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), opTimeout)
+	defer cancel()
+	if err := h.deps.Store.UnbanName(ctx, r.PathValue("name")); err != nil {
+		log.Printf("admin: unban %s: %v", r.PathValue("name"), err)
+		http.Error(w, "store error", http.StatusInternalServerError)
+		return
 	}
 	http.Redirect(w, r, "/admin/", http.StatusSeeOther)
 }

@@ -367,6 +367,12 @@ func (s *Store) Fleet(ctx context.Context, id string) (store.Fleet, error) {
 	return f, err
 }
 
+// DeleteBoxKey logs "boxkey:<node id>".
+func (s *Store) DeleteBoxKey(ctx context.Context, nodeID string) error {
+	s.Log.Add("boxkey:" + nodeID)
+	return s.Store.DeleteBoxKey(ctx, nodeID)
+}
+
 func (s *Store) DeleteFleet(ctx context.Context, id string) error {
 	s.Log.Add("row")
 	s.mu.Lock()

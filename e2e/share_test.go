@@ -5,10 +5,12 @@ package e2e
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -169,7 +171,6 @@ func TestShareRoutesBySNIAndIsolates(t *testing.T) {
 		t.Fatalf("/internal through tlsfront: %d, want 404", resp.StatusCode)
 	}
 
-	// TODO(task 11): admin "Revoke" boxa -> within 70 s its names are closed and its session reports 4403.
 	// Shared traffic is metered: the `share` process posts its deltas every 15 s, and /admin/ shows
 	// boxa's node with the volume it sent (data-shared-bytes), within +-10 % of the 20 MiB downloaded.
 	const big = 20 << 20
@@ -197,6 +198,56 @@ func TestShareRoutesBySNIAndIsolates(t *testing.T) {
 		}
 		return nil
 	})
+
+	// Revoke boxa on /admin: the name joins the forbidden list, and within the 60 s revalidation its
+	// tunnel closes with 4403 and its names stop answering.
+	adminGet := func() string {
+		req, _ := http.NewRequest("GET", r.frontURL+"/admin/", nil)
+		req.SetBasicAuth("e2e", e2eAdminToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return string(b)
+	}
+	tok := regexp.MustCompile(`name="csrf" value="([0-9a-f]+)"`).FindStringSubmatch(adminGet())
+	if tok == nil {
+		t.Fatal("no csrf token on /admin")
+	}
+	req, _ := http.NewRequest("POST", r.frontURL+"/admin/share/names/boxa/revoke", strings.NewReader(url.Values{"csrf": {tok[1]}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("e2e", e2eAdminToken)
+	noRedirect := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err = noRedirect.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("revoke boxa: %d, want 303", resp.StatusCode)
+	}
+	eventually(t, "boxa's names closed and its tunnel reports 4403", 70*time.Second, func() error {
+		if code := boxa.sess.CloseStatus(); code != 4403 {
+			return fmt.Errorf("close status %d, want 4403", code)
+		}
+		c, err := r.dialSNI("app.boxa.box.relay.test")
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		c.SetDeadline(time.Now().Add(5 * time.Second))
+		if err := c.Handshake(); err == nil {
+			return errors.New("boxa's name still completes a handshake")
+		}
+		return nil
+	})
+	page := adminGet()
+	i := strings.Index(page, "Forbidden names")
+	if i < 0 || !strings.Contains(page[i:], "boxa") {
+		t.Fatal("/admin does not list boxa under Forbidden names")
+	}
 }
 
 func TestShareCertificateViaDNS01(t *testing.T) {

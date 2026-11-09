@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"errors"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -510,5 +511,82 @@ func TestAdminShowsSharedThisMonth(t *testing.T) {
 func TestPageTemplateIsUTF8(t *testing.T) {
 	if !utf8.ValidString(pageHTML) {
 		t.Fatal("page.html is not valid UTF-8")
+	}
+}
+
+func TestAdminBanAndUnban(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	form := func(name string) url.Values { f := csrf(e); f.Set("name", name); return f }
+
+	if w := e.do("POST", "/admin/share/banned", token, url.Values{"name": {"spam"}}); w.Code != 400 {
+		t.Fatalf("ban without csrf: %d", w.Code)
+	}
+	for _, bad := range []string{"", "A b", "a-"} {
+		if w := e.do("POST", "/admin/share/banned", token, form(bad)); w.Code != 400 {
+			t.Fatalf("ban %q: %d, want 400", bad, w.Code)
+		}
+	}
+	// A reserved word is a valid label: the operator may ban it too.
+	for _, n := range []string{"spam", "www"} {
+		if w := e.do("POST", "/admin/share/banned", token, form(n)); w.Code != 303 || w.Header().Get("Location") != "/admin/" {
+			t.Fatalf("ban %s: %d %s", n, w.Code, w.Header().Get("Location"))
+		}
+	}
+	if got, _ := e.st.BannedNames(ctx); strings.Join(got, ",") != "spam,www" {
+		t.Fatalf("banned = %v", got)
+	}
+	body := e.do("GET", "/admin/", token, nil).Body.String()
+	if !strings.Contains(body, "Forbidden names") || !strings.Contains(body, `action="/admin/share/banned/spam/delete"`) {
+		t.Fatalf("page lacks the forbidden list:\n%s", body)
+	}
+	if w := e.do("POST", "/admin/share/banned/spam/delete", token, nil); w.Code != 400 {
+		t.Fatalf("unban without csrf: %d", w.Code)
+	}
+	if w := e.do("POST", "/admin/share/banned/spam/delete", token, csrf(e)); w.Code != 303 {
+		t.Fatalf("unban: %d", w.Code)
+	}
+	if got, _ := e.st.BannedNames(ctx); strings.Join(got, ",") != "www" {
+		t.Fatalf("banned after unban = %v", got)
+	}
+}
+
+func TestAdminRevokeBansAndReleases(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	if err := e.st.SetBoxKey(ctx, "aaaa", "7", "key7", t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.ClaimName(ctx, "7", "boxa", t0); err != nil {
+		t.Fatal(err)
+	}
+	body := e.do("GET", "/admin/", token, nil).Body.String()
+	for _, want := range []string{"Shared names", "boxa", `action="/admin/share/names/boxa/revoke"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("page lacks %q", want)
+		}
+	}
+	if w := e.do("POST", "/admin/share/names/boxa/revoke", token, nil); w.Code != 400 {
+		t.Fatalf("revoke without csrf: %d", w.Code)
+	}
+	if w := e.do("POST", "/admin/share/names/boxa/revoke", token, csrf(e)); w.Code != 303 {
+		t.Fatalf("revoke: %d", w.Code)
+	}
+	if names, _ := e.st.ListNames(ctx); len(names) != 0 {
+		t.Fatalf("names after revoke: %v", names)
+	}
+	if got, _ := e.st.BannedNames(ctx); strings.Join(got, ",") != "boxa" {
+		t.Fatalf("banned = %v", got)
+	}
+	if err := e.st.ClaimName(ctx, "7", "boxa", t0); !errors.Is(err, store.ErrBanned) {
+		t.Fatalf("reclaim: %v, want ErrBanned", err)
+	}
+	body = e.do("GET", "/admin/", token, nil).Body.String()
+	i := strings.Index(body, "Forbidden names")
+	if i < 0 || !strings.Contains(body[i:], "boxa") {
+		t.Fatal("boxa is not listed under Forbidden names")
+	}
+	if w := e.do("POST", "/admin/share/names/A_b/revoke", token, csrf(e)); w.Code != 400 {
+		t.Fatalf("revoke of an invalid name: %d", w.Code)
 	}
 }

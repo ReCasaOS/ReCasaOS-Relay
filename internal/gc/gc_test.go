@@ -500,3 +500,41 @@ func TestRunSurvivesAPanickingTick(t *testing.T) {
 	cancel()
 	<-done
 }
+
+func TestGCDeletesBoxKeysOfVanishedNodes(t *testing.T) {
+	r := newRig(t)
+	user := r.fleet(t, "aaaa", time.Hour)
+	keep := r.hs.AddNode(user, "kept", true)
+	gone := r.hs.AddNode(user, "gone", true)
+	for id, k := range map[string]string{keep: "key-keep", gone: "key-gone"} {
+		if err := r.st.SetBoxKey(bg, "aaaa", id, k, t0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.st.ClaimName(bg, gone, "goneabox", t0); err != nil {
+		t.Fatal(err)
+	}
+	// The node list cannot be read: no key may go.
+	r.hs.Fail("nodes", errors.New("headscale down"))
+	Tick(bg, r.d)
+	if keys, _ := r.st.BoxKeysOf(bg, "aaaa"); len(keys) != 2 {
+		t.Fatalf("keys after a failed list: %v", keys)
+	}
+	r.hs.Heal("nodes")
+
+	if err := r.hs.DeleteNodeByID(bg, gone); err != nil {
+		t.Fatal(err)
+	}
+	r.log.Reset()
+	Tick(bg, r.d)
+	keys, _ := r.st.BoxKeysOf(bg, "aaaa")
+	if len(keys) != 1 || keys[keep] != "key-keep" {
+		t.Fatalf("keys = %v, want only the present node's", keys)
+	}
+	if !strings.Contains(r.log.String(), "boxkey:"+gone) {
+		t.Fatalf("calls %s lack the box key deletion", r.log)
+	}
+	if err := r.st.ClaimName(bg, keep, "goneabox", t0); !errors.Is(err, store.ErrQuarantined) {
+		t.Fatalf("the vanished node's name: %v, want quarantined", err)
+	}
+}

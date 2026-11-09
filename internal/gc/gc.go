@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
+	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
 )
 
@@ -79,6 +80,7 @@ func Tick(ctx context.Context, d Deps) {
 			continue
 		}
 		checked[f.ID] = true
+		pruneBoxKeys(ctx, st, f, nodes)
 		empty[f.ID] = len(nodes) == 0
 		for _, n := range nodes {
 			if n.Online {
@@ -189,4 +191,26 @@ func pruneKeys(ctx context.Context, d Deps, users map[string]bool, now time.Time
 		}
 	}
 	return pending, true
+}
+
+// pruneBoxKeys deletes the box keys of nodes that left the fleet (tailscale logout, removal): the
+// delete cascades to the node's name, which the store quarantines. nodes is a successful read.
+func pruneBoxKeys(ctx context.Context, st store.Store, f store.Fleet, nodes []headscale.Node) {
+	keys, err := st.BoxKeysOf(ctx, f.ID)
+	if err != nil {
+		log.Printf("gc: fleet %s: box keys: %v", f.ID, err)
+		return
+	}
+	present := make(map[string]bool, len(nodes))
+	for _, n := range nodes {
+		present[n.ID] = true
+	}
+	for id := range keys {
+		if present[id] {
+			continue
+		}
+		if err := st.DeleteBoxKey(ctx, id); err != nil {
+			log.Printf("gc: fleet %s: delete box key of node %s: %v", f.ID, id, err)
+		}
+	}
 }

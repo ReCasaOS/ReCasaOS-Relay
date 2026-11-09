@@ -9,6 +9,7 @@
 @media (prefers-color-scheme: dark) { :root { --bg:#0d1117; --fg:#e6edf3; --mut:#8b949e; --line:#30363d; --card:#161b22; --ok:#3fb950; --bad:#f85149; --s1:#58a6ff; --s2:#bc8cff; --s3:#d29922; } }
 body { font:15px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--fg); margin:0 auto; max-width:60rem; padding:1rem 16px 3rem; }
 h1 { font-size:1.3rem; margin:.5rem 0 1rem; }
+h2 { font-size:1.05rem; margin:1.5rem 0 .5rem; }
 .stats { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:1.2rem; }
 .stat { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:.5rem .9rem; }
 .stat b { display:block; font-size:1.25rem; }
@@ -88,6 +89,20 @@ polygon { fill:var(--c); fill-opacity:.8; }
 </details>
 {{else}}<p class="mut">No fleet yet.</p>{{end}}
 {{if or .Deleted .DeletedShared}}<p class="mut">deleted fleets: {{bytes .Deleted}} relayed &middot; {{bytes .DeletedShared}} shared this month</p>{{end}}
+<h2>Shared names</h2>
+{{if .Names}}<table>
+{{range .Names}}<tr><td><code>{{.Name}}</code></td><td class="mut">fleet {{.FleetID}}</td><td class="mut">node {{.NodeID}}</td><td class="mut">since {{ago .ClaimedAt $.Now}}</td>
+<td style="text-align:right"><form method="post" action="/admin/share/names/{{.Name}}/revoke" onsubmit="return confirm('Revoke {{.Name}}? It joins the forbidden names and the tunnel closes.')">
+<input type="hidden" name="csrf" value="{{$.CSRF}}"><button>Revoke</button></form></td></tr>
+{{end}}</table>{{else}}<p class="mut">No shared name.</p>{{end}}
+<h2>Forbidden names</h2>
+{{if .Banned}}<table>
+{{range .Banned}}<tr><td><code>{{.}}</code></td>
+<td style="text-align:right"><form method="post" action="/admin/share/banned/{{.}}/delete">
+<input type="hidden" name="csrf" value="{{$.CSRF}}"><button>Remove</button></form></td></tr>
+{{end}}</table>{{else}}<p class="mut">No forbidden name.</p>{{end}}
+<form method="post" action="/admin/share/banned">
+<input type="hidden" name="csrf" value="{{.CSRF}}"><input name="name" placeholder="name" required minlength="3" maxlength="32" pattern="[a-z0-9]([a-z0-9-]{1,30}[a-z0-9])?"> <button>Forbid</button></form>
 <script>
 // First, so nothing below can stop the reload.
 setInterval(function(){ if (!document.hidden) location.reload() }, 15000)
