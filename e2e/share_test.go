@@ -1,0 +1,156 @@
+//go:build e2e
+
+package e2e
+
+import (
+	"context"
+	"crypto/tls"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+
+	"golang.org/x/net/dns/dnsmessage"
+)
+
+// boxNodeID starts a tailscale node in a fresh fleet (for a Headscale node id) and returns the fleet.
+func (r *rig) boxNodeID(fleetName string) (id, secret, nodeID string) {
+	id, secret = r.createFleet(fleetName)
+	r.startNode(fleetName, strings.ToLower(fleetName)+"1", r.joinKey(id, secret))
+	eventually(r.t, "node of "+fleetName+" registered", 30*time.Second, func() error {
+		ns, err := r.hs.ListNodes(context.Background(), "f-"+id)
+		if err != nil || len(ns) != 1 {
+			return fmt.Errorf("nodes %v, err %v", ns, err)
+		}
+		nodeID = ns[0].ID
+		return nil
+	})
+	return
+}
+
+// visit does GET / on host as a visitor of share's 443, pinning the box's own certificate; it returns the
+// body and the visitor's local port.
+func (r *rig) visit(host string, pin *fakeBox) (string, int, error) {
+	c, err := net.DialTimeout("tcp", r.shareAddr, 5*time.Second)
+	if err != nil {
+		return "", 0, err
+	}
+	port := c.LocalAddr().(*net.TCPAddr).Port
+	tc := tls.Client(c, &tls.Config{ServerName: host, InsecureSkipVerify: true,
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 || string(cs.PeerCertificates[0].Raw) != string(pin.cert.Certificate[0]) {
+				return fmt.Errorf("certificate is not %s's", pin.name)
+			}
+			return nil
+		}})
+	cl := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
+		DialTLSContext: func(context.Context, string, string) (net.Conn, error) { return tc, nil }}}
+	defer cl.CloseIdleConnections()
+	resp, err := cl.Get("https://" + host + "/")
+	if err != nil {
+		return "", port, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	return string(b), port, err
+}
+
+// txt asks the zone (enrolment's DNS on loopback) for the TXT records of name.
+func (r *rig) txt(name string) []string {
+	r.t.Helper()
+	addr := r.mustCompose("port", "--protocol", "udp", "enrolment", "53")
+	q := dnsmessage.Message{Header: dnsmessage.Header{ID: 7}, Questions: []dnsmessage.Question{{
+		Name: dnsmessage.MustNewName(name + "."), Type: dnsmessage.TypeTXT, Class: dnsmessage.ClassINET}}}
+	pkt, _ := q.Pack()
+	c, err := net.Dial("udp", addr)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(5 * time.Second))
+	c.Write(pkt)
+	buf := make([]byte, 4096)
+	n, err := c.Read(buf)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	var m dnsmessage.Message
+	if err := m.Unpack(buf[:n]); err != nil {
+		r.t.Fatal(err)
+	}
+	var out []string
+	for _, a := range m.Answers {
+		if t, ok := a.Body.(*dnsmessage.TXTResource); ok {
+			out = append(out, strings.Join(t.TXT, ""))
+		}
+	}
+	return out
+}
+
+func TestShareRoutesBySNIAndIsolates(t *testing.T) {
+	r := newRig(t)
+	r.up()
+	ida, seca, na := r.boxNodeID("A")
+	idb, secb, nb := r.boxNodeID("B")
+	boxa := r.startBox(ida, seca, na, "boxa")
+	boxb := r.startBox(idb, secb, nb, "boxb")
+
+	// Routing by SNI: boxa answers for its names, with its own certificate and the visitor's source port.
+	body, port, err := r.visit("app.boxa.box.relay.test", boxa)
+	if err != nil || body != "hello from boxa" {
+		t.Fatalf("visit boxa: %q, %v", body, err)
+	}
+	// Docker's port publishing (userland proxy, Docker Desktop NAT) rewrites the source address, so the
+	// visitor's own port is only comparable when the source is untouched; otherwise a real one must arrive.
+	srcs := boxa.sources()
+	if len(srcs) != 1 || srcs[0].Port == 0 || srcs[0].IP == nil {
+		t.Fatalf("PROXY sources %v, want one with a source address", srcs)
+	}
+	if srcs[0].IP.IsLoopback() && srcs[0].Port != port {
+		t.Fatalf("PROXY source port %d, want the visitor's %d", srcs[0].Port, port)
+	}
+	t.Logf("PROXY source %v (visitor port %d)", srcs[0], port)
+	if n := boxb.streams.Load(); n != 0 {
+		t.Fatalf("boxb received %d stream(s) meant for boxa", n)
+	}
+	if _, _, err := r.visit("app.boxa.box.relay.test", boxb); err == nil {
+		t.Fatal("boxa's name answered with boxb's certificate")
+	}
+
+	// boxb cannot take boxa's name.
+	if code, out := boxb.signed("PUT", "/v1/share/name", `{"name":"boxa"}`); code != http.StatusConflict || !strings.Contains(out, "name taken") {
+		t.Fatalf("boxb claims boxa: %d %s", code, out)
+	}
+
+	// boxb's ACME token lands under boxb only.
+	if code, out := boxb.signed("PUT", "/v1/share/acme", `{"value":"token-of-b"}`); code != http.StatusNoContent {
+		t.Fatalf("boxb acme: %d %s", code, out)
+	}
+	eventually(t, "boxb TXT published", 10*time.Second, func() error {
+		if got := r.txt("_acme-challenge.boxb.box.relay.test"); len(got) != 1 || got[0] != "token-of-b" {
+			return fmt.Errorf("boxb TXT = %v", got)
+		}
+		return nil
+	})
+	if got := r.txt("_acme-challenge.boxa.box.relay.test"); len(got) != 0 {
+		t.Fatalf("boxa TXT = %v, want none", got)
+	}
+
+	// The internal API is not reachable through the public front.
+	tr := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
+		DialTLSContext: func(context.Context, string, string) (net.Conn, error) { return r.dialSNI("relay.test") }}}
+	resp, err := tr.Get("https://relay.test/internal/share/boxes/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("/internal through tlsfront: %d, want 404", resp.StatusCode)
+	}
+
+	// TODO(task 11): admin "Revoke" boxa -> within 70 s its names are closed and its session reports 4403.
+	// TODO(task 10): after a 20 MiB download from boxa, /admin/ shows boxa's shared volume within +-10 %.
+}
