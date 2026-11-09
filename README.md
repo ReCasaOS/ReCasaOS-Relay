@@ -130,8 +130,7 @@ Every `GC_INTERVAL` the service (1) marks every fleet that has an online node as
 
 A box can publish a service under `<name>.<SHARE_DOMAIN>`. This is the relay side: names, the DNS-01 challenge records and the box registry. Sharing is off while `SHARE_DOMAIN` is empty: every `/v1/share*` route and the `box-key` route answer `503 {"error":"sharing not enabled"}`.
 
-Box-signed routes carry `X-Box-Key` (ed25519 public key, base64url raw, 32 bytes), `X-Box-Time` (unix seconds, +-120 s) and `X-Box-Signature` (base64url raw, ed25519 over `"<METHOD> <PATH>
-" + <X-Box-Time>`); a signature is accepted once. A key must first be linked to one of the fleet's nodes by the fleet owner. Errors are `{"error": "<message>"}`: `400 invalid name`, `401 unauthorized`, `403 box key not linked`, `404`, `409` (`name taken`, `name reserved`, `name revoked`, `name in quarantine`), `413`, `429` with `Retry-After`.
+Box-signed routes carry `X-Box-Key` (ed25519 public key, base64url raw, 32 bytes), `X-Box-Time` (unix seconds, +-120 s) and `X-Box-Signature` (base64url raw, ed25519 over `"<METHOD> <PATH>\n" + <X-Box-Time>`); a signature is accepted once. A key must first be linked to one of the fleet's nodes by the fleet owner. Errors are `{"error": "<message>"}`: `400 invalid name`, `401 unauthorized`, `403 box key not linked`, `404`, `409` (`name taken`, `name reserved`, `name revoked`, `name in quarantine`), `413`, `429` with `Retry-After`.
 
 | Call | Auth | Success |
 |---|---|---|
