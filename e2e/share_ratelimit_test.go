@@ -41,7 +41,7 @@ func TestShareFrontKeepsClientAddresses(t *testing.T) {
 	}
 	// post sends n bogus-code logins and returns the status codes in order.
 	post := func(c string, n int) []string {
-		script := `for i in $(seq 1 ` + strconv.Itoa(n) + `); do curl -s -o /dev/null -w '%{http_code}\n' --cacert /ca.crt ` +
+		script := `for i in $(seq 1 ` + strconv.Itoa(n) + `); do curl -s -m 15 -o /dev/null -w '%{http_code}\n' --cacert /ca.crt ` +
 			`-d code=bogus https://relay.test/register/hskey-authreq-abcdefghijklmnopqrstuvwx; done`
 		out, err := sh("docker", "exec", c, "sh", "-c", script)
 		if err != nil {

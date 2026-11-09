@@ -54,7 +54,7 @@ Create `Caddyfile.tls` next to `compose.yaml`: the shipped `Caddyfile` with `aut
 	servers :443 {
 		listener_wrappers {
 			proxy_protocol {
-				allow 172.16.0.0/12 192.168.0.0/16 10.0.0.0/8
+				allow <compose subnet> # fallback: 172.16.0.0/12 192.168.0.0/16 10.0.0.0/8
 			}
 			tls
 		}
@@ -62,10 +62,16 @@ Create `Caddyfile.tls` next to `compose.yaml`: the shipped `Caddyfile` with `aut
 	servers :80 {
 		listener_wrappers {
 			proxy_protocol {
-				allow 172.16.0.0/12 192.168.0.0/16 10.0.0.0/8
+				allow <compose subnet> # fallback: 172.16.0.0/12 192.168.0.0/16 10.0.0.0/8
 			}
 		}
 	}
+}
+
+# Needed by the `servers :80` wrapper above (it only reaches a server defined by an explicit http:// site);
+# without it the PROXY header on port 80 is answered 400, your own HTTP-01 renewals included.
+http://*.box.example.org {
+	redir https://{host}{uri} 301
 }
 
 relay.example.org {
@@ -321,7 +327,7 @@ In ReCasaOS, enter your public URL (`https://relay.example.org`, no path) in the
 - `X-Client-IP` and `trusted_proxies`: read the README section on the proxy header before putting another proxy in front of `front`.
 - Keep `.env` (the API key) out of version control; rotate the key (section 5).
 - Do not edit the access policy in Headscale by hand: the next sync overwrites it.
-- Public sharing (section 14): never publish `8082` (the `share` tunnel listener; only `front` reaches it) and publish `53` only on the public IP (`<ip>:53:53`), never `0.0.0.0`. Trust model: the relay holds the DNS zone, so its operator could obtain a certificate for any box name; Certificate Transparency logs make every such certificate public, which is the check boxes and users have.
+- Public sharing (section 14): `front` must never be published while the `proxy_protocol` wrapper is on, and `allow` should be narrowed to the compose subnet (`docker network inspect` gives it): any host that can reach `front` from an allowed address can forge `X-Client-IP` and evade the per-IP limits. Never publish `8082` (the `share` tunnel listener; only `front` reaches it) and publish `53` only on the public IP (`<ip>:53:53`), never `0.0.0.0`. Trust model: the relay holds the DNS zone, so its operator could obtain a certificate for any box name; Certificate Transparency logs make every such certificate public, which is the check boxes and users have.
 
 ## 11. Admin page
 
@@ -408,7 +414,7 @@ Open `53/udp` and `53/tcp` in the host firewall or cloud security group too. Beh
 
 **Client address.** `share` starts every connection to `front` with a [PROXY protocol](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt) v2 header carrying the visitor's address (`FRONT_PROXY_PROTOCOL`, default `true`; `false` forwards the bytes untouched, as before). The `Caddyfile.tls` of section 3a reads it with Caddy's `proxy_protocol` listener wrapper, placed before `tls` because the header precedes the TLS handshake; `{client_ip}` is then the visitor, `header_up X-Client-IP {client_ip}` hands it to `enrolment` unchanged, and the per-IP limits of section 4 (`CREATE_RATE_PER_HOUR`, `AUTH_RATE_PER_HOUR`, `LOGIN_RATE_PER_HOUR`) count per visitor again. Without the header every visitor would be the `share` container and those limits one budget for the whole Internet.
 
-The wrapper only trusts headers from `allow` (the private ranges Docker networks are carved from; narrow it to your compose network's subnet if you like, `docker network inspect <project>_default`). Choice of policy: no `fallback_policy` line, so Caddy's default `ignore` applies to every other address (a header from outside is not believed, which stops a visitor from forging its address), and a connection from an allowed address **without** a header still works (Caddy's `use` for `allow`: header used if present). That is what makes the migration a one-way, no-flag-day change: `front` can run the new `Caddyfile.tls` before or after `share` is updated. Ordering to avoid: `share` with `FRONT_PROXY_PROTOCOL=true` against a `front` whose Caddyfile has no wrapper, which breaks every connection (Caddy reads the header as garbage); so update and recreate `front` first. Set `FRONT_PROXY_PROTOCOL=false` only when your Caddy is not configured for it.
+The wrapper only trusts headers from `allow`: put your compose network's subnet there (`docker network inspect <project>_default` gives it; the private ranges of the Caddyfile are only a fallback). **`front` must never be published while the wrapper is on** (`compose.share.yaml` unpublishes it), and `allow` should be as narrow as the compose subnet: any host that can reach `front` from an allowed address can forge `X-Client-IP` and evade the per-IP limits. Choice of policy: no `fallback_policy` line, so Caddy's default `ignore` applies to every other address (a header from outside is not believed, which stops a visitor from forging its address), and a connection from an allowed address **without** a header still works (Caddy's `use` for `allow`: header used if present). That is what makes the migration a one-way, no-flag-day change: `front` can run the new `Caddyfile.tls` while `share` still forwards headerless. Update `front` first; updating it after `share` is safe only with `FRONT_PROXY_PROTOCOL=false`. Ordering to avoid: `share` with `FRONT_PROXY_PROTOCOL=true` against a `front` whose Caddyfile has no wrapper, which breaks every connection (Caddy reads the header as garbage); so update and recreate `front` first. Set `FRONT_PROXY_PROTOCOL=false` only when your Caddy is not configured for it.
 
 ### Settings
 
@@ -476,7 +482,7 @@ Three things in the `Caddyfile.tls` of section 3a:
 
 0. the two `servers :443` / `servers :80` `listener_wrappers` blocks in the global options (the visitor's address, see "Client address"); recreate `front` with it before `share` is switched on;
 1. the `/v1/share/tunnel` block (`@tunnel`, to `share:8082`) is already there; if your file predates this section, add it next to `@enrolment`;
-2. plain HTTP to a shared name reaches `front` on port 80 (through `share`): add a second site after the `relay.example.org` one that redirects it to HTTPS. It is also what makes the `servers :80` wrapper of item 0 effective: Caddy applies it to a server defined by an explicit `http://` site, not to the redirect server it adds by itself (measured: without such a site, a PROXY header on port 80 is answered `400`).
+2. plain HTTP to a shared name reaches `front` on port 80 (through `share`): the `http://*.box.example.org` site that redirects it to HTTPS is in the base file of section 3a; if your file predates this section, add it (here a second site after the `relay.example.org` one). It is also what makes the `servers :80` wrapper of item 0 effective: Caddy applies it to a server defined by an explicit `http://` site, not to the redirect server it adds by itself (measured: without such a site, a PROXY header on port 80 is answered `400`).
 
 <!-- file: Caddyfile.tls (second site, after the relay site) -->
 ```
