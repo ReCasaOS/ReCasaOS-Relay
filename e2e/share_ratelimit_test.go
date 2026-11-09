@@ -19,8 +19,10 @@ func TestShareFrontKeepsClientAddresses(t *testing.T) {
 	const limit = 20 // LOGIN_RATE_PER_HOUR: the default, compose.e2e.yaml does not override it
 	start := func(name string) string {
 		c := r.proj + "-" + name
+		// Root, not the image's curl_user: `docker cp` keeps the CA file's host mode (0600 on Linux, Caddy's
+		// pki files) and makes it root-owned, so an unprivileged curl fails with exit 77 on a Linux runner.
 		args := []string{"create", "--name", c, "--label", "rre2e.project=" + r.proj, "--network", r.proj + "_default",
-			"--entrypoint", "sleep", "curlimages/curl:8.11.1", "600"}
+			"--user", "0:0", "--entrypoint", "sleep", "curlimages/curl:8.11.1", "600"}
 		if out, err := sh("docker", args...); err != nil {
 			t.Fatalf("docker create %s: %v\n%s", name, err, out)
 		}
