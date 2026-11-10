@@ -29,6 +29,10 @@ const Quarantine = 125 * 24 * time.Hour
 type Fleet struct {
 	ID, SecretHash, HeadscaleUser string
 	CreatedAt, LastOnline         time.Time
+	// Origin is the network the fleet was created from, as the rate limits key it: the IPv4
+	// address or the IPv6 /64; Origin48 is the /48 (the address again for IPv4). Both are empty
+	// for a fleet made before they were kept. Only the count per network reads them.
+	Origin, Origin48 string
 }
 
 type Store interface {
@@ -43,6 +47,9 @@ type Store interface {
 	// ListFleets returns every fleet ordered by id, without secret hashes (for building the access policy).
 	ListFleets(ctx context.Context) ([]Fleet, error)
 	CountFleets(ctx context.Context) (int, error)
+	// CountFleetsFrom counts the fleets created from origin, and those from origin48. An empty
+	// value counts none: the fleets with no origin belong to no network.
+	CountFleetsFrom(ctx context.Context, origin, origin48 string) (here, wider int, err error)
 	// ApplyUsage atomically adds samples to the minute and hour buckets of at (UTC),
 	// then replaces the whole derper cursor table with cursors.
 	ApplyUsage(ctx context.Context, at time.Time, samples []UsageSample, cursors []Cursor) error
@@ -100,7 +107,9 @@ CREATE TABLE IF NOT EXISTS fleets (
 	secret_hash TEXT NOT NULL,
 	headscale_user TEXT NOT NULL,
 	created_at INTEGER NOT NULL,
-	last_online INTEGER NOT NULL
+	last_online INTEGER NOT NULL,
+	origin TEXT NOT NULL DEFAULT '',
+	origin48 TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS keys (
 	fleet_id TEXT NOT NULL REFERENCES fleets(id) ON DELETE CASCADE,
@@ -187,6 +196,19 @@ func Open(path string) (Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("store: migrate: %w", err)
 	}
+	// CREATE TABLE IF NOT EXISTS leaves the table of an older database as it is: its fleets get
+	// the columns added since, empty.
+	for _, column := range []string{"origin", "origin48"} {
+		var has int
+		err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('fleets') WHERE name = ?`, column).Scan(&has)
+		if err == nil && has == 0 {
+			_, err = db.Exec(`ALTER TABLE fleets ADD COLUMN ` + column + ` TEXT NOT NULL DEFAULT ''`)
+		}
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("store: migrate: fleets.%s: %w", column, err)
+		}
+	}
 	return &sqlStore{db}, nil
 }
 
@@ -199,9 +221,9 @@ func (s *sqlStore) CreateFleet(ctx context.Context, f Fleet) error {
 		f.LastOnline = f.CreatedAt
 	}
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO fleets (id, secret_hash, headscale_user, created_at, last_online)
-		 VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
-		f.ID, f.SecretHash, f.HeadscaleUser, ts(f.CreatedAt), ts(f.LastOnline))
+		`INSERT INTO fleets (id, secret_hash, headscale_user, created_at, last_online, origin, origin48)
+		 VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
+		f.ID, f.SecretHash, f.HeadscaleUser, ts(f.CreatedAt), ts(f.LastOnline), f.Origin, f.Origin48)
 	if err != nil {
 		return fmt.Errorf("store: create fleet: %w", err)
 	}
@@ -212,8 +234,8 @@ func (s *sqlStore) Fleet(ctx context.Context, id string) (Fleet, error) {
 	var f Fleet
 	var created, online int64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, secret_hash, headscale_user, created_at, last_online FROM fleets WHERE id = ?`, id).
-		Scan(&f.ID, &f.SecretHash, &f.HeadscaleUser, &created, &online)
+		`SELECT id, secret_hash, headscale_user, created_at, last_online, origin, origin48 FROM fleets WHERE id = ?`, id).
+		Scan(&f.ID, &f.SecretHash, &f.HeadscaleUser, &created, &online, &f.Origin, &f.Origin48)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Fleet{}, ErrNotFound
 	}
@@ -292,7 +314,7 @@ func requireRow(res sql.Result, missing error) error {
 }
 
 func (s *sqlStore) ListFleets(ctx context.Context) ([]Fleet, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, headscale_user, created_at, last_online FROM fleets ORDER BY id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, headscale_user, created_at, last_online, origin, origin48 FROM fleets ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list fleets: %w", err)
 	}
@@ -301,13 +323,24 @@ func (s *sqlStore) ListFleets(ctx context.Context) ([]Fleet, error) {
 	for rows.Next() {
 		var f Fleet
 		var created, online int64
-		if err := rows.Scan(&f.ID, &f.HeadscaleUser, &created, &online); err != nil {
+		if err := rows.Scan(&f.ID, &f.HeadscaleUser, &created, &online, &f.Origin, &f.Origin48); err != nil {
 			return nil, fmt.Errorf("store: list fleets: %w", err)
 		}
 		f.CreatedAt, f.LastOnline = time.Unix(0, created).UTC(), time.Unix(0, online).UTC()
 		out = append(out, f)
 	}
 	return out, rows.Err()
+}
+
+func (s *sqlStore) CountFleetsFrom(ctx context.Context, origin, origin48 string) (here, wider int, err error) {
+	// COALESCE: SUM over no row is NULL
+	err = s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(origin = ?1 AND ?1 <> ''), 0), COALESCE(SUM(origin48 = ?2 AND ?2 <> ''), 0) FROM fleets`,
+		origin, origin48).Scan(&here, &wider)
+	if err != nil {
+		return 0, 0, fmt.Errorf("store: count fleets from: %w", err)
+	}
+	return here, wider, nil
 }
 
 func (s *sqlStore) CountFleets(ctx context.Context) (int, error) {
