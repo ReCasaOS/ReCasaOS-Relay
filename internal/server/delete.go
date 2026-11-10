@@ -49,6 +49,9 @@ func (h *fleetsHandler) removeNode(w http.ResponseWriter, r *http.Request) {
 		}
 		if n.Hostname == hostname && !devs[n.ID] {
 			err = h.deps.Headscale.DeleteNodeByID(ctx, n.ID)
+			if err == nil { // the node's name goes with the key (share_names cascades)
+				err = h.deps.Store.DeleteBoxKey(ctx, n.ID)
+			}
 		}
 	}
 	if err != nil {

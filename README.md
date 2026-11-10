@@ -84,6 +84,15 @@ Fleet creation is limited per client IP (per /64 for IPv6, and in addition per /
 | `STORE_PATH` | `/data/relay.db` | SQLite file (a volume in compose) |
 | `TRUSTED_PROXY_HEADER` | empty (compose: `X-Client-IP`) | header set by the trusted proxy in front of the service; its last value is the client IP used for rate limits. Empty: the TCP peer address is used |
 | `LISTEN_ADDR` | `:8081` | listen address |
+| `SHARE_DOMAIN` | empty | public sharing domain (lowercased; a bare DNS name, no scheme, port or trailing dot, or the service refuses to start); empty disables sharing, see "Public sharing" |
+| `SHARE_ACME_TTL` | `10m` | validity of an `_acme-challenge` TXT value |
+| `SHARE_ACME_RATE_PER_HOUR` | `20` | ACME TXT writes per hour per box |
+| `SHARE_PUBLIC_IP` | none, required when `SHARE_DOMAIN` is set | IPv4 the delegated DNS zone answers with; the service refuses to start without it |
+| `SHARE_PUBLIC_IP6` | empty | IPv6 address for `AAAA` answers; empty: none |
+| `SHARE_PSL_TXT` | empty | value of the `_psl.<SHARE_DOMAIN>` TXT record (Public Suffix List ownership proof), at most 255 bytes; empty: no such record |
+| `LISTEN_DNS` | `:53` | UDP and TCP listen address of the DNS zone (only with `SHARE_DOMAIN`) |
+
+The `share` process (`cmd/share`, its own image) has its own environment: `RELAY_HOST` and `SHARE_DOMAIN` (required, bare DNS names, `RELAY_HOST` not under `SHARE_DOMAIN`), `LISTEN_TLS` (`:443`), `LISTEN_HTTP` (`:80`), `LISTEN_TUNNEL` (`:8082`), `FRONT_TLS` (`front:443`), `FRONT_HTTP` (`front:80`), `ENROLMENT_URL` (`http://enrolment:8081`), `PEEK_TIMEOUT` (`5s`), `TUNNEL_RATE_PER_HOUR` (`60`: tunnel dials per hour per client IP, counted before the signature check) and `FRONT_PROXY_PROTOCOL` (`true`: send a PROXY protocol v2 header with the visitor's address to `FRONT_TLS` / `FRONT_HTTP`; `front`'s Caddy must read it, see `docs/self-hosting.md` section 14). See "Public sharing".
 
 ### Capacity
 
@@ -122,6 +131,32 @@ The first three take the fleet secret (`401` wrong secret, `404` unknown fleet, 
 
 Every `GC_INTERVAL` the service (1) marks every fleet that has an online node as seen, (2) deletes, with the routine behind `DELETE /v1/fleets/{id}`, the fleets that have had no online node for longer than `IDLE_AFTER` (a fleet whose nodes could not be read in that pass is never deleted), (3) deletes the used and the expired pre-auth keys of all fleets (Headscale never prunes them, and the key quota reads them all), (4) deletes the fleets that have no node at all, were created more than twice `JOIN_KEY_TTL` ago (48 h by default) and hold no unused, unexpired join key, however recently they asked for a key (a key request refreshes the row the `IDLE_AFTER` rule reads, so without this an owner who keeps asking for keys but never enrols a box would keep the fleet forever), and (5) rewrites the access policy, which also repairs a hand edit. Devices (remote access) are nodes of the fleet like boxes: an online device keeps its fleet alive under the `IDLE_AFTER` rule, and a fleet with only devices is not "empty" for rule (4). Deletions re-check, under the fleet's lock, that the fleet is still idle (or still empty and untouched since the pass began). A failure for one fleet is logged and the pass goes on; a panic in a pass is logged and the next pass runs.
 
+## Public sharing
+
+A box can publish a service under `<name>.<SHARE_DOMAIN>`. This is the relay side: names, the DNS-01 challenge records and the box registry. Sharing is off while `SHARE_DOMAIN` is empty: every `/v1/share*` route and the `box-key` route answer `503 {"error":"sharing not enabled"}`.
+
+Box-signed routes carry `X-Box-Key` (ed25519 public key, base64url raw, 32 bytes), `X-Box-Time` (unix seconds, +-120 s) and `X-Box-Signature` (base64url raw, ed25519 over `"<METHOD> <PATH>\n" + <X-Box-Time>`); a signature is accepted once. A key must first be linked to one of the fleet's nodes by the fleet owner. Errors are `{"error": "<message>"}`: `400 invalid name`, `401 unauthorized`, `403 box key not linked`, `404`, `409` (`name taken`, `name reserved`, `name revoked`, `name in quarantine`), `413`, `429` with `Retry-After`.
+
+| Call | Auth | Success |
+|---|---|---|
+| `PUT /v1/fleets/{id}/nodes/{node}/box-key` `{"box_key": "<base64url ed25519 pub>"}` | Bearer fleet secret | `204`. Links the key to that node, once (`{node}` is the Headscale node id); the same key again is a no-op. `409 box key already linked` when the key belongs to another node or the node already has another key (to change a box's key, remove its node: the name goes to quarantine); `404 node not found`, `400` if the key is not 32 bytes base64url |
+| `PUT /v1/share/name` `{"name": "<box>"}` | box signature | `201 {"name", "host", "domain"}`; the same box claiming the same name again: `200` |
+| `DELETE /v1/share/name` | box signature | `204`; the name is quarantined for 125 days (other boxes cannot claim it; the box that released it can); `204` too when the box had no name |
+| `GET /v1/share` | box signature | `200 {"name", "host", "domain", "tunnel_online"}`; `404 no name` |
+| `PUT /v1/share/acme` `{"value": "<token>"}` | box signature | `204`: `_acme-challenge.<name>.<SHARE_DOMAIN>` TXT answers `value` for `SHARE_ACME_TTL`; `404 no name`; `429` beyond `SHARE_ACME_RATE_PER_HOUR` per box |
+| `DELETE /v1/share/acme` | box signature | `204` |
+| `GET /v1/share/tunnel` (WebSocket, served by `share`) | box signature | the box's tunnel (yamux over binary WebSocket messages, the relay opens one stream per visitor connection). Before the upgrade: `401` bad signature, `403` key unknown or without a name, `429` with `Retry-After` beyond `TUNNEL_RATE_PER_HOUR` per client IP, `503` enrolment unreachable. Close codes: `4403` name revoked, `4409` replaced by a newer tunnel of the same box, `1001` relay shutting down |
+
+A name is 3 to 32 characters of `a-z0-9-`, not starting or ending with `-`; `www relay admin api mail ns ns1 box tunnel recasaos casaos localhost` are reserved. `AUTH_RATE_PER_HOUR` applies per client IP before the signature is checked.
+
+`tunnel_online` is true when the box's node appeared in a `share` usage post less than 45 s ago (kept in memory: false after an enrolment restart until the next post, at most 15 s).
+
+**Operating it.** Delegation of the zone, the Public Suffix List request, ports (53 on the public IP, 80/443 moved from `front` to `share`), the `compose.share.yaml` override, the migration of a running relay, verification and rollback: [docs/self-hosting.md, section 14](docs/self-hosting.md#14-public-sharing). Three images are built from this repository: `ghcr.io/recasaos/recasaos-relay-enrolment`, `-derper` and `-share` (the same `Dockerfile` as `enrolment`, with `--build-arg CMD=share`).
+
+Operator side, on `/admin`: **Shared names** lists every claimed name (fleet, node, since) with a Revoke button, and **Forbidden names** is the operator's own list on top of the built-in reserved words (add a name, or remove it again). Revoking a name (no confirmation; undo it with Forbidden names, Remove, which also lifts the quarantine the revoke started) adds it to the forbidden list and frees it from its box; the `share` process revalidates every tunnel each 60 s, so within a minute the box's tunnel closes with WebSocket code `4403 "name revoked"` and the box sees `409 name revoked` if it claims the name again. The janitor also deletes the box key of a node that no longer exists in Headscale (for instance after `tailscale logout`): its name then goes to quarantine like a released one. Removing a box's node from `/admin` drops its box key at once.
+
+Internal routes, for the `share` service on the compose network only: `GET /internal/share/boxes/{key}` answers `200 {"name","node_id","fleet_id"}` (`404` when the key is unknown or has no name), and `POST /internal/share/usage` takes `[{"fleet_id","node_id","rx","tx"}]` (64 KiB at most) and answers `204`. Both answer `404` to a request carrying `TRUSTED_PROXY_HEADER`, which only `front` sets, and `front` does not route `/internal/*` at all.
+
 ## Fleet isolation
 
 Each fleet is a Headscale user `f-<fleet id>`. The enrolment service owns Headscale's access policy and rewrites it from **all** fleets in its store after every fleet creation and deletion and on every janitor pass: one group per fleet holding only that user, and one rule per group, `accept group:u -> group:u:*`. No wildcard, no autogroup, no rule naming two groups. With zero fleets the policy is an explicit empty `acls` list (a missing policy would allow everything). It is applied, with retries, **before** the service starts listening, and the service exits if it cannot. Do not edit the policy in Headscale by hand: the next sync overwrites it.
@@ -132,7 +167,7 @@ Relayed (DERP) traffic goes through a standalone `derper` and is metered per box
 
 ## Releases
 
-Pushing a tag `v*` runs `.github/workflows/release.yml`: `go vet` and `go test`, then the `enrolment` and `derper` images are built and pushed to `ghcr.io/<owner>/<repository>-enrolment` and `-derper` (lowercased; `ghcr.io/recasaos/recasaos-relay-enrolment` here) tagged with the version and, unless the tag has a `-` suffix (a pre-release), `latest`. It uses only the built-in `GITHUB_TOKEN`. To run the published image instead of building it, see [docs/self-hosting.md](docs/self-hosting.md#using-the-published-image).
+Pushing a tag `v*` runs `.github/workflows/release.yml`: `go vet` and `go test`, then the `enrolment`, `derper` and `share` images are built and pushed to `ghcr.io/<owner>/<repository>-enrolment`, `-derper` and `-share` (lowercased; `ghcr.io/recasaos/recasaos-relay-enrolment` here) tagged with the version and, unless the tag has a `-` suffix (a pre-release), `latest`. It uses only the built-in `GITHUB_TOKEN`. To run the published image instead of building it, see [docs/self-hosting.md](docs/self-hosting.md#using-the-published-image).
 
 ## Development
 

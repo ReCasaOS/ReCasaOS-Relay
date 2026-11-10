@@ -23,6 +23,7 @@ import (
 	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
 	"github.com/ReCasaOS/recasaos-relay/internal/meter"
 	"github.com/ReCasaOS/recasaos-relay/internal/ratelimit"
+	"github.com/ReCasaOS/recasaos-relay/internal/sharename"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
 )
 
@@ -121,6 +122,9 @@ func New(cfg Config, deps Deps) (http.Handler, error) {
 	mux.HandleFunc("GET /admin/{$}", h.index)
 	mux.HandleFunc("POST /admin/fleets/{id}/delete", h.deleteFleet)
 	mux.HandleFunc("POST /admin/fleets/{id}/nodes/{node}/remove", h.removeNode)
+	mux.HandleFunc("POST /admin/share/banned", h.ban)
+	mux.HandleFunc("POST /admin/share/names/{name}/revoke", h.ban)
+	mux.HandleFunc("POST /admin/share/banned/{name}/delete", h.unban)
 	return h.guard(mux), nil
 }
 
@@ -179,6 +183,7 @@ type fleetView struct {
 	Online              int
 	Err                 bool    // its nodes could not be listed
 	Month               int64   // relayed bytes this month (Rx: what its nodes sent to the relay)
+	Shared              int64   // shared bytes this month (Rx: what its boxes sent to visitors)
 	Up                  float64 // live bytes/s: the sum of its listed nodes' Up
 	RefPct              int     // Month against Config.MonthlyReference, capped at 100
 	RefClass            string  // "", "warn" (>= 80 %) or "over" (>= 100 %)
@@ -189,7 +194,8 @@ type fleetView struct {
 type nodeView struct {
 	headscale.Node
 	meter.Rate
-	UpMonth int64
+	UpMonth     int64
+	SharedMonth int64
 }
 
 // Idle: under 1 kB/s both ways, which a node's DERP keepalive alone produces.
@@ -205,11 +211,24 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 		rangeKey, cr = "1h", chartRanges["1h"]
 	}
 	start := cr.start(now)
+	kind, series := "relayed", h.deps.Store.UsageSeries
+	if r.URL.Query().Get("kind") == "shared" {
+		kind, series = "shared", h.deps.Store.ShareSeries
+	}
 	all, err := h.deps.Store.ListFleets(ctx)
 	if err != nil {
 		log.Printf("admin: list fleets: %v", err)
 		http.Error(w, "store error", http.StatusInternalServerError)
 		return
+	}
+	// Like the devices below, a failure must not take the fleets down.
+	names, err := h.deps.Store.ListNames(ctx)
+	if err != nil {
+		log.Printf("admin: list names: %v", err)
+	}
+	banned, err := h.deps.Store.BannedNames(ctx)
+	if err != nil {
+		log.Printf("admin: banned names: %v", err)
 	}
 	y, m, _ := now.UTC().Date()
 	totals, err := h.deps.Store.UsageTotals(ctx, time.Date(y, m, 1, 0, 0, 0, 0, time.UTC))
@@ -218,9 +237,15 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "store error", http.StatusInternalServerError)
 		return
 	}
-	points, err := h.deps.Store.UsageSeries(ctx, cr.res, start)
+	points, err := series(ctx, cr.res, start)
 	if err != nil {
 		log.Printf("admin: usage series: %v", err)
+		http.Error(w, "store error", http.StatusInternalServerError)
+		return
+	}
+	sharedTotals, err := h.deps.Store.ShareTotals(ctx, time.Date(y, m, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		log.Printf("admin: share totals: %v", err)
 		http.Error(w, "store error", http.StatusInternalServerError)
 		return
 	}
@@ -240,7 +265,7 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 	for _, f := range all {
 		known[f.ID] = true
 	}
-	var monthTotal, deleted int64
+	var monthTotal, deleted, deletedShared int64
 	var upNow float64
 	fleetMonth, nodeMonth := map[string]int64{}, map[[2]string]int64{}
 	for _, t := range totals {
@@ -250,6 +275,16 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 		if !known[t.FleetID] {
 			deleted += t.Rx
 		}
+	}
+	var sharedTotal int64
+	fleetShared, nodeShared := map[string]int64{}, map[[2]string]int64{}
+	for _, t := range sharedTotals {
+		sharedTotal += t.Rx
+		if !known[t.FleetID] {
+			deletedShared += t.Rx
+		}
+		fleetShared[t.FleetID] += t.Rx
+		nodeShared[[2]string{t.FleetID, t.NodeID}] += t.Rx
 	}
 	for _, rt := range live.Nodes {
 		upNow += rt.Up
@@ -262,12 +297,15 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 		if a, b := fleetMonth[all[i].ID], fleetMonth[all[j].ID]; a != b {
 			return a > b
 		}
+		if a, b := fleetShared[all[i].ID], fleetShared[all[j].ID]; a != b {
+			return a > b
+		}
 		return all[i].LastOnline.After(all[j].LastOnline)
 	})
 	views := make([]fleetView, len(all))
 	var wg sync.WaitGroup
 	for i, f := range all {
-		views[i] = fleetView{ID: f.ID, Created: f.CreatedAt, LastOnline: f.LastOnline, Month: fleetMonth[f.ID]}
+		views[i] = fleetView{ID: f.ID, Created: f.CreatedAt, LastOnline: f.LastOnline, Month: fleetMonth[f.ID], Shared: fleetShared[f.ID]}
 		if ref := h.cfg.MonthlyReference; ref > 0 {
 			pct := float64(views[i].Month) / float64(ref) * 100
 			views[i].RefPct = int(min(pct, 100))
@@ -290,7 +328,7 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			for _, n := range ns {
-				nv := nodeView{Node: n, Rate: live.Nodes[n.ID], UpMonth: nodeMonth[[2]string{f.ID, n.ID}]}
+				nv := nodeView{Node: n, Rate: live.Nodes[n.ID], UpMonth: nodeMonth[[2]string{f.ID, n.ID}], SharedMonth: nodeShared[[2]string{f.ID, n.ID}]}
 				views[i].Up += nv.Up
 				if devices[n.ID] == f.ID {
 					views[i].Devices = append(views[i].Devices, nv)
@@ -314,14 +352,15 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 			names[n.ID] = n.Hostname
 		}
 		views[i].Series = fleetSeries(fleetPoints[v.ID], names, cr, start)
-		views[i].Chart = stackedChart(views[i].Series, cr.n)
+		views[i].Chart = stackedChart(views[i].Series, cr.n, kind)
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := page.Execute(w, map[string]any{
 		"Fleets": views, "Nodes": nodes, "DeviceCount": deviceCount, "Online": online, "Now": now,
 		"MaxFleets": h.cfg.MaxFleets, "NodesPerFleet": h.cfg.NodesPerFleet, "CSRF": h.csrf,
-		"Month": monthTotal, "UpNow": upNow, "Live": live.OK, "Deleted": deleted,
+		"Month": monthTotal, "SharedMonth": sharedTotal, "Kind": kind, "UpNow": upNow, "Live": live.OK, "Deleted": deleted, "DeletedShared": deletedShared,
 		"Reference": h.cfg.MonthlyReference, "Range": rangeKey,
+		"Names": names, "Banned": banned,
 	}); err != nil {
 		log.Printf("admin: render: %v", err)
 	}
@@ -374,14 +413,56 @@ func (h *handler) removeNode(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "upstream error, retry", http.StatusBadGateway)
 				return
 			}
-			// A box has no row: DeleteDevice is a no-op for it.
-			if err := h.deps.Store.DeleteDevice(ctx, n.ID); err != nil {
-				log.Printf("admin: fleet %s: delete device row %s: %v", f.ID, n.ID, err)
-				http.Error(w, "store error", http.StatusInternalServerError)
-				return
+			// A box has no device row and a device no box key: each delete is a no-op for the other.
+			// Dropping the key now (its name cascades to quarantine) closes the tunnel at the next revalidation.
+			for _, del := range []func(context.Context, string) error{h.deps.Store.DeleteDevice, h.deps.Store.DeleteBoxKey} {
+				if err := del(ctx, n.ID); err != nil {
+					log.Printf("admin: fleet %s: delete store rows of %s: %v", f.ID, n.ID, err)
+					http.Error(w, "store error", http.StatusInternalServerError)
+					return
+				}
 			}
 			log.Printf("admin: fleet %s: node %s removed", f.ID, n.Hostname)
 		}
+	}
+	http.Redirect(w, r, "/admin/", http.StatusSeeOther)
+}
+
+// ban adds a name to the forbidden list and frees it from its holder: its box's tunnel closes at
+// the next revalidation. The name comes from the form (add) or from the path (revoke).
+func (h *handler) ban(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		name = r.PostFormValue("name")
+	}
+	if sharename.ValidLabel(name) != nil {
+		http.Error(w, "invalid name", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), opTimeout)
+	defer cancel()
+	if err := h.deps.Store.BanName(ctx, name, h.deps.Now()); err != nil {
+		log.Printf("admin: ban %s: %v", name, err)
+		http.Error(w, "store error", http.StatusInternalServerError)
+		return
+	}
+	log.Printf("admin: name %s forbidden", name)
+	http.Redirect(w, r, "/admin/", http.StatusSeeOther)
+}
+
+func (h *handler) unban(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), opTimeout)
+	defer cancel()
+	name := r.PathValue("name")
+	if sharename.ValidLabel(name) != nil {
+		http.Error(w, "invalid name", http.StatusBadRequest)
+		return
+	}
+	// Not found: a double click or the auto-reload raced the click; the name is gone, as asked.
+	if err := h.deps.Store.UnbanName(ctx, name); err != nil && !errors.Is(err, store.ErrNotFound) {
+		log.Printf("admin: unban %s: %v", name, err)
+		http.Error(w, "store error", http.StatusInternalServerError)
+		return
 	}
 	http.Redirect(w, r, "/admin/", http.StatusSeeOther)
 }

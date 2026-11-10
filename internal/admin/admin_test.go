@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/fakes"
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
@@ -156,6 +158,23 @@ func TestRemoveNodeOnlyInItsFleet(t *testing.T) {
 	}
 	if e.hs.NodeCount("f-bbbb") != 0 || e.hs.NodeCount("f-aaaa") != 1 {
 		t.Fatal("wrong nodes left")
+	}
+}
+
+// A box removed from /admin loses its box key at once (its name goes to quarantine), not at the next gc.
+func TestRemoveNodeDropsItsBoxKey(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	nodes, _ := e.hs.ListNodes(ctx, "f-bbbb")
+	id := nodes[0].ID
+	if err := e.st.SetBoxKey(ctx, "bbbb", id, "keyb", t0); err != nil {
+		t.Fatal(err)
+	}
+	if w := e.do("POST", "/admin/fleets/bbbb/nodes/"+id+"/remove", token, csrf(e)); w.Code != 303 {
+		t.Fatalf("%d", w.Code)
+	}
+	if _, err := e.st.BoxByKey(ctx, "keyb"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("BoxByKey after remove = %v, want ErrNotFound", err)
 	}
 }
 
@@ -436,5 +455,161 @@ func TestRemoveDevice(t *testing.T) {
 	}
 	if all, _ := e.st.AllDevices(context.Background()); len(all) != 0 {
 		t.Fatalf("store row left: %v", all)
+	}
+}
+
+func (e env) shared(t *testing.T, at time.Time, samples ...store.UsageSample) {
+	t.Helper()
+	if err := e.st.ApplyShareUsage(context.Background(), at, samples); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAdminShowsSharedThisMonth(t *testing.T) {
+	e := setup(t)
+	one, two := e.nodeID(t, "f-aaaa", "b-one"), e.nodeID(t, "f-bbbb", "b-two")
+	// aaaa has relayed traffic, bbbb only shared traffic; the last sample is last month's.
+	e.usage(t, store.UsageSample{FleetID: "aaaa", NodeID: one, Rx: 2e9})
+	e.shared(t, t0.Add(-5*time.Minute), store.UsageSample{FleetID: "bbbb", NodeID: two, Rx: 3e9, Tx: 7})
+	e.shared(t, t0.Add(-4*time.Minute), store.UsageSample{FleetID: "bbbb", NodeID: two, Rx: 1e9})
+	e.shared(t, t0.Add(-3*time.Minute), store.UsageSample{FleetID: "zzzz", NodeID: "99", Rx: 2e9})
+	e.shared(t, t0.AddDate(0, -1, 0), store.UsageSample{FleetID: "bbbb", NodeID: two, Rx: 9e9})
+	body := e.do("GET", "/admin/", token, nil).Body.String()
+
+	for _, want := range []string{"<b>6.0 GB</b><span>shared this month</span>", "<b>2.0 GB</b><span>relayed this month</span>"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	if line := between(t, body, "deleted fleets", "</p>"); !strings.Contains(line, "0 B relayed") || !strings.Contains(line, "2.0 GB shared") {
+		t.Errorf("deleted fleets line: %s", line)
+	}
+	if head := between(t, body, "<code>bbbb</code>", "</summary>"); !strings.Contains(head, "4.0 GB shared") {
+		t.Errorf("fleet bbbb (shared only) header lacks its shared volume: %s", head)
+	}
+	if head := between(t, body, "<code>aaaa</code>", "</summary>"); !strings.Contains(head, "0 B shared") {
+		t.Errorf("fleet aaaa header: %s", head)
+	}
+	if row := between(t, body, `data-node-id="`+two+`"`, "</tr>"); !strings.Contains(row, `data-shared-bytes="4000000000"`) ||
+		!strings.Contains(row, "4.0 GB shared") || !strings.Contains(row, `data-up-month="0"`) {
+		t.Errorf("node row: %s", row)
+	}
+	if row := between(t, body, `data-node-id="`+one+`"`, "</tr>"); !strings.Contains(row, `data-shared-bytes="0"`) {
+		t.Errorf("node row without shared traffic: %s", row)
+	}
+	if a, b := strings.Index(body, "<code>aaaa</code>"), strings.Index(body, "<code>bbbb</code>"); a < 0 || b < a {
+		t.Error("fleets are not sorted by relayed volume")
+	}
+
+	// The chart: relayed by default (and with kind=relayed), shared with kind=shared.
+	chart := func(fleet, path string) string {
+		return between(t, e.do("GET", path, token, nil).Body.String(), `<details data-id="`+fleet+`"`, "</svg>")
+	}
+	if none, relayed := chart("aaaa", "/admin/?range=24h"), chart("aaaa", "/admin/?range=24h&kind=relayed"); none != relayed || !strings.Contains(none, "<polygon") {
+		t.Error("no kind is not the relayed chart of aaaa")
+	}
+	if chart("bbbb", "/admin/?range=24h") == chart("bbbb", "/admin/?range=24h&kind=shared") {
+		t.Error("kind=shared did not change bbbb's chart")
+	}
+	if !strings.Contains(chart("bbbb", "/admin/?range=24h&kind=shared"), "<polygon") || strings.Contains(chart("aaaa", "/admin/?range=24h&kind=shared"), "<polygon") {
+		t.Error("the shared chart does not follow the shared series")
+	}
+	sharedPage := e.do("GET", "/admin/?range=24h&kind=shared", token, nil).Body.String()
+	for _, want := range []string{`<a href="?range=24h&amp;kind=shared" class="cur" aria-current="page">24 h</a>`, `<a href="?range=24h">relayed</a>`, `class="cur" aria-current="page">shared</a>`, "b-two"} {
+		if !strings.Contains(sharedPage, want) {
+			t.Errorf("shared chart page lacks %q", want)
+		}
+	}
+	if p := e.do("GET", "/admin/?range=24h", token, nil).Body.String(); !strings.Contains(p, `<a href="?range=24h&amp;kind=shared">shared</a>`) {
+		t.Error("no toggle to the shared chart")
+	}
+}
+
+func TestPageTemplateIsUTF8(t *testing.T) {
+	if !utf8.ValidString(pageHTML) {
+		t.Fatal("page.html is not valid UTF-8")
+	}
+}
+
+func TestAdminBanAndUnban(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	form := func(name string) url.Values { f := csrf(e); f.Set("name", name); return f }
+
+	if w := e.do("POST", "/admin/share/banned", token, url.Values{"name": {"spam"}}); w.Code != 400 {
+		t.Fatalf("ban without csrf: %d", w.Code)
+	}
+	for _, bad := range []string{"", "A b", "a-"} {
+		if w := e.do("POST", "/admin/share/banned", token, form(bad)); w.Code != 400 {
+			t.Fatalf("ban %q: %d, want 400", bad, w.Code)
+		}
+	}
+	// A reserved word is a valid label: the operator may ban it too.
+	for _, n := range []string{"spam", "www"} {
+		if w := e.do("POST", "/admin/share/banned", token, form(n)); w.Code != 303 || w.Header().Get("Location") != "/admin/" {
+			t.Fatalf("ban %s: %d %s", n, w.Code, w.Header().Get("Location"))
+		}
+	}
+	if got, _ := e.st.BannedNames(ctx); strings.Join(got, ",") != "spam,www" {
+		t.Fatalf("banned = %v", got)
+	}
+	body := e.do("GET", "/admin/", token, nil).Body.String()
+	if !strings.Contains(body, "Forbidden names") || !strings.Contains(body, `action="/admin/share/banned/spam/delete"`) {
+		t.Fatalf("page lacks the forbidden list:\n%s", body)
+	}
+	if w := e.do("POST", "/admin/share/banned/spam/delete", token, nil); w.Code != 400 {
+		t.Fatalf("unban without csrf: %d", w.Code)
+	}
+	if w := e.do("POST", "/admin/share/banned/Bad%20Name/delete", token, csrf(e)); w.Code != 400 {
+		t.Fatalf("unban of an invalid name: %d, want 400", w.Code)
+	}
+	if w := e.do("POST", "/admin/share/banned/spam/delete", token, csrf(e)); w.Code != 303 {
+		t.Fatalf("unban: %d", w.Code)
+	}
+	if w := e.do("POST", "/admin/share/banned/spam/delete", token, csrf(e)); w.Code != 303 {
+		t.Fatalf("second unban: %d, want 303", w.Code)
+	}
+	if got, _ := e.st.BannedNames(ctx); strings.Join(got, ",") != "www" {
+		t.Fatalf("banned after unban = %v", got)
+	}
+}
+
+func TestAdminRevokeBansAndReleases(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	if err := e.st.SetBoxKey(ctx, "aaaa", "7", "key7", t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.ClaimName(ctx, "7", "boxa", t0); err != nil {
+		t.Fatal(err)
+	}
+	body := e.do("GET", "/admin/", token, nil).Body.String()
+	for _, want := range []string{"Shared names", "boxa", `action="/admin/share/names/boxa/revoke"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("page lacks %q", want)
+		}
+	}
+	if w := e.do("POST", "/admin/share/names/boxa/revoke", token, nil); w.Code != 400 {
+		t.Fatalf("revoke without csrf: %d", w.Code)
+	}
+	if w := e.do("POST", "/admin/share/names/boxa/revoke", token, csrf(e)); w.Code != 303 {
+		t.Fatalf("revoke: %d", w.Code)
+	}
+	if names, _ := e.st.ListNames(ctx); len(names) != 0 {
+		t.Fatalf("names after revoke: %v", names)
+	}
+	if got, _ := e.st.BannedNames(ctx); strings.Join(got, ",") != "boxa" {
+		t.Fatalf("banned = %v", got)
+	}
+	if err := e.st.ClaimName(ctx, "7", "boxa", t0); !errors.Is(err, store.ErrBanned) {
+		t.Fatalf("reclaim: %v, want ErrBanned", err)
+	}
+	body = e.do("GET", "/admin/", token, nil).Body.String()
+	i := strings.Index(body, "Forbidden names")
+	if i < 0 || !strings.Contains(body[i:], "boxa") {
+		t.Fatal("boxa is not listed under Forbidden names")
+	}
+	if w := e.do("POST", "/admin/share/names/A_b/revoke", token, csrf(e)); w.Code != 400 {
+		t.Fatalf("revoke of an invalid name: %d", w.Code)
 	}
 }

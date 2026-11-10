@@ -23,14 +23,14 @@ func TestHumanBytes(t *testing.T) {
 }
 
 func TestChartAllZero(t *testing.T) {
-	svg := string(stackedChart([]chartSeries{{"a", make([]float64, 60)}, {"b", make([]float64, 60)}}, 60))
+	svg := string(stackedChart([]chartSeries{{"a", make([]float64, 60)}, {"b", make([]float64, 60)}}, 60, "relayed"))
 	if !strings.HasPrefix(svg, "<svg") || !strings.HasSuffix(svg, "</svg>") {
 		t.Fatalf("not an svg: %s", svg)
 	}
 	if strings.Contains(svg, "NaN") || strings.Contains(svg, "Inf") {
 		t.Fatalf("NaN or Inf in %s", svg)
 	}
-	if svg := string(stackedChart(nil, 60)); strings.Contains(svg, "NaN") || !strings.HasPrefix(svg, "<svg") {
+	if svg := string(stackedChart(nil, 60, "relayed")); strings.Contains(svg, "NaN") || !strings.HasPrefix(svg, "<svg") {
 		t.Fatalf("no series: %s", svg)
 	}
 }
@@ -86,7 +86,7 @@ func TestChartStacksInOrder(t *testing.T) {
 		{"mid", []float64{1, 0, 4, 3, 2}},
 		{"small", []float64{0, 1, 1, 0, 5}},
 	}
-	edges := topEdges(t, string(stackedChart(series, 5)), 5)
+	edges := topEdges(t, string(stackedChart(series, 5, "relayed")), 5)
 	if len(edges) != 3 {
 		t.Fatalf("%d polygons, want 3", len(edges))
 	}

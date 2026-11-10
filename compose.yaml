@@ -45,6 +45,7 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
     # Plain HTTP: put your TLS reverse proxy in front of this port (it serves Headscale and /v1/*).
+    # With public sharing, 80/443 move to `share` and this list is emptied by the docs override (docs/self-hosting.md, section 14).
     ports:
       - "8080:8080"
 
@@ -86,7 +87,42 @@ services:
     # Reached only through `front` (Caddyfile): never publish this port, the rate limiter trusts X-Client-IP.
     expose:
       - "8081"
+    # With SHARE_DOMAIN set it also serves the delegated DNS zone on 53 (UDP and TCP; SHARE_PUBLIC_IP required).
+    # Port 53 is published only by the `compose.share.yaml` override of the docs (docs/self-hosting.md, section 14),
+    # on the public IP explicitly (<ip>:53:53/udp and /tcp), never on 0.0.0.0: systemd-resolved holds 127.0.0.53:53.
+    # The SHARE_* variables are set by that override too.
     stop_grace_period: 40s # in-flight create-fleet calls may take up to 30 s
+
+  # Optional (docker compose --profile share): reads the TLS server name on 80/443 and forwards to `front`
+  # (or, for shared boxes, into their tunnel). In production its ports are 80/443 and the `front` ports move
+  # here (the docs override, docs/self-hosting.md section 14, does that and also clears the profile); never publish them from both.
+  # Port 8082 (tunnels) is never published: only `front` reaches it.
+  share:
+    build:
+      context: .
+      args:
+        CMD: share
+    profiles: ["share"]
+    restart: unless-stopped
+    depends_on:
+      - front
+      - enrolment
+    environment:
+      LISTEN_TLS: ":443"
+      LISTEN_HTTP: ":80"
+      LISTEN_TUNNEL: ":8082"
+      FRONT_TLS: front:443
+      FRONT_HTTP: front:80
+      ENROLMENT_URL: http://enrolment:8081
+      RELAY_HOST: ${RELAY_HOST:-}
+      SHARE_DOMAIN: ${SHARE_DOMAIN:-}
+      PEEK_TIMEOUT: ${PEEK_TIMEOUT:-5s}
+      FRONT_PROXY_PROTOCOL: ${FRONT_PROXY_PROTOCOL:-true}
+      TUNNEL_RATE_PER_HOUR: ${TUNNEL_RATE_PER_HOUR:-60}
+    # ports:
+    #   - "80:80"
+    #   - "443:443"
+    stop_grace_period: 40s
 
 volumes:
   headscale-data:

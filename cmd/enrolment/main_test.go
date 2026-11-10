@@ -46,3 +46,20 @@ func TestParseBytes(t *testing.T) {
 		t.Errorf("error %v must quote the original input", err)
 	}
 }
+
+// A TXT character-string holds at most 255 bytes: refuse a longer SHARE_PSL_TXT at start-up.
+func TestListenZoneRefusesLongPSLTXT(t *testing.T) {
+	t.Setenv("SHARE_PUBLIC_IP", "192.0.2.1")
+	t.Setenv("LISTEN_DNS", "127.0.0.1:0")
+	t.Setenv("SHARE_PSL_TXT", strings.Repeat("a", 256))
+	if _, _, _, err := listenZone("box.example", nil); err == nil || !strings.Contains(err.Error(), "SHARE_PSL_TXT") {
+		t.Fatalf("err = %v, want a SHARE_PSL_TXT error", err)
+	}
+	t.Setenv("SHARE_PSL_TXT", strings.Repeat("a", 255))
+	_, pc, l, err := listenZone("box.example", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc.Close()
+	l.Close()
+}

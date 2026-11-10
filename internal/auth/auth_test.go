@@ -332,3 +332,76 @@ func TestVerifyBoxAcceptsHonestKeys(t *testing.T) {
 		}
 	}
 }
+
+// signedFor builds a request for any method and path, signed with the shared Message format.
+func signedFor(t *testing.T, pub ed25519.PublicKey, priv ed25519.PrivateKey, method, signPath, sendPath string) *http.Request {
+	t.Helper()
+	ts := strconv.FormatInt(t0.Unix(), 10)
+	r := httptest.NewRequest(method, sendPath, nil)
+	r.Header.Set("X-Box-Key", enc.EncodeToString(pub))
+	r.Header.Set("X-Box-Time", ts)
+	r.Header.Set("X-Box-Signature", enc.EncodeToString(ed25519.Sign(priv, []byte(Message(method, signPath, ts)))))
+	return r
+}
+
+func TestVerifyBoxSignsMethodAndPath(t *testing.T) {
+	pub, priv := keys(t)
+	if got := Message("POST", "/v1/fleets", "7"); got != "POST /v1/fleets\n7" {
+		t.Fatalf("Message = %q, existing create-fleet string changed", got)
+	}
+
+	resetSeen()
+	if _, err := VerifyBox(signedFor(t, pub, priv, "GET", "/v1/share", "/v1/share"), t0); err != nil {
+		t.Fatalf("GET /v1/share refused: %v", err)
+	}
+	resetSeen()
+	r := signedFor(t, pub, priv, "GET", "/v1/share", "/v1/share/name")
+	r.Method = http.MethodPut
+	_, err := VerifyBox(r, t0)
+	if !errors.Is(err, ErrUnauthorized) || !errors.Is(err, errBadSig) {
+		t.Fatalf("signature for GET /v1/share accepted on PUT /v1/share/name: %v", err)
+	}
+}
+
+// The signature is bound to one message, so the same bytes on another path fail verification
+// (errBadSig) before the replay set is consulted; either way the caller sees ErrUnauthorized.
+func TestReplayIsPerSignatureNotPerPath(t *testing.T) {
+	resetSeen()
+	pub, priv := keys(t)
+	r := signedFor(t, pub, priv, "GET", "/v1/share", "/v1/share")
+	if _, err := VerifyBox(r, t0); err != nil {
+		t.Fatal(err)
+	}
+	other := signedFor(t, pub, priv, "GET", "/v1/share", "/v1/share/tunnel")
+	other.Header.Set("X-Box-Signature", r.Header.Get("X-Box-Signature"))
+	if _, err := VerifyBox(other, t0); !errors.Is(err, ErrUnauthorized) || !errors.Is(err, errBadSig) {
+		t.Fatalf("err = %v, want ErrUnauthorized wrapping errBadSig", err)
+	}
+	if _, err := VerifyBox(r, t0); !errors.Is(err, ErrUnauthorized) || !errors.Is(err, errReplay) {
+		t.Fatalf("same request twice: err = %v, want ErrUnauthorized wrapping errReplay", err)
+	}
+}
+
+// A flood of fresh signatures cannot grow seen past maxSeen; the newest entries stay.
+func TestSeenIsBounded(t *testing.T) {
+	resetSeen()
+	defer func(n int) { maxSeen = n }(maxSeen)
+	maxSeen = 20
+	pub, priv := keys(t)
+	var last *http.Request
+	for i := 59; i >= 0; i-- { // oldest box time first
+		last = signed(t, pub, priv, t0.Add(-time.Duration(i)*time.Second))
+		if _, err := VerifyBox(last, t0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mu.Lock()
+	n := len(seen)
+	mu.Unlock()
+	if n > 20 {
+		t.Fatalf("seen has %d entries, cap 20", n)
+	}
+	if _, err := VerifyBox(last, t0); !errors.Is(err, errReplay) {
+		t.Fatalf("newest signature replayed: %v", err)
+	}
+}

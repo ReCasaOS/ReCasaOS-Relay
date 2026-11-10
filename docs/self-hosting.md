@@ -11,6 +11,7 @@ This is for an operator who wants to run their own relay and point ReCasaOS boxe
   - `80/tcp` if you use the Caddy automatic HTTPS setup below (certificate issuance and redirect),
   - `3478/udp` (STUN, now served by the `derper` service; `compose.yaml` publishes it).
 - Never open `8081` (enrolment service) or `50443` (Headscale gRPC). `compose.yaml` publishes neither.
+- Public sharing (section 14, optional) also needs `53/udp` and `53/tcp` on the public IP, and moves `80` and `443` from `front` to `share`.
 
 ## 2. First start
 
@@ -46,15 +47,30 @@ Create `Caddyfile.tls` next to `compose.yaml`: the shipped `Caddyfile` with `aut
 	email admin@example.org
 }
 
+# Only for public sharing (section 14); harmless without `share`. It makes the port-80 server explicit, which
+# the `proxy_protocol` wrapper of section 14 needs; Caddy's own HTTP-to-HTTPS redirect answers the shared names.
+http://*.box.example.org {
+	redir https://{host}{uri} 301
+}
+
 relay.example.org {
 	@debug path /debug /debug/*
 	handle @debug {
 		respond 404
 	}
 
+	# /internal/* (the enrolment service's share routes) is deliberately not routed either: it falls through
+	# to Headscale and answers 404, like /api. Only services on the compose network reach it.
 	@api path /api /api/*
 	handle @api {
 		respond 404
+	}
+
+	@tunnel path /v1/share/tunnel
+	handle @tunnel {
+		reverse_proxy share:8082 {
+			header_up X-Client-IP {client_ip}
+		}
 	}
 
 	@enrolment path /v1/* /admin /admin/*
@@ -215,7 +231,7 @@ Steps 1 to 3 only touch untracked files, so do them on the v0.3 checkout, before
 
 ### Using the published image
 
-Pushing a tag `vX.Y.Z` of this repository publishes two images, `ghcr.io/recasaos/recasaos-relay-enrolment:vX.Y.Z` and `ghcr.io/recasaos/recasaos-relay-derper:vX.Y.Z` (and `latest` for a final release, not for a `-rc` tag) through `.github/workflows/release.yml`. To run them instead of building, add `compose.image.yaml`. Without the `derper` entry, `build: ./derper` compiles Tailscale's derper on your server:
+Pushing a tag `vX.Y.Z` of this repository publishes three images, `ghcr.io/recasaos/recasaos-relay-enrolment:vX.Y.Z`, `ghcr.io/recasaos/recasaos-relay-derper:vX.Y.Z` and `ghcr.io/recasaos/recasaos-relay-share:vX.Y.Z` (and `latest` for a final release, not for a `-rc` tag) through `.github/workflows/release.yml`. To run them instead of building, add `compose.image.yaml`. Without the `derper` entry, `build: ./derper` compiles Tailscale's derper on your server:
 
 <!-- file: compose.image.yaml -->
 ```yaml
@@ -226,6 +242,10 @@ services:
 
   derper:
     image: ghcr.io/recasaos/recasaos-relay-derper:v0.4.0
+    build: !reset null
+
+  share: # only with public sharing (section 14); first published with v0.6.0
+    image: ghcr.io/recasaos/recasaos-relay-share:v0.6.0
     build: !reset null
 ```
 
@@ -288,6 +308,7 @@ In ReCasaOS, enter your public URL (`https://relay.example.org`, no path) in the
 - `X-Client-IP` and `trusted_proxies`: read the README section on the proxy header before putting another proxy in front of `front`.
 - Keep `.env` (the API key) out of version control; rotate the key (section 5).
 - Do not edit the access policy in Headscale by hand: the next sync overwrites it.
+- Public sharing (section 14): the `proxy_protocol` wrapper belongs to share mode only (`front` unpublished); never leave it in `Caddyfile.tls` with `front` published, and `allow` should be narrowed to the compose subnet (`docker network inspect` gives it): any host that can reach `front` from an allowed address can forge `X-Client-IP` and evade the per-IP limits. Never publish `8082` (the `share` tunnel listener; only `front` reaches it) and publish `53` only on the public IP (`<ip>:53:53`), never `0.0.0.0`. Trust model: the relay holds the DNS zone, so its operator could obtain a certificate for any box name; Certificate Transparency logs make every such certificate public, which is the check boxes and users have.
 
 ## 11. Admin page
 
@@ -339,3 +360,191 @@ A phone joins a fleet with the official Tailscale app, using your relay as its l
   ```
 
   No output means the app would land on Headscale's own page: `front` still runs the old Caddyfile, or the `@login` block is missing.
+
+## 14. Public sharing
+
+A box can publish a web app of its own under `https://<app>.<box>.box.example.org` (`box.example.org` is the sharing domain, `SHARE_DOMAIN`; `<box>` is the name the box claimed on the relay). The relay forwards the TLS connection by SNI without decrypting it (a shared box's traffic goes into its tunnel, everything else to `front`), and the boxes' certificates are obtained by DNS-01, answered by the relay's own DNS zone for `box.example.org`. The API and the box side are in the README ("Public sharing"); this section is what an operator sets up. It adds a third process, `share`, and moves ports 80 and 443 from `front` to it. It is optional: without `compose.share.yaml` below, none of this exists and the relay behaves as in sections 1 to 13.
+
+Examples use `relay.example.org` (the relay, as in section 3a) and `box.example.org` (the sharing domain, a sub-domain of a domain you control).
+
+### Delegation at the registrar
+
+The relay must be the authoritative DNS server of `box.example.org`. At the registrar (or wherever `example.org` is served), create two records:
+
+```
+box.example.org.     NS   ns.box.example.org.
+ns.box.example.org.  A    <relay public IPv4>          ; the glue: the name server lives inside the zone it serves
+```
+
+(plus an `AAAA` glue record if you set `SHARE_PUBLIC_IP6`). Some registrars call the glue a "child name server" or "host record" and want it entered in a dedicated form. The relay's zone answers `A` / `AAAA` for every name of one or two labels under `box.example.org` (`test.box...`, `app.test.box...`) with `SHARE_PUBLIC_IP` / `SHARE_PUBLIC_IP6`, `NS` and `SOA` at its apex, and `TXT` only for `_acme-challenge.<box>.box.example.org` while that box has a challenge pending. No recursion, no zone transfer.
+
+### Public Suffix List (owner action, takes weeks)
+
+Ask for `box.example.org` to be added to the PRIVATE section of the [Public Suffix List](https://publicsuffix.org/submit/) (a pull request on `publicsuffix/list`). Two reasons: Let's Encrypt's rate limit counts certificates per registered domain (50 new ones a week), so without the entry every box shares one budget and sharing stops working at a few dozen boxes; and browsers isolate cookies per registered domain, so without it one box's apps could set cookies that another box's apps receive. The review takes weeks; the system works without the entry for a small number of boxes. The maintainers ask for proof of control as a TXT record at `_psl.box.example.org` whose value is the URL of your pull request: once it is open, set `SHARE_PSL_TXT=<that URL>` in `.env` (and pass it to `enrolment`, below); the zone then answers it (TTL 300). **Not verified** against the maintainers' current requirements: read their instructions before filing.
+
+### Ports
+
+| Port | Who | Notes |
+|---|---|---|
+| `80/tcp`, `443/tcp` | `share` (moved from `front`) | `share` reads the TLS server name (or the HTTP `Host`) and forwards to `front`, or into the box's tunnel for a shared name |
+| `53/udp`, `53/tcp` | `enrolment` (the DNS zone) | publish **on the public IP explicitly** (`<ip>:53:53/udp`, `<ip>:53:53/tcp`), never `0.0.0.0`: on a typical Linux host `systemd-resolved` already holds `127.0.0.53:53` and `127.0.0.54:53`, so a wildcard bind can fail, and a DNS server should not answer on every interface anyway |
+| `8082/tcp` | `share` tunnel listener | never published: only `front` reaches it (`/v1/share/tunnel`; the block is already in the `Caddyfile.tls` of section 3a) |
+| `443/udp` | none | HTTP/3 is lost, see below |
+
+Open `53/udp` and `53/tcp` in the host firewall or cloud security group too. Behind the SNI front, **Caddy loses HTTP/3** on the relay name: `share` forwards TCP only, so `443/udp` is no longer reachable. Boxes and Tailscale clients do not use it; browsers fall back to HTTP/2.
+
+**Client address.** `share` starts every connection to `front` with a [PROXY protocol](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt) v2 header carrying the visitor's address (`FRONT_PROXY_PROTOCOL`, default `true`; `false` forwards the bytes untouched, as before). The `Caddyfile.tls` of section 3a does not read it; the additions below do, with Caddy's `proxy_protocol` listener wrapper, placed before `tls` because the header precedes the TLS handshake; `{client_ip}` is then the visitor, `header_up X-Client-IP {client_ip}` hands it to `enrolment` unchanged, and the per-IP limits of section 4 (`CREATE_RATE_PER_HOUR`, `AUTH_RATE_PER_HOUR`, `LOGIN_RATE_PER_HOUR`) count per visitor again. Without the header every visitor would be the `share` container and those limits one budget for the whole Internet.
+
+The wrapper only trusts headers from `allow`: put your compose network's subnet there (`docker network inspect <project>_default` gives it; the private ranges of the Caddyfile are only a fallback). **The wrapper belongs to share mode only: have it in `Caddyfile.tls` only while `front` is unpublished (with `compose.share.yaml`), and remove it again on rollback.** With `front` published (section 3a alone), a client arriving through Docker's userland proxy (IPv6 publishing, hairpin) shows up with the bridge gateway as source, inside the compose subnet and so trusted, and could forge `X-Client-IP`. `allow` should also be as narrow as the compose subnet: any host that can reach `front` from an allowed address can forge `X-Client-IP` and evade the per-IP limits. Choice of policy: no `fallback_policy` line, so Caddy's default `ignore` applies to every other address (a header from outside is not believed, which stops a visitor from forging its address), and a connection from an allowed address **without** a header still works (Caddy's `use` for `allow`: header used if present). That is what makes the migration a one-way, no-flag-day change: `front` can run the new `Caddyfile.tls` while `share` still forwards headerless. Recreate `front` with the wrapper no later than `share` (the migration below does both in one command); the other order is safe only with `FRONT_PROXY_PROTOCOL=false`. Ordering to avoid: `share` with `FRONT_PROXY_PROTOCOL=true` against a `front` whose Caddyfile has no wrapper, which breaks every connection (Caddy reads the header as garbage); so recreate them together, in step 3 of the migration below. Set `FRONT_PROXY_PROTOCOL=false` only when your Caddy is not configured for it.
+
+### Settings
+
+In `.env`, next to the ones of section 4:
+
+| Variable | Default | Process | Notes |
+|---|---|---|---|
+| `SHARE_DOMAIN` | none, **required** | both | the sharing domain, lowercased (`box.example.org`): a bare DNS name, no scheme, port or trailing dot (both processes refuse to start otherwise). Empty on `enrolment`: sharing is off (every `/v1/share*` answers 503) |
+| `SHARE_PUBLIC_IP` | none, **required** | `enrolment` | IPv4 the zone answers with, and the IP port 53 is published on: the relay's public address |
+| `SHARE_PUBLIC_IP6` | none | `enrolment` | IPv6 address for `AAAA`; empty: no `AAAA` |
+| `RELAY_HOST` | none, **required** | `share` | the relay's own name (`relay.example.org`), a bare DNS name not under `SHARE_DOMAIN`: traffic for it goes to `front`, any other name is looked up as a box |
+| `SHARE_ACME_TTL` | `10m` | `enrolment` | validity of an `_acme-challenge` TXT value |
+| `SHARE_ACME_RATE_PER_HOUR` | `20` | `enrolment` | ACME TXT writes per hour per box |
+| `PEEK_TIMEOUT` | `5s` | `share` | how long a new connection has to send its TLS hello / HTTP request line |
+| `TUNNEL_RATE_PER_HOUR` | `60` | `share` | tunnel dials (`/v1/share/tunnel`) per hour per client IP (`X-Client-IP`, set by `front`), counted before the signature check; `429` with `Retry-After` beyond |
+| `LISTEN_TLS`, `LISTEN_HTTP`, `LISTEN_TUNNEL` | `:443`, `:80`, `:8082` | `share` | listen addresses inside the container |
+| `FRONT_TLS`, `FRONT_HTTP` | `front:443`, `front:80` | `share` | where non-box traffic goes |
+| `FRONT_PROXY_PROTOCOL` | `true` | `share` | send a PROXY v2 header (the visitor's address) to `FRONT_TLS` and `FRONT_HTTP`; see "Client address" |
+| `SHARE_PSL_TXT` | empty | `enrolment` | value of `_psl.<SHARE_DOMAIN>` TXT (Public Suffix List ownership proof), at most 255 bytes; empty: no such record |
+| `ENROLMENT_URL` | `http://enrolment:8081` | `share` | name lookups and usage posts, compose network only |
+| `LISTEN_DNS` | `:53` | `enrolment` | DNS listen address inside the container |
+
+The rows from `PEEK_TIMEOUT` on are the processes' own defaults (`compose.yaml` passes `LISTEN_TLS`, `LISTEN_HTTP`, `LISTEN_TUNNEL`, `FRONT_TLS`, `FRONT_HTTP`, `ENROLMENT_URL`, `PEEK_TIMEOUT`, `FRONT_PROXY_PROTOCOL` and `TUNNEL_RATE_PER_HOUR` to `share`, and `SHARE_PSL_TXT` to `enrolment`, as shown there); none needs changing except `SHARE_PSL_TXT` once you have a PSL request.
+
+### Compose override
+
+`compose.share.yaml` starts `share` for good (the `share` profile of `compose.yaml` is for tests), gives it 80 and 443, takes both away from `front` (which keeps listening on them inside the compose network, where `share` reaches it) and turns the zone on in `enrolment`. Put `SHARE_DOMAIN`, `SHARE_PUBLIC_IP` and `RELAY_HOST` in `.env`.
+
+<!-- file: compose.share.yaml -->
+```yaml
+services:
+  share:
+    profiles: !reset []
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      RELAY_HOST: ${RELAY_HOST:?set RELAY_HOST in .env}
+      SHARE_DOMAIN: ${SHARE_DOMAIN:?set SHARE_DOMAIN in .env}
+
+  front:
+    ports: !override []
+
+  enrolment:
+    environment:
+      SHARE_DOMAIN: ${SHARE_DOMAIN:?set SHARE_DOMAIN in .env}
+      SHARE_PUBLIC_IP: ${SHARE_PUBLIC_IP:?set SHARE_PUBLIC_IP in .env}
+      SHARE_PUBLIC_IP6: ${SHARE_PUBLIC_IP6:-}
+      SHARE_ACME_TTL: ${SHARE_ACME_TTL:-10m}
+      SHARE_ACME_RATE_PER_HOUR: ${SHARE_ACME_RATE_PER_HOUR:-20}
+      SHARE_PSL_TXT: ${SHARE_PSL_TXT:-}
+    ports:
+      - "${SHARE_PUBLIC_IP:?set SHARE_PUBLIC_IP in .env}:53:53/udp"
+      - "${SHARE_PUBLIC_IP:?set SHARE_PUBLIC_IP in .env}:53:53/tcp"
+```
+
+`!reset` and `!override` need Docker Compose 2.24.4 or later on the host (`docker compose version`); an older one refuses the file or ignores the tags.
+
+Pass it after the others, on every `docker compose` command of this document from now on: `docker compose -f compose.yaml -f compose.tls.yaml -f compose.share.yaml ...`. For an IPv6 address also publish `"[${SHARE_PUBLIC_IP6}]:53:53/udp"` and `/tcp` (not verified). It builds on section 3a: with the plain `compose.yaml`, `front` publishes 8080 and has no TLS for `share` to forward to.
+
+Verified: the file passes `docker compose -f compose.yaml -f compose.tls.yaml -f compose.share.yaml config -q` with `SHARE_DOMAIN`, `SHARE_PUBLIC_IP` and `RELAY_HOST` set (and without them it stops with the messages above). **Not verified:** a run on a real host (no public IP and no registrar here). The e2e tests `TestShareFrontKeepsRelayWorking`, `TestShareRoutesBySNIAndIsolates` and `TestShareCertificateViaDNS01` run the same three processes on a private network with a test CA.
+
+### Caddyfile.tls
+
+Additions to the `Caddyfile.tls` of section 3a, for share mode:
+
+0. replace the global options block (`{ email ... }`) with the one below, which adds the two `listener_wrappers` blocks (the visitor's address, see "Client address"). Put your compose subnet in `allow` (`docker network inspect <project>_default`); the private ranges are only a fallback. Keep them only while `front` is unpublished, and take them out again on rollback:
+
+<!-- file: Caddyfile.tls (global options in share mode) -->
+```
+{
+	email admin@example.org
+
+	# Reads the PROXY protocol header that `share` (section 14) puts in front of each connection, so that
+	# {client_ip} is the visitor and not the `share` container. Must stay before `tls`; :80 gets its own
+	# block without `tls`, and it only reaches a server defined by an explicit `http://` site (the
+	# `http://*.box...` site of the base file), not the redirect server Caddy adds by itself.
+	servers :443 {
+		listener_wrappers {
+			proxy_protocol {
+				allow <compose subnet> # fallback: 172.16.0.0/12 192.168.0.0/16 10.0.0.0/8
+			}
+			tls
+		}
+		# 443/udp no longer reaches `front`: do not advertise HTTP/3.
+		protocols h1 h2
+	}
+	servers :80 {
+		listener_wrappers {
+			proxy_protocol {
+				allow <compose subnet> # fallback: 172.16.0.0/12 192.168.0.0/16 10.0.0.0/8
+			}
+		}
+	}
+}
+```
+
+   Do not recreate `front` with this block before the switch below: until `share` takes over, `front` is still published.
+1. the `/v1/share/tunnel` block (`@tunnel`, to `share:8082`, with `header_up X-Client-IP {client_ip}`: `share` rate-limits tunnel dials per client IP) is in the base file of section 3a; make sure it is there, with the `header_up` line;
+2. the `http://*.box.example.org` site is in the base file of section 3a too; make sure it is there, once (Caddy refuses a file that defines the same site twice). It exists to make the port-80 server explicit: Caddy applies the `servers :80` wrapper of item 0 to a server defined by an explicit `http://` site, not to the redirect server it adds by itself (measured: without such a site, a PROXY header on port 80 is answered `400`, your own HTTP-01 renewals included). A plain-HTTP request for `<app>.<box>.box.example.org` is answered by Caddy's catch-all HTTP-to-HTTPS redirect, not by this site's `redir`.
+
+The file passes `caddy validate` in `caddy:2.10.0-alpine` (the image of `front`). Run with Caddy's internal CA in a throwaway container, a plain-HTTP request for `app.test.box.example.org` was redirected to HTTPS with a **308**, with or without the `http://*.box...` site (Caddy's own redirect answers first). `Caddyfile.tls` is bind-mounted: recreate `front` after changing it (the migration below does).
+
+### Migrating the production relay
+
+For `relay.recasaos.org` (Scaleway host, observed 2026-11-09): `front` publishes `80/tcp` and `443/tcp` and exposes `443/udp`; a `watchtower` container updates images by itself; `systemd-resolved` holds `127.0.0.53:53` and `127.0.0.54:53` only, so port 53 is free on the public IP. **`watchtower` does not do this switch**: `share` is a new service and `front`'s ports change only through the override, so the operator applies it by hand, once.
+
+1. Owner, first: the delegation at the registrar, the Scaleway security group (`53/udp` and `53/tcp` in), the PSL request (it can wait).
+2. On the host: `git pull`; add `SHARE_DOMAIN`, `SHARE_PUBLIC_IP` (and `SHARE_PUBLIC_IP6`) and `RELAY_HOST` to `.env`; write `compose.share.yaml`; make sure `Caddyfile.tls` has the `http://*.box...` site and the `/v1/share/tunnel` block of section 3a (items 1 and 2 above; do not add the site a second time); replace the global options of `Caddyfile.tls` with the share-mode block above (it takes effect when `front` is recreated in step 3, together with `share`: do not restart `front` in between).
+   Then check the files before the switch (a Caddyfile that does not parse would leave `front` down during it):
+
+   ```
+   docker compose version   # 2.24.4 or later, for !reset / !override
+   docker compose -f compose.yaml -f compose.tls.yaml -f compose.share.yaml run --rm front caddy validate --config /etc/caddy/Caddyfile
+   ```
+
+3. The switch:
+
+   ```
+   docker compose -f compose.yaml -f compose.tls.yaml -f compose.share.yaml up -d --build share enrolment front
+   ```
+
+   One command: `front` is recreated without its ports, `share` starts on 80 and 443, `enrolment` restarts with the zone. Seconds of downtime for the relay; boxes reconnect by themselves, no re-enrolment, nothing to do on the boxes. HTTP/3 is gone (above).
+4. Keep the three `-f` options from now on: without the override, the next `up -d` hands 80 and 443 back to `front` while `share` still holds them.
+
+Check (replace `<ip>` with the relay's public IP):
+
+```
+dig @<ip> app.test.box.example.org A                            # the relay IP
+dig @<ip> _acme-challenge.test.box.example.org TXT              # status NOERROR, no answer
+openssl s_client -servername relay.example.org -connect <ip>:443 </dev/null | openssl x509 -noout -issuer -dates   # still Caddy's certificate for the relay
+curl -I http://relay.example.org/.well-known/acme-challenge/x   # an HTTP answer from Caddy (404 or a 308 to https), not a connection error
+curl -I http://app.test.box.example.org                         # a 301 or 308 redirect to https://app.test.box.example.org/
+docker compose -f compose.yaml -f compose.tls.yaml -f compose.share.yaml logs front | grep -i -E "certificate|acme"   # a renewal attempt succeeding
+```
+
+Then `dig NS box.example.org` without `@` shows the delegation from outside once it has propagated: box names resolve from the Internet only after that, while `dig @<relay ip>` answers at once. A box that claims a name (README, "Public sharing") shows under **Shared names** on `/admin`.
+
+**Rollback:** stop `share` first (it holds 80 and 443), then bring the stack up without the override:
+
+```
+docker compose -f compose.yaml -f compose.tls.yaml -f compose.share.yaml rm -sf share
+docker compose -f compose.yaml -f compose.tls.yaml up -d
+```
+
+Between the two commands, take the `listener_wrappers` blocks out of the global options of `Caddyfile.tls` (back to the `{ email ... }` of section 3a): the second command publishes `front` again, and with the wrapper still there the PROXY header trust would apply to clients reaching `front` directly. The second command recreates `front`, which reads the file.
+
+`front` takes 80 and 443 back, and `enrolment` restarts without the zone and without port 53. Nothing else to undo: claimed names and TXT rows stay in `relay.db` and do no harm (the share API answers 503 until `SHARE_DOMAIN` is set again). Boxes lose their public address meanwhile; their tunnels reconnect when `share` is back.
+
+### Operating it
+
+On `/admin` (section 11): **Shared names** lists every claimed name with a Revoke button, and **Forbidden names** is your own deny list on top of the built-in reserved words (`www relay admin api mail ns ns1 box tunnel recasaos casaos localhost`). Revoking a name frees it from its box and forbids it; the box's tunnel closes within a minute. Details: README, "Public sharing". A box whose node no longer exists in Headscale (for instance after `tailscale logout`) loses its box key at the next janitor pass and its name goes to quarantine. The quarantine lasts 125 days (fixed: Let's Encrypt reuses a DNS-01 authorization for up to 30 days, so a former holder could still get a 90-day certificate for the name that long after); the box that released a name may take it back meanwhile, nobody else may. Removing a box from `/admin` drops its box key at once. Unbanning a name (Forbidden names, Remove) also lifts its quarantine: it undoes a misclicked Revoke.

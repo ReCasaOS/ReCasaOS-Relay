@@ -17,7 +17,14 @@ var (
 	ErrExists   = errors.New("store: already exists")
 
 	ErrTooManyCodes = errors.New("store: too many unused device codes")
+	ErrBanned       = errors.New("store: name banned")
+	ErrQuarantined  = errors.New("store: name quarantined")
 )
+
+// Quarantine is how long a released name stays unclaimable by other boxes: Let's Encrypt reuses
+// a DNS-01 authorization for up to 30 days, so this outlasts a 90-day certificate issued on it.
+// The share_names_quarantine trigger hard-codes the same value (10800000 s).
+const Quarantine = 125 * 24 * time.Hour
 
 type Fleet struct {
 	ID, SecretHash, HeadscaleUser string
@@ -57,6 +64,33 @@ type Store interface {
 	AllDevices(ctx context.Context) (map[string]string, error)
 	// DeleteDevice removes a device; an unknown id is not an error.
 	DeleteDevice(ctx context.Context, nodeID string) error
+
+	// SetBoxKey links key to a node once: the same key again is a no-op; ErrExists when the node
+	// already has another key or key belongs to another node.
+	SetBoxKey(ctx context.Context, fleetID, nodeID, key string, at time.Time) error
+	DeleteBoxKey(ctx context.Context, nodeID string) error
+	// BoxKeysOf maps node id to box key.
+	BoxKeysOf(ctx context.Context, fleetID string) (map[string]string, error)
+	// BoxByKey returns the box owning key (Name is empty when it has none); unknown key is ErrNotFound.
+	BoxByKey(ctx context.Context, key string) (BoxRef, error)
+	// ClaimName gives name to nodeID: ErrBanned, ErrQuarantined (until > at), ErrExists (held by
+	// another node, or nodeID already holds a different name). Claiming one's own name is a no-op.
+	ClaimName(ctx context.Context, nodeID, name string, at time.Time) error
+	// ReleaseName frees the node's name and quarantines it until quarantineUntil; no name is not an error.
+	ReleaseName(ctx context.Context, nodeID string, quarantineUntil time.Time) error
+	ListNames(ctx context.Context) ([]NameRow, error)
+	// BanName bans name and releases it from its holder.
+	BanName(ctx context.Context, name string, at time.Time) error
+	UnbanName(ctx context.Context, name string) error
+	BannedNames(ctx context.Context) ([]string, error)
+	SetACME(ctx context.Context, name, value string, expires time.Time) error
+	// ACMEValue returns the TXT value unless it expired at or before now.
+	ACMEValue(ctx context.Context, name string, now time.Time) (string, bool, error)
+	DeleteACME(ctx context.Context, name string) error
+	// ApplyShareUsage adds samples to the shared-traffic buckets only (no derper cursors).
+	ApplyShareUsage(ctx context.Context, at time.Time, samples []UsageSample) error
+	ShareTotals(ctx context.Context, since time.Time) ([]UsageTotal, error)
+	ShareSeries(ctx context.Context, res Resolution, since time.Time) ([]UsagePoint, error)
 	Close() error
 }
 
@@ -100,7 +134,43 @@ CREATE TABLE IF NOT EXISTS devices (
 	fleet_id TEXT NOT NULL REFERENCES fleets(id) ON DELETE CASCADE,
 	added INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS derp_cursor (conn TEXT PRIMARY KEY, rx INTEGER NOT NULL, tx INTEGER NOT NULL);`
+CREATE TABLE IF NOT EXISTS derp_cursor (conn TEXT PRIMARY KEY, rx INTEGER NOT NULL, tx INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS box_keys (
+	node_id TEXT PRIMARY KEY,
+	fleet_id TEXT NOT NULL REFERENCES fleets(id) ON DELETE CASCADE,
+	box_key TEXT NOT NULL UNIQUE,
+	added INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS share_names (
+	name TEXT PRIMARY KEY,
+	node_id TEXT NOT NULL UNIQUE REFERENCES box_keys(node_id) ON DELETE CASCADE,
+	fleet_id TEXT NOT NULL,
+	claimed_at INTEGER NOT NULL
+);
+-- node_id: the releasing box, which may take its name back during the quarantine. The table and
+-- trigger were changed in place, not migrated: no deployed database has the share tables yet.
+CREATE TABLE IF NOT EXISTS share_quarantine (name TEXT PRIMARY KEY, until INTEGER NOT NULL, node_id TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS share_banned (name TEXT PRIMARY KEY, added INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS acme_txt (name TEXT PRIMARY KEY, value TEXT NOT NULL, expires INTEGER NOT NULL);
+-- Any removal of a name (release, fleet or box deletion by cascade) quarantines it for 125 days (store.Quarantine).
+CREATE TRIGGER IF NOT EXISTS share_names_quarantine BEFORE DELETE ON share_names
+BEGIN
+	INSERT OR REPLACE INTO share_quarantine (name, until, node_id) VALUES (OLD.name, (strftime('%s','now') + 10800000) * 1000000000, OLD.node_id);
+END;
+CREATE TABLE IF NOT EXISTS share_minute (
+	fleet_id TEXT NOT NULL, node_id TEXT NOT NULL, minute INTEGER NOT NULL,
+	rx INTEGER NOT NULL, tx INTEGER NOT NULL,
+	CHECK (fleet_id <> '' AND node_id <> ''),
+	PRIMARY KEY (fleet_id, node_id, minute)
+);
+CREATE TABLE IF NOT EXISTS share_hour (
+	fleet_id TEXT NOT NULL, node_id TEXT NOT NULL, hour INTEGER NOT NULL,
+	rx INTEGER NOT NULL, tx INTEGER NOT NULL,
+	CHECK (fleet_id <> '' AND node_id <> ''),
+	PRIMARY KEY (fleet_id, node_id, hour)
+);
+CREATE INDEX IF NOT EXISTS share_minute_minute ON share_minute(minute);
+CREATE INDEX IF NOT EXISTS share_hour_hour ON share_hour(hour);`
 
 type sqlStore struct{ db *sql.DB }
 
@@ -289,18 +359,8 @@ func (s *sqlStore) ApplyUsage(ctx context.Context, at time.Time, samples []Usage
 			err = fmt.Errorf("store: apply usage: %w", err)
 		}
 	}()
-	at = at.UTC()
-	for _, b := range []struct {
-		table, col string
-		t          time.Time
-	}{{"usage_minute", "minute", at.Truncate(time.Minute)}, {"usage_hour", "hour", at.Truncate(time.Hour)}} {
-		q := `INSERT INTO ` + b.table + ` (fleet_id, node_id, ` + b.col + `, rx, tx) VALUES (?, ?, ?, ?, ?)
-			ON CONFLICT(fleet_id, node_id, ` + b.col + `) DO UPDATE SET rx = rx + excluded.rx, tx = tx + excluded.tx`
-		for _, sm := range samples {
-			if _, err = tx.ExecContext(ctx, q, sm.FleetID, sm.NodeID, b.t.Unix(), sm.Rx, sm.Tx); err != nil {
-				return err
-			}
-		}
+	if err = addBuckets(ctx, tx, "usage_minute", "usage_hour", at, samples); err != nil {
+		return err
 	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM derp_cursor`); err != nil {
 		return err
@@ -311,6 +371,24 @@ func (s *sqlStore) ApplyUsage(ctx context.Context, at time.Time, samples []Usage
 		}
 	}
 	return tx.Commit()
+}
+
+// addBuckets adds samples to the minute and hour buckets of at (UTC) in the given table pair.
+func addBuckets(ctx context.Context, tx *sql.Tx, minuteTable, hourTable string, at time.Time, samples []UsageSample) error {
+	at = at.UTC()
+	for _, b := range []struct {
+		table, col string
+		t          time.Time
+	}{{minuteTable, "minute", at.Truncate(time.Minute)}, {hourTable, "hour", at.Truncate(time.Hour)}} {
+		q := `INSERT INTO ` + b.table + ` (fleet_id, node_id, ` + b.col + `, rx, tx) VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(fleet_id, node_id, ` + b.col + `) DO UPDATE SET rx = rx + excluded.rx, tx = tx + excluded.tx`
+		for _, sm := range samples {
+			if _, err := tx.ExecContext(ctx, q, sm.FleetID, sm.NodeID, b.t.Unix(), sm.Rx, sm.Tx); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (s *sqlStore) Cursors(ctx context.Context) (map[string]Cursor, error) {
@@ -331,8 +409,16 @@ func (s *sqlStore) Cursors(ctx context.Context) (map[string]Cursor, error) {
 }
 
 func (s *sqlStore) UsageTotals(ctx context.Context, since time.Time) ([]UsageTotal, error) {
+	return s.totals(ctx, "usage_hour", since)
+}
+
+func (s *sqlStore) ShareTotals(ctx context.Context, since time.Time) ([]UsageTotal, error) {
+	return s.totals(ctx, "share_hour", since)
+}
+
+func (s *sqlStore) totals(ctx context.Context, table string, since time.Time) ([]UsageTotal, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT fleet_id, node_id, SUM(rx), SUM(tx) FROM usage_hour WHERE hour >= ? GROUP BY fleet_id, node_id ORDER BY fleet_id, node_id`,
+		`SELECT fleet_id, node_id, SUM(rx), SUM(tx) FROM `+table+` WHERE hour >= ? GROUP BY fleet_id, node_id ORDER BY fleet_id, node_id`,
 		since.UTC().Unix())
 	if err != nil {
 		return nil, fmt.Errorf("store: usage totals: %w", err)
@@ -350,9 +436,17 @@ func (s *sqlStore) UsageTotals(ctx context.Context, since time.Time) ([]UsageTot
 }
 
 func (s *sqlStore) UsageSeries(ctx context.Context, res Resolution, since time.Time) ([]UsagePoint, error) {
-	table, col := "usage_minute", "minute"
+	return s.series(ctx, "usage_minute", "usage_hour", res, since)
+}
+
+func (s *sqlStore) ShareSeries(ctx context.Context, res Resolution, since time.Time) ([]UsagePoint, error) {
+	return s.series(ctx, "share_minute", "share_hour", res, since)
+}
+
+func (s *sqlStore) series(ctx context.Context, minuteTable, hourTable string, res Resolution, since time.Time) ([]UsagePoint, error) {
+	table, col := minuteTable, "minute"
 	if res == PerHour {
-		table, col = "usage_hour", "hour"
+		table, col = hourTable, "hour"
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT fleet_id, node_id, `+col+`, rx, tx FROM `+table+` WHERE `+col+` >= ? ORDER BY `+col+`, fleet_id, node_id`,
@@ -375,11 +469,14 @@ func (s *sqlStore) UsageSeries(ctx context.Context, res Resolution, since time.T
 }
 
 func (s *sqlStore) PruneUsage(ctx context.Context, minutesBefore, hoursBefore time.Time) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM usage_minute WHERE minute < ?`, minutesBefore.UTC().Unix()); err != nil {
-		return fmt.Errorf("store: prune usage: %w", err)
-	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM usage_hour WHERE hour < ?`, hoursBefore.UTC().Unix()); err != nil {
-		return fmt.Errorf("store: prune usage: %w", err)
+	for _, q := range []struct {
+		table, col string
+		before     time.Time
+	}{{"usage_minute", "minute", minutesBefore}, {"share_minute", "minute", minutesBefore},
+		{"usage_hour", "hour", hoursBefore}, {"share_hour", "hour", hoursBefore}} {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM `+q.table+` WHERE `+q.col+` < ?`, q.before.UTC().Unix()); err != nil {
+			return fmt.Errorf("store: prune usage: %w", err)
+		}
 	}
 	return nil
 }
@@ -480,6 +577,267 @@ func (s *sqlStore) AllDevices(ctx context.Context) (map[string]string, error) {
 func (s *sqlStore) DeleteDevice(ctx context.Context, nodeID string) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM devices WHERE node_id = ?`, nodeID); err != nil {
 		return fmt.Errorf("store: delete device: %w", err)
+	}
+	return nil
+}
+
+type BoxRef struct{ FleetID, NodeID, Name string }
+
+type NameRow struct {
+	Name, FleetID, NodeID string
+	ClaimedAt             time.Time
+}
+
+func (s *sqlStore) SetBoxKey(ctx context.Context, fleetID, nodeID, key string, at time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: set box key: %w", err)
+	}
+	defer tx.Rollback()
+	// Linked once: a different key on a keyed node would let a fleet-secret holder take over the
+	// node's name. Rotation goes through node removal, which quarantines the name.
+	var taken bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM box_keys WHERE (box_key = ?) <> (node_id = ?))`, key, nodeID).Scan(&taken); err != nil {
+		return fmt.Errorf("store: set box key: %w", err)
+	}
+	if taken {
+		return ErrExists
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO box_keys (node_id, fleet_id, box_key, added) VALUES (?, ?, ?, ?) ON CONFLICT(node_id) DO NOTHING`,
+		nodeID, fleetID, key, ts(at)); err != nil {
+		return fmt.Errorf("store: set box key: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: set box key: %w", err)
+	}
+	return nil
+}
+
+func (s *sqlStore) DeleteBoxKey(ctx context.Context, nodeID string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM box_keys WHERE node_id = ?`, nodeID); err != nil {
+		return fmt.Errorf("store: delete box key: %w", err)
+	}
+	return nil
+}
+
+func (s *sqlStore) BoxKeysOf(ctx context.Context, fleetID string) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT node_id, box_key FROM box_keys WHERE fleet_id = ?`, fleetID)
+	if err != nil {
+		return nil, fmt.Errorf("store: box keys: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var node, key string
+		if err := rows.Scan(&node, &key); err != nil {
+			return nil, fmt.Errorf("store: box keys: %w", err)
+		}
+		out[node] = key
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: box keys: %w", err)
+	}
+	return out, nil
+}
+
+func (s *sqlStore) BoxByKey(ctx context.Context, key string) (BoxRef, error) {
+	var r BoxRef
+	err := s.db.QueryRowContext(ctx,
+		`SELECT b.fleet_id, b.node_id, COALESCE(n.name, '') FROM box_keys b LEFT JOIN share_names n ON n.node_id = b.node_id WHERE b.box_key = ?`, key).
+		Scan(&r.FleetID, &r.NodeID, &r.Name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return BoxRef{}, ErrNotFound
+	}
+	if err != nil {
+		return BoxRef{}, fmt.Errorf("store: box by key: %w", err)
+	}
+	return r, nil
+}
+
+func (s *sqlStore) ClaimName(ctx context.Context, nodeID, name string, at time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: claim name: %w", err)
+	}
+	defer tx.Rollback()
+	var fleetID string
+	if err := tx.QueryRowContext(ctx, `SELECT fleet_id FROM box_keys WHERE node_id = ?`, nodeID).Scan(&fleetID); errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return fmt.Errorf("store: claim name: %w", err)
+	}
+	var own string
+	switch err := tx.QueryRowContext(ctx, `SELECT name FROM share_names WHERE node_id = ?`, nodeID).Scan(&own); {
+	case err == nil && own == name:
+		return nil
+	case err == nil:
+		return ErrExists
+	case !errors.Is(err, sql.ErrNoRows):
+		return fmt.Errorf("store: claim name: %w", err)
+	}
+	var banned, held bool
+	var until int64
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM share_banned WHERE name = ?)`, name).Scan(&banned); err != nil {
+		return fmt.Errorf("store: claim name: %w", err)
+	}
+	if banned {
+		return ErrBanned
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(until), 0) FROM share_quarantine WHERE name = ? AND node_id <> ?`, name, nodeID).Scan(&until); err != nil {
+		return fmt.Errorf("store: claim name: %w", err)
+	}
+	if until > ts(at) {
+		return ErrQuarantined
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM share_names WHERE name = ?)`, name).Scan(&held); err != nil {
+		return fmt.Errorf("store: claim name: %w", err)
+	}
+	if held {
+		return ErrExists
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO share_names (name, node_id, fleet_id, claimed_at) VALUES (?, ?, ?, ?)`,
+		name, nodeID, fleetID, ts(at)); err != nil {
+		return fmt.Errorf("store: claim name: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: claim name: %w", err)
+	}
+	return nil
+}
+
+func (s *sqlStore) ReleaseName(ctx context.Context, nodeID string, quarantineUntil time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: release name: %w", err)
+	}
+	defer tx.Rollback()
+	var name string
+	// The delete trigger quarantines for Quarantine; the caller's date then overrides it.
+	switch err := tx.QueryRowContext(ctx, `DELETE FROM share_names WHERE node_id = ? RETURNING name`, nodeID).Scan(&name); {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return fmt.Errorf("store: release name: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO share_quarantine (name, until, node_id) VALUES (?, ?, ?)`, name, ts(quarantineUntil), nodeID); err != nil {
+		return fmt.Errorf("store: release name: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: release name: %w", err)
+	}
+	return nil
+}
+
+func (s *sqlStore) ListNames(ctx context.Context) ([]NameRow, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name, fleet_id, node_id, claimed_at FROM share_names ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list names: %w", err)
+	}
+	defer rows.Close()
+	var out []NameRow
+	for rows.Next() {
+		var n NameRow
+		var at int64
+		if err := rows.Scan(&n.Name, &n.FleetID, &n.NodeID, &at); err != nil {
+			return nil, fmt.Errorf("store: list names: %w", err)
+		}
+		n.ClaimedAt = time.Unix(0, at).UTC()
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+func (s *sqlStore) BanName(ctx context.Context, name string, at time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: ban name: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO share_banned (name, added) VALUES (?, ?)`, name, ts(at)); err != nil {
+		return fmt.Errorf("store: ban name: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM share_names WHERE name = ?`, name); err != nil {
+		return fmt.Errorf("store: ban name: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: ban name: %w", err)
+	}
+	return nil
+}
+
+func (s *sqlStore) UnbanName(ctx context.Context, name string) error {
+	// An unban is the operator undoing a revoke: lift the quarantine the revoke started too.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: unban name: %w", err)
+	}
+	defer tx.Rollback()
+	for _, q := range []string{`DELETE FROM share_banned WHERE name = ?`, `DELETE FROM share_quarantine WHERE name = ?`} {
+		if _, err := tx.ExecContext(ctx, q, name); err != nil {
+			return fmt.Errorf("store: unban name: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: unban name: %w", err)
+	}
+	return nil
+}
+
+func (s *sqlStore) BannedNames(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM share_banned ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("store: banned names: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, fmt.Errorf("store: banned names: %w", err)
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+func (s *sqlStore) SetACME(ctx context.Context, name, value string, expires time.Time) error {
+	if _, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO acme_txt (name, value, expires) VALUES (?, ?, ?)`, name, value, ts(expires)); err != nil {
+		return fmt.Errorf("store: set acme: %w", err)
+	}
+	return nil
+}
+
+func (s *sqlStore) ACMEValue(ctx context.Context, name string, now time.Time) (string, bool, error) {
+	var v string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM acme_txt WHERE name = ? AND expires > ?`, name, ts(now)).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("store: acme value: %w", err)
+	}
+	return v, true, nil
+}
+
+func (s *sqlStore) DeleteACME(ctx context.Context, name string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM acme_txt WHERE name = ?`, name); err != nil {
+		return fmt.Errorf("store: delete acme: %w", err)
+	}
+	return nil
+}
+
+func (s *sqlStore) ApplyShareUsage(ctx context.Context, at time.Time, samples []UsageSample) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: apply share usage: %w", err)
+	}
+	defer tx.Rollback()
+	if err := addBuckets(ctx, tx, "share_minute", "share_hour", at, samples); err != nil {
+		return fmt.Errorf("store: apply share usage: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: apply share usage: %w", err)
 	}
 	return nil
 }

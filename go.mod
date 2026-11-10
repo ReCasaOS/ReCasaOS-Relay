@@ -4,6 +4,10 @@ go 1.26.0
 
 require (
 	filippo.io/edwards25519 v1.1.0
+	github.com/coder/websocket v1.8.15
+	github.com/hashicorp/yamux v0.1.2
+	golang.org/x/crypto v0.58.0
+	golang.org/x/net v0.62.0
 	modernc.org/sqlite v1.61.1
 )
 

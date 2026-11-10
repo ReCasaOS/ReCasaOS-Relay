@@ -5,3 +5,4 @@
 /compose.tls.yaml
 /compose.image.yaml
 /derp.local.yaml
+*.exe

@@ -21,7 +21,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestConfigFromEnvDefaults(t *testing.T) {
-	for _, k := range []string{"NODES_PER_FLEET", "CREATE_RATE_PER_HOUR", "KEY_RATE_PER_HOUR", "AUTH_RATE_PER_HOUR", "JOIN_KEY_TTL", "IDLE_AFTER", "GC_INTERVAL", "TRUSTED_PROXY_HEADER", "MAX_FLEETS", "MAX_PENDING_KEYS", "DEVICE_CODE_TTL", "MAX_PENDING_DEVICE_CODES", "LOGIN_RATE_PER_HOUR"} {
+	for _, k := range []string{"NODES_PER_FLEET", "CREATE_RATE_PER_HOUR", "KEY_RATE_PER_HOUR", "AUTH_RATE_PER_HOUR", "JOIN_KEY_TTL", "IDLE_AFTER", "GC_INTERVAL", "TRUSTED_PROXY_HEADER", "MAX_FLEETS", "MAX_PENDING_KEYS", "DEVICE_CODE_TTL", "MAX_PENDING_DEVICE_CODES", "LOGIN_RATE_PER_HOUR", "SHARE_DOMAIN", "SHARE_ACME_TTL", "SHARE_ACME_RATE_PER_HOUR"} {
 		t.Setenv(k, "")
 	}
 	t.Setenv("LOGIN_SERVER", "https://relay.example") // required, no default
@@ -41,6 +41,7 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 		MaxPendingKeys:    5,
 		LoginServer:       "https://relay.example",
 		DeviceCodeTTL:     10 * time.Minute, MaxPendingDeviceCodes: 5, LoginRatePerHour: 20,
+		ShareACMETTL: 10 * time.Minute, ShareACMERatePerHour: 20,
 	}
 	if got != want {
 		t.Fatalf("defaults = %+v, want %+v", got, want)
@@ -59,13 +60,17 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 	t.Setenv("TRUSTED_PROXY_HEADER", "X-Forwarded-For")
 	t.Setenv("MAX_FLEETS", "3")
 	t.Setenv("MAX_PENDING_KEYS", "4")
+	t.Setenv("SHARE_DOMAIN", "Share.Example")
+	t.Setenv("SHARE_ACME_TTL", "1m")
+	t.Setenv("SHARE_ACME_RATE_PER_HOUR", "3")
 	got, err := ConfigFromEnv()
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := Config{NodesPerFleet: 10, CreateRatePerHour: 2, KeyRatePerHour: 7, AuthRatePerHour: 9, JoinKeyTTL: time.Hour,
 		IdleAfter: 48 * time.Hour, GCEvery: 90 * time.Second, LoginServer: "https://relay.example", TrustedProxyHeader: "X-Forwarded-For", MaxFleets: 3, MaxPendingKeys: 4,
-		DeviceCodeTTL: 10 * time.Minute, MaxPendingDeviceCodes: 5, LoginRatePerHour: 20}
+		DeviceCodeTTL: 10 * time.Minute, MaxPendingDeviceCodes: 5, LoginRatePerHour: 20,
+		ShareDomain: "share.example", ShareACMETTL: time.Minute, ShareACMERatePerHour: 3}
 	if got != want {
 		t.Fatalf("overrides = %+v, want %+v", got, want)
 	}
@@ -115,7 +120,7 @@ func TestConfigFromEnvLoginServer(t *testing.T) {
 // Both go through Headscale's gRPC layer, which refuses messages over 4 MiB. With the defaults,
 // keep both under 3 MiB. The README ("Capacity") states the same numbers.
 func TestDefaultsKeepHeadscaleMessagesUnder3MiB(t *testing.T) {
-	for _, k := range []string{"MAX_FLEETS", "MAX_PENDING_KEYS", "DEVICE_CODE_TTL", "MAX_PENDING_DEVICE_CODES", "LOGIN_RATE_PER_HOUR"} {
+	for _, k := range []string{"MAX_FLEETS", "MAX_PENDING_KEYS", "DEVICE_CODE_TTL", "MAX_PENDING_DEVICE_CODES", "LOGIN_RATE_PER_HOUR", "SHARE_DOMAIN", "SHARE_ACME_TTL", "SHARE_ACME_RATE_PER_HOUR"} {
 		t.Setenv(k, "")
 	}
 	t.Setenv("LOGIN_SERVER", "https://relay.example")
@@ -139,4 +144,21 @@ func TestDefaultsKeepHeadscaleMessagesUnder3MiB(t *testing.T) {
 		t.Fatalf("policy for %d fleets is %d B", c.MaxFleets, len(pol))
 	}
 	t.Logf("policy for %d fleets: %d B", c.MaxFleets, len(pol))
+}
+
+// SHARE_DOMAIN must be a bare lowercase DNS name: the zone, the routes and the names hang off it.
+func TestConfigFromEnvShareDomain(t *testing.T) {
+	t.Setenv("LOGIN_SERVER", "https://relay.example")
+	for _, v := range []string{"https://share.example", "share.example.", "share example", "share..example", "-share.example", "share_x.example", "share.example/x", strings.Repeat("a", 64) + ".example"} {
+		t.Setenv("SHARE_DOMAIN", v)
+		if _, err := ConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "SHARE_DOMAIN") {
+			t.Errorf("SHARE_DOMAIN=%q: err = %v, want a SHARE_DOMAIN error", v, err)
+		}
+	}
+	for _, v := range []string{"", "box.recasaos.org", "box.relay.test", " Box.Example "} {
+		t.Setenv("SHARE_DOMAIN", v)
+		if _, err := ConfigFromEnv(); err != nil {
+			t.Errorf("SHARE_DOMAIN=%q: %v", v, err)
+		}
+	}
 }

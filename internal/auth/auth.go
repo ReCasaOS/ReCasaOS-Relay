@@ -9,7 +9,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -19,8 +21,10 @@ import (
 
 const skew = 120 * time.Second
 
+// ErrUnauthorized wraps every VerifyBox failure; handlers answer 401 on errors.Is.
+var ErrUnauthorized = errors.New("auth: unauthorized")
+
 var (
-	errBadRequest = errors.New("auth: not a create-fleet request")
 	errBadHeaders = errors.New("auth: missing or malformed box headers")
 	errSkew       = errors.New("auth: box time outside accepted window")
 	errBadSig     = errors.New("auth: bad box signature")
@@ -44,6 +48,10 @@ var (
 // sweepEvery bounds how often seen is scanned, keeping verification amortised O(1).
 const sweepEvery = time.Second
 
+// maxSeen caps seen so a flood of fresh signatures (keys are free to mint) cannot grow it without
+// bound; when full, the tenth of entries closest to expiry is dropped. A var for tests.
+var maxSeen = 100_000
+
 func resetSeen() {
 	mu.Lock()
 	seen = map[string]time.Time{}
@@ -52,14 +60,22 @@ func resetSeen() {
 	mu.Unlock()
 }
 
-// VerifyBox authenticates a POST /v1/fleets request signed by a box and returns
-// the box's public key. A signature is accepted once, within ±120 s of now.
+// Message is the string a box signs: method, path and box time (X-Box-Time).
+func Message(method, path, ts string) string { return method + " " + path + "\n" + ts }
+
+// VerifyBox authenticates a request signed by a box over Message(method, path, time)
+// and returns the box's public key. A signature is accepted once, within ±120 s of now.
 // Callers that key anything by box identity must use the returned decoded key
 // bytes, never the X-Box-Key header text.
 func VerifyBox(r *http.Request, now time.Time) (ed25519.PublicKey, error) {
-	if r.Method != http.MethodPost || r.URL.Path != "/v1/fleets" {
-		return nil, errBadRequest
+	pub, err := verifyBox(r, now)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrUnauthorized, err)
 	}
+	return pub, nil
+}
+
+func verifyBox(r *http.Request, now time.Time) (ed25519.PublicKey, error) {
 	pub, err := enc.DecodeString(r.Header.Get("X-Box-Key"))
 	if err != nil || len(pub) != ed25519.PublicKeySize {
 		return nil, errBadHeaders
@@ -80,7 +96,7 @@ func VerifyBox(r *http.Request, now time.Time) (ed25519.PublicKey, error) {
 	if d := now.Sub(boxTime); d > skew || d < -skew {
 		return nil, errSkew
 	}
-	if !ed25519.Verify(pub, []byte("POST /v1/fleets\n"+tsStr), sig) {
+	if !ed25519.Verify(pub, []byte(Message(r.Method, r.URL.Path, tsStr)), sig) {
 		return nil, errBadSig
 	}
 
@@ -98,8 +114,27 @@ func VerifyBox(r *http.Request, now time.Time) (ed25519.PublicKey, error) {
 	if _, dup := seen[string(sig)]; dup {
 		return nil, errReplay
 	}
+	if len(seen) >= maxSeen {
+		dropOldest()
+	}
 	seen[string(sig)] = boxTime.Add(skew)
 	return ed25519.PublicKey(pub), nil
+}
+
+// dropOldest deletes the tenth (at least one) of seen closest to expiry: those signatures are the
+// nearest to failing the time check anyway. O(n log n) once per maxSeen/10 insertions. mu is held.
+func dropOldest() {
+	exps := make([]time.Time, 0, len(seen))
+	for _, exp := range seen {
+		exps = append(exps, exp)
+	}
+	slices.SortFunc(exps, time.Time.Compare)
+	cut := exps[len(exps)/10]
+	for k, exp := range seen {
+		if !exp.After(cut) {
+			delete(seen, k)
+		}
+	}
 }
 
 // NewSecret returns a random fleet secret and its sha256 hex hash (the only form stored).
