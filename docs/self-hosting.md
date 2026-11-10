@@ -160,12 +160,15 @@ Put them in a `.env` file next to `compose.yaml` (Compose substitutes them). An 
 | `LOGIN_SERVER` | none, **required** | yes | **your public URL** (`https://relay.example.org`, no path), the same as `server_url`: it is the `login_server` returned to boxes when a fleet is created. The e2e override sets both to the same URL. The service exits at startup if it is empty or not an `https://` URL without a path |
 | `NODES_PER_FLEET` | `50` | yes | boxes per fleet |
 | `MAX_FLEETS` | `1000` | yes | fleets the relay holds; creation answers 503 beyond. Do not raise it without reading "Capacity" in the README |
+| `MAX_FLEETS_PER_ORIGIN` | `10` | yes | fleets one network (an IPv4 address, an IPv6 /64) holds at once; creation answers 429 beyond, until one of its fleets goes. Homes behind one shared IPv4 address share these places. It counts the address `TRUSTED_PROXY_HEADER` gives: without that header every client is the proxy, and all share them |
+| `MAX_FLEETS_PER_PREFIX48` | `30` | yes | the same for an IPv6 /48, across its /64s |
 | `MAX_PENDING_KEYS` | `5` | yes | unused join keys per fleet at once (409 beyond). Raising it or `MAX_FLEETS`: README, "Capacity" |
 | `CREATE_RATE_PER_HOUR` | `5` | yes | fleet creations per hour per client IP (IPv6: per /64, plus 10 times this per /48) |
 | `KEY_RATE_PER_HOUR` | `30` | yes | join keys per hour per fleet |
 | `AUTH_RATE_PER_HOUR` | `60` | yes | authenticated fleet requests (join key, status, deletions, device code, device list, device removal) per hour per client IP, one shared budget (boxes behind one NAT share it) |
 | `DEVICE_CODE_TTL` | `10m` | yes | validity of a device code (remote access, section 13) |
 | `MAX_PENDING_DEVICE_CODES` | `5` | yes | unused device codes per fleet at once (409 beyond) |
+| `MAX_DEVICES_PER_FLEET` | `50` | yes | phones and PCs per fleet (a device code is refused, 409, beyond) |
 | `LOGIN_RATE_PER_HOUR` | `20` | yes | device-login form submissions per hour per client IP (IPv6: per /64, plus 10 times this per /48) |
 | `JOIN_KEY_TTL` | `24h` | yes | validity of a join key |
 | `IDLE_AFTER` | `720h` (30 days) | yes | a fleet with no online node for this long is deleted |
@@ -258,7 +261,7 @@ and pass it as one more `-f compose.image.yaml`; the default `compose.yaml` stil
 State lives in two named volumes (Compose prefixes them with the project name, by default the directory name, e.g. `recasaos-relay_headscale-data`):
 
 - `headscale-data` (`/var/lib/headscale`): `db.sqlite` (users, nodes, access policy, API keys), `noise_private.key` (and `derp_server_private.key`, unused since v0.4.0: `derper` makes its own key, which clients do not pin). Losing the keys or the database means every box must enrol again.
-- `enrolment-data` (`/data`): `relay.db`, the fleets and the hashes of the fleet secrets.
+- `enrolment-data` (`/data`): `relay.db`, the fleets and the hashes of the fleet secrets. Each fleet also carries the network it was created from (the IPv4 address, or the IPv6 /64 and /48), kept while the fleet exists and used only to count the fleets of one network (`MAX_FLEETS_PER_ORIGIN`): say so where you tell your users what your relay keeps.
 
 The enrolment image runs as the unprivileged uid/gid `65532` (distroless `:nonroot`) and its `/data` belongs to that user, so a fresh named volume does too. If you mount a host directory on `/data` instead of the named volume, `chown 65532:65532` it first, or the service cannot create `relay.db` and its WAL files. Verified: `docker compose build enrolment`, then a one-shot `docker run` of that image on a fresh named volume created `relay.db` owned by 65532, in WAL mode.
 
@@ -346,7 +349,7 @@ A phone joins a fleet with the official Tailscale app, using your relay as its l
 
   Behind your own proxy: send `/register/*` to host port `8080` like the rest, and keep the `X-Client-IP` rule of section 3b, since `LOGIN_RATE_PER_HOUR` counts per client address.
 - **Devices never expire.** `headscale/config.yaml` pins `node.expiry: 0`, so a phone is not logged out after 180 days. If you replaced that file, keep the setting; without it, phones drop off the network and must register again.
-- **Limits** (section 4): `DEVICE_CODE_TTL` `10m`, `MAX_PENDING_DEVICE_CODES` `5` unused codes per fleet, `LOGIN_RATE_PER_HOUR` `20` form submissions per hour per client address. Devices do not count in `NODES_PER_FLEET`.
+- **Limits** (section 4): `DEVICE_CODE_TTL` `10m`, `MAX_PENDING_DEVICE_CODES` `5` unused codes per fleet, `LOGIN_RATE_PER_HOUR` `20` form submissions per hour per client address, `MAX_DEVICES_PER_FLEET` `50` devices per fleet. Devices do not count in `NODES_PER_FLEET`.
 - **Upgrading to v0.5.0.** `git pull`, then `docker compose up -d --build` with your `-f` options (or `COMPOSE_FILE`), so `enrolment` gets the new code and variables. That is not enough for `front` and `headscale`: the `Caddyfile` (or your `Caddyfile.tls`) and `headscale/config.yaml` are bind-mounted, so Compose does not see their change and keeps the containers running with the old files (no `/register/*` route, no `node.expiry: 0`). Recreate both, with the same `-f` options:
 
   ```

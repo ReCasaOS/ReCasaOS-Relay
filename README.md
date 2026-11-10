@@ -32,7 +32,7 @@ Put the printed key in a `.env` file next to `compose.yaml` as `HEADSCALE_API_KE
 
 ### Rate limits and the proxy header
 
-Fleet creation is limited per client IP (per /64 for IPv6, and in addition per /48 at 10 times `CREATE_RATE_PER_HOUR`, so a subscriber holding many /64s cannot multiply the limit freely). The enrolment service (port 8081) is **never published**: the `front` Caddy forwards `/v1/*` to it and sets `X-Client-IP` from its own view of the connection (`header_up` replaces whatever the client sent), and compose sets `TRUSTED_PROXY_HEADER=X-Client-IP`. A client can therefore neither choose its own bucket nor fill someone else's. Do not add a `ports:` entry for `enrolment`, and do not route to it any other way, unless that route also sets the header.
+Fleet creation is limited per client IP (per /64 for IPv6, and in addition per /48 at 10 times `CREATE_RATE_PER_HOUR`, so a subscriber holding many /64s cannot multiply the limit freely). The rate bounds how fast a network creates fleets; `MAX_FLEETS_PER_ORIGIN` and `MAX_FLEETS_PER_PREFIX48` bound how many it holds at once, so that one network cannot take every place of `MAX_FLEETS`. For that count the relay keeps with each fleet, for as long as the fleet exists, the network it was created from: the IPv4 address, or the IPv6 /64 and /48. A fleet created by an older relay has none and counts for no network. Homes behind one shared IPv4 address (carrier-grade NAT) are one network and share its `MAX_FLEETS_PER_ORIGIN` places: raise it if your users are many behind few addresses. The enrolment service (port 8081) is **never published**: the `front` Caddy forwards `/v1/*` to it and sets `X-Client-IP` from its own view of the connection (`header_up` replaces whatever the client sent), and compose sets `TRUSTED_PROXY_HEADER=X-Client-IP`. A client can therefore neither choose its own bucket nor fill someone else's. Do not add a `ports:` entry for `enrolment`, and do not route to it any other way, unless that route also sets the header.
 
 - With `TRUSTED_PROXY_HEADER` empty the TCP peer address is used, which is safe from spoofing but only right when clients connect directly.
 - If you put **another** TLS proxy in front of Caddy, Caddy sees that proxy's address for everybody until you tell it to trust it, and trusting it is only safe if the client cannot choose the address. Checked with Caddy 2.10.0 (throwaway container, `{client_ip}` echoed back):
@@ -68,11 +68,14 @@ Fleet creation is limited per client IP (per /64 for IPv6, and in addition per /
 |---|---|---|
 | `NODES_PER_FLEET` | `50` | max boxes per fleet; a join key is refused (409) when enrolled nodes plus unused, unexpired join keys reach it |
 | `MAX_FLEETS` | `1000` | fleets the relay holds at most; beyond it fleet creation answers `503` without calling Headscale (sizing: see "Capacity" below) |
+| `MAX_FLEETS_PER_ORIGIN` | `10` | fleets one network holds at once, a network being what `CREATE_RATE_PER_HOUR` counts (an IPv4 address, an IPv6 /64); beyond it fleet creation answers `429` "too many fleets from this network" until one of its fleets is deleted or idles out |
+| `MAX_FLEETS_PER_PREFIX48` | `30` | the same for an IPv6 /48, across its /64s |
 | `MAX_PENDING_KEYS` | `5` | unused, unexpired join keys a fleet may hold at once, whatever `NODES_PER_FLEET` leaves: one more is refused (409). A key request also deletes the fleet's used and expired keys (sizing: see "Capacity") |
 | `CREATE_RATE_PER_HOUR` | `5` | fleet creations per hour per IP (IPv6: per /64); an IPv6 /48 also gets at most 10 times this in all (fixed factor) |
 | `KEY_RATE_PER_HOUR` | `30` | join-key requests per hour per fleet (counted once the fleet secret is verified) |
 | `DEVICE_CODE_TTL` | `10m` | validity of a device code (remote access, see below) |
 | `MAX_PENDING_DEVICE_CODES` | `5` | unused, unexpired device codes a fleet may hold at once (409 beyond) |
+| `MAX_DEVICES_PER_FLEET` | `50` | phones and PCs a fleet holds; a device code is refused (409) beyond. The codes not used yet may take a fleet past it, by `MAX_PENDING_DEVICE_CODES` at most |
 | `LOGIN_RATE_PER_HOUR` | `20` | device-login form submissions per hour per client IP (`POST /register/*`), right or wrong code; IPv6: per /64, plus 10 times this per /48 |
 | `AUTH_RATE_PER_HOUR` | `60` | authenticated fleet requests (join key, status, node and fleet deletion, device code, device list, device removal) per hour per client IP, one budget shared by all of them, counted BEFORE the secret is checked, wrong or right; boxes behind one NAT share it |
 | `JOIN_KEY_TTL` | `24h` | validity of a join key |
@@ -120,12 +123,12 @@ A phone joins a fleet's private network with the official Tailscale app, pointed
 
 | Call | Answer |
 |---|---|
-| `POST /v1/fleets/{id}/device-codes` | `201 {"code": "XXXX-XXXX", "expires_at": ...}`; one use, valid `DEVICE_CODE_TTL`; `409` when the fleet already holds `MAX_PENDING_DEVICE_CODES` unused codes |
+| `POST /v1/fleets/{id}/device-codes` | `201 {"code": "XXXX-XXXX", "expires_at": ...}`; one use, valid `DEVICE_CODE_TTL`; `409` when the fleet already holds `MAX_PENDING_DEVICE_CODES` unused codes, or `MAX_DEVICES_PER_FLEET` devices |
 | `GET /v1/fleets/{id}/devices` | `200 {"devices": [{"id", "hostname", "ip", "online", "last_seen"}]}` |
 | `DELETE /v1/fleets/{id}/devices/{node}` | `204`; removes the device from Headscale. An id that is not a device of the fleet is a quiet `204` |
 | `GET` / `POST /register/{auth id}` | the login page (HTML) and its form (field `code`). The `POST` answers `200` device added (the page names it), `400` code wrong, already used or expired, `410` the login request in the app expired (restart the login in the app, then use a new code), `413` body too large, `429` throttled by `LOGIN_RATE_PER_HOUR`, `502` Headscale failure (the code is used up: generate a new one) |
 
-The first three take the fleet secret (`401` wrong secret, `404` unknown fleet, `429` throttle, `502` Headscale failure). Devices do not count in `NODES_PER_FLEET` and are not listed by `GET /v1/fleets/{id}`.
+The first three take the fleet secret (`401` wrong secret, `404` unknown fleet, `429` throttle, `502` Headscale failure). Devices do not count in `NODES_PER_FLEET` (their own limit is `MAX_DEVICES_PER_FLEET`) and are not listed by `GET /v1/fleets/{id}`.
 
 ### Janitor
 

@@ -21,7 +21,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestConfigFromEnvDefaults(t *testing.T) {
-	for _, k := range []string{"NODES_PER_FLEET", "CREATE_RATE_PER_HOUR", "KEY_RATE_PER_HOUR", "AUTH_RATE_PER_HOUR", "JOIN_KEY_TTL", "IDLE_AFTER", "GC_INTERVAL", "TRUSTED_PROXY_HEADER", "MAX_FLEETS", "MAX_PENDING_KEYS", "DEVICE_CODE_TTL", "MAX_PENDING_DEVICE_CODES", "LOGIN_RATE_PER_HOUR", "SHARE_DOMAIN", "SHARE_ACME_TTL", "SHARE_ACME_RATE_PER_HOUR"} {
+	for _, k := range []string{"NODES_PER_FLEET", "CREATE_RATE_PER_HOUR", "KEY_RATE_PER_HOUR", "AUTH_RATE_PER_HOUR", "JOIN_KEY_TTL", "IDLE_AFTER", "GC_INTERVAL", "TRUSTED_PROXY_HEADER", "MAX_FLEETS", "MAX_FLEETS_PER_ORIGIN", "MAX_FLEETS_PER_PREFIX48", "MAX_DEVICES_PER_FLEET", "MAX_PENDING_KEYS", "DEVICE_CODE_TTL", "MAX_PENDING_DEVICE_CODES", "LOGIN_RATE_PER_HOUR", "SHARE_DOMAIN", "SHARE_ACME_TTL", "SHARE_ACME_RATE_PER_HOUR"} {
 		t.Setenv(k, "")
 	}
 	t.Setenv("LOGIN_SERVER", "https://relay.example") // required, no default
@@ -30,17 +30,18 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Config{
-		NodesPerFleet:     50,
-		CreateRatePerHour: 5,
-		KeyRatePerHour:    30,
-		AuthRatePerHour:   60,
-		JoinKeyTTL:        24 * time.Hour,
-		IdleAfter:         720 * time.Hour,
-		GCEvery:           10 * time.Minute,
-		MaxFleets:         1000,
-		MaxPendingKeys:    5,
-		LoginServer:       "https://relay.example",
-		DeviceCodeTTL:     10 * time.Minute, MaxPendingDeviceCodes: 5, LoginRatePerHour: 20,
+		NodesPerFleet:      50,
+		CreateRatePerHour:  5,
+		KeyRatePerHour:     30,
+		AuthRatePerHour:    60,
+		JoinKeyTTL:         24 * time.Hour,
+		IdleAfter:          720 * time.Hour,
+		GCEvery:            10 * time.Minute,
+		MaxFleets:          1000,
+		MaxFleetsPerOrigin: 10, MaxFleetsPerPrefix48: 30, MaxDevicesPerFleet: 50,
+		MaxPendingKeys: 5,
+		LoginServer:    "https://relay.example",
+		DeviceCodeTTL:  10 * time.Minute, MaxPendingDeviceCodes: 5, LoginRatePerHour: 20,
 		ShareACMETTL: 10 * time.Minute, ShareACMERatePerHour: 20,
 	}
 	if got != want {
@@ -60,6 +61,9 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 	t.Setenv("TRUSTED_PROXY_HEADER", "X-Forwarded-For")
 	t.Setenv("MAX_FLEETS", "3")
 	t.Setenv("MAX_PENDING_KEYS", "4")
+	t.Setenv("MAX_FLEETS_PER_ORIGIN", "6")
+	t.Setenv("MAX_FLEETS_PER_PREFIX48", "7")
+	t.Setenv("MAX_DEVICES_PER_FLEET", "8")
 	t.Setenv("SHARE_DOMAIN", "Share.Example")
 	t.Setenv("SHARE_ACME_TTL", "1m")
 	t.Setenv("SHARE_ACME_RATE_PER_HOUR", "3")
@@ -69,6 +73,7 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 	}
 	want := Config{NodesPerFleet: 10, CreateRatePerHour: 2, KeyRatePerHour: 7, AuthRatePerHour: 9, JoinKeyTTL: time.Hour,
 		IdleAfter: 48 * time.Hour, GCEvery: 90 * time.Second, LoginServer: "https://relay.example", TrustedProxyHeader: "X-Forwarded-For", MaxFleets: 3, MaxPendingKeys: 4,
+		MaxFleetsPerOrigin: 6, MaxFleetsPerPrefix48: 7, MaxDevicesPerFleet: 8,
 		DeviceCodeTTL: 10 * time.Minute, MaxPendingDeviceCodes: 5, LoginRatePerHour: 20,
 		ShareDomain: "share.example", ShareACMETTL: time.Minute, ShareACMERatePerHour: 3}
 	if got != want {
@@ -120,7 +125,7 @@ func TestConfigFromEnvLoginServer(t *testing.T) {
 // Both go through Headscale's gRPC layer, which refuses messages over 4 MiB. With the defaults,
 // keep both under 3 MiB. The README ("Capacity") states the same numbers.
 func TestDefaultsKeepHeadscaleMessagesUnder3MiB(t *testing.T) {
-	for _, k := range []string{"MAX_FLEETS", "MAX_PENDING_KEYS", "DEVICE_CODE_TTL", "MAX_PENDING_DEVICE_CODES", "LOGIN_RATE_PER_HOUR", "SHARE_DOMAIN", "SHARE_ACME_TTL", "SHARE_ACME_RATE_PER_HOUR"} {
+	for _, k := range []string{"MAX_FLEETS", "MAX_FLEETS_PER_ORIGIN", "MAX_FLEETS_PER_PREFIX48", "MAX_DEVICES_PER_FLEET", "MAX_PENDING_KEYS", "DEVICE_CODE_TTL", "MAX_PENDING_DEVICE_CODES", "LOGIN_RATE_PER_HOUR", "SHARE_DOMAIN", "SHARE_ACME_TTL", "SHARE_ACME_RATE_PER_HOUR"} {
 		t.Setenv(k, "")
 	}
 	t.Setenv("LOGIN_SERVER", "https://relay.example")

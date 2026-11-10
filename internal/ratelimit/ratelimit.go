@@ -14,11 +14,12 @@ const (
 )
 
 // Limiter allows at most perHour events per key in any rolling hour, over at
-// most maxKeys distinct live keys (a new key is refused when full; existing keys
-// keep working). Callers must key by client IP, NOT by box public key, which is
+// most maxKeys distinct live keys (a new key is refused when full, unless OpenWhenFull; existing
+// keys keep working). Callers must key by client IP, NOT by box public key, which is
 // free to mint.
 type Limiter struct {
 	maxKeys   int
+	openFull  bool // see OpenWhenFull
 	mu        sync.Mutex
 	perHour   int
 	now       func() time.Time
@@ -29,6 +30,16 @@ type Limiter struct {
 // New returns a Limiter. perHour <= 0 means every call is refused (retryAfter 1h).
 func New(perHour int, now func() time.Time) *Limiter {
 	return &Limiter{maxKeys: defaultMaxKeys, perHour: perHour, now: now, events: map[string][]time.Time{}}
+}
+
+// OpenWhenFull makes the limiter let a new key through, uncounted, when its table is full,
+// instead of refusing it; the keys it knows are counted as before. A limiter that refuses is
+// switched off, for every client it does not know yet, by whoever fills its table. Only for a
+// limiter in front of something a flood of clients could do anyway (a secret or a signature
+// that cannot be guessed): one that bounds guesses, or the use of a resource, must stay closed.
+func (l *Limiter) OpenWhenFull() *Limiter {
+	l.openFull = true
+	return l
 }
 
 // Allow records an event for key if under the limit. When refused, retryAfter is
@@ -58,6 +69,9 @@ func (l *Limiter) Allow(key string) (ok bool, retryAfter time.Duration) {
 			l.lastSweep = now
 		}
 		if len(l.events) >= l.maxKeys {
+			if l.openFull {
+				return true, 0
+			}
 			return false, fullRetryAfter
 		}
 	}

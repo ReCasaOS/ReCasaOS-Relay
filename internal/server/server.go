@@ -19,16 +19,23 @@ import (
 
 // Config holds the tunables of the service; see ConfigFromEnv for defaults.
 type Config struct {
-	NodesPerFleet     int
-	MaxFleets         int // fleets the relay holds at most; creation answers 503 beyond
-	MaxPendingKeys    int // unused, unexpired join keys a fleet may hold at once (409 beyond)
-	CreateRatePerHour int // create-fleet requests per hour, per IP
-	KeyRatePerHour    int // join-key requests per hour, per fleet (counted once the secret is verified)
-	AuthRatePerHour   int // fleet requests (join key, status, deletions) per hour, per IP, counted before the secret is checked
-	JoinKeyTTL        time.Duration
-	IdleAfter         time.Duration // a fleet idle this long is deleted
-	GCEvery           time.Duration // interval of the idle-fleet janitor
-	LoginServer       string        // required: an https URL with no path, see loginServer
+	NodesPerFleet int
+	MaxFleets     int // fleets the relay holds at most; creation answers 503 beyond
+	// MaxFleetsPerOrigin: fleets one network holds at once, a network being what the creation rate
+	// counts (an IPv4 address, an IPv6 /64); MaxFleetsPerPrefix48: the same for an IPv6 /48, across
+	// its /64s. Creation answers 429 beyond. The rate bounds how fast a network creates, these how
+	// many it keeps: without them one network takes every place of MaxFleets. Zero: no such limit.
+	MaxFleetsPerOrigin   int
+	MaxFleetsPerPrefix48 int
+	MaxDevicesPerFleet   int // phones and PCs a fleet holds; a device code is refused (409) beyond. Zero: no limit
+	MaxPendingKeys       int // unused, unexpired join keys a fleet may hold at once (409 beyond)
+	CreateRatePerHour    int // create-fleet requests per hour, per IP
+	KeyRatePerHour       int // join-key requests per hour, per fleet (counted once the secret is verified)
+	AuthRatePerHour      int // fleet requests (join key, status, deletions) per hour, per IP, counted before the secret is checked
+	JoinKeyTTL           time.Duration
+	IdleAfter            time.Duration // a fleet idle this long is deleted
+	GCEvery              time.Duration // interval of the idle-fleet janitor
+	LoginServer          string        // required: an https URL with no path, see loginServer
 	// TrustedProxyHeader names the header (e.g. X-Forwarded-For) in which a trusted reverse proxy
 	// appends the client address; its LAST value is then the client IP. Empty: use the TCP peer.
 	TrustedProxyHeader    string
@@ -75,9 +82,11 @@ func New(cfg Config, deps Deps) http.Handler {
 		}
 		h := &fleetsHandler{
 			cfg: cfg, deps: deps,
-			limiter:     ratelimit.New(cfg.CreateRatePerHour, deps.Now),
-			limiter48:   ratelimit.New(prefix48Factor*cfg.CreateRatePerHour, deps.Now),
-			authLimiter: ratelimit.New(cfg.AuthRatePerHour, deps.Now),
+			limiter:   ratelimit.New(cfg.CreateRatePerHour, deps.Now),
+			limiter48: ratelimit.New(prefix48Factor*cfg.CreateRatePerHour, deps.Now),
+			// open when full: it stands before a secret that cannot be guessed, and refusing every
+			// client it does not know would cut the boxes off from their own fleets
+			authLimiter: ratelimit.New(cfg.AuthRatePerHour, deps.Now).OpenWhenFull(),
 			keyLimiter:  ratelimit.New(cfg.KeyRatePerHour, deps.Now),
 			locks:       deps.Remover.Locks,
 		}
@@ -92,7 +101,7 @@ func New(cfg Config, deps Deps) http.Handler {
 		mux.HandleFunc("PUT /v1/fleets/{id}/nodes/{node}/box-key", cfg.shareEnabled(h.setBoxKey))
 		beats := &heartbeats{}
 		sh := &shareHandler{cfg: cfg, deps: deps, beats: beats,
-			authLimiter: ratelimit.New(cfg.AuthRatePerHour, deps.Now),
+			authLimiter: ratelimit.New(cfg.AuthRatePerHour, deps.Now).OpenWhenFull(), // before a signature: as for the fleets
 			acmeLimiter: ratelimit.New(cfg.ShareACMERatePerHour, deps.Now),
 		}
 		mux.HandleFunc("PUT /v1/share/name", cfg.shareEnabled(sh.putName))
@@ -135,6 +144,15 @@ func ConfigFromEnv() (Config, error) {
 		return c, err
 	}
 	if c.MaxPendingKeys, err = envInt("MAX_PENDING_KEYS", 5); err != nil {
+		return c, err
+	}
+	if c.MaxFleetsPerOrigin, err = envInt("MAX_FLEETS_PER_ORIGIN", 10); err != nil {
+		return c, err
+	}
+	if c.MaxFleetsPerPrefix48, err = envInt("MAX_FLEETS_PER_PREFIX48", 30); err != nil {
+		return c, err
+	}
+	if c.MaxDevicesPerFleet, err = envInt("MAX_DEVICES_PER_FLEET", 50); err != nil {
 		return c, err
 	}
 	if c.CreateRatePerHour, err = envInt("CREATE_RATE_PER_HOUR", 5); err != nil {

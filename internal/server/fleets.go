@@ -36,25 +36,61 @@ type fleetsHandler struct {
 	keyLimiter  *ratelimit.Limiter // join keys, per fleet, after the secret is verified
 	locks       *fleets.Locks      // serialises "count nodes and pending keys, then create a key" per fleet; shared with deletion
 
-	capMu    sync.Mutex // guards the "count fleets, reserve a slot" step of creation
-	creating int        // creations past that step and not yet finished
+	capMu          sync.Mutex     // guards the "count fleets, reserve a slot" step of creation
+	creating       int            // creations past that step and not yet finished
+	creatingFrom   map[string]int // the same, by the network they come from (address or /64)
+	creatingFrom48 map[string]int // and by its /48
 }
 
-// reserveFleet takes one of the MaxFleets slots, counting the creations still in flight, so that
-// concurrent requests cannot all see the last free slot. ok false: the relay is full. Deletions
-// running meanwhile can only make the count err high (a refusal that a retry would not get).
-func (h *fleetsHandler) reserveFleet(ctx context.Context) (release func(), ok bool, err error) {
+// What reserveFleet found.
+const (
+	slotTaken   = iota // a place is reserved: call release when the creation is over
+	relayFull          // the relay holds MaxFleets
+	networkFull        // the network of the request holds its share
+)
+
+// reserveFleet takes one of the MaxFleets slots and one of those of the network the request
+// comes from (origin: its address or /64; origin48: its /48), counting the creations still in
+// flight, so that concurrent requests cannot all see the last free slot. Deletions running
+// meanwhile can only make the counts err high (a refusal that a retry would not get).
+func (h *fleetsHandler) reserveFleet(ctx context.Context, origin, origin48 string) (release func(), found int, err error) {
 	h.capMu.Lock()
 	defer h.capMu.Unlock()
 	n, err := h.deps.Store.CountFleets(ctx)
 	if err != nil {
-		return nil, false, err
+		return nil, 0, err
 	}
 	if n+h.creating >= h.cfg.MaxFleets {
-		return nil, false, nil
+		return nil, relayFull, nil
+	}
+	here, wider, err := h.deps.Store.CountFleetsFrom(ctx, origin, origin48)
+	if err != nil {
+		return nil, 0, err
+	}
+	over := func(count, most int) bool { return most > 0 && count >= most }
+	// origin48 is the address itself for IPv4: the limit of an address is then the only one
+	if over(here+h.creatingFrom[origin], h.cfg.MaxFleetsPerOrigin) ||
+		(origin48 != origin && over(wider+h.creatingFrom48[origin48], h.cfg.MaxFleetsPerPrefix48)) {
+		return nil, networkFull, nil
+	}
+	if h.creatingFrom == nil {
+		h.creatingFrom, h.creatingFrom48 = map[string]int{}, map[string]int{}
 	}
 	h.creating++
-	return func() { h.capMu.Lock(); h.creating--; h.capMu.Unlock() }, true, nil
+	h.creatingFrom[origin]++
+	h.creatingFrom48[origin48]++
+	return func() {
+		h.capMu.Lock()
+		defer h.capMu.Unlock()
+		h.creating--
+		// the maps hold the creations in flight, nothing more
+		if h.creatingFrom[origin]--; h.creatingFrom[origin] <= 0 {
+			delete(h.creatingFrom, origin)
+		}
+		if h.creatingFrom48[origin48]--; h.creatingFrom48[origin48] <= 0 {
+			delete(h.creatingFrom48, origin48)
+		}
+	}, slotTaken, nil
 }
 
 // checkSecret is a variable so tests can observe that every request pays one comparison.
@@ -88,11 +124,12 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 func (h *fleetsHandler) createFleet(w http.ResponseWriter, r *http.Request) {
 	// The limiters run first and are keyed by client IP: box keys are free to mint. The /64 one goes
 	// first, so a single /64 hammering past its own limit does not use up its /48's budget.
-	if ok, retry := h.limiter.Allow(clientKey(r, h.cfg.TrustedProxyHeader, 64)); !ok {
+	origin, origin48 := clientKey(r, h.cfg.TrustedProxyHeader, 64), clientKey(r, h.cfg.TrustedProxyHeader, 48)
+	if ok, retry := h.limiter.Allow(origin); !ok {
 		tooMany(w, retry)
 		return
 	}
-	if ok, retry := h.limiter48.Allow(clientKey(r, h.cfg.TrustedProxyHeader, 48)); !ok {
+	if ok, retry := h.limiter48.Allow(origin48); !ok {
 		tooMany(w, retry)
 		return
 	}
@@ -110,14 +147,20 @@ func (h *fleetsHandler) createFleet(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	// Before any Headscale call: the policy and the key list Headscale returns grow with the fleets.
-	release, ok, err := h.reserveFleet(ctx)
+	release, found, err := h.reserveFleet(ctx, origin, origin48)
 	if err != nil {
 		log.Printf("create fleet: count fleets: %v", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	if !ok {
+	switch found {
+	case relayFull:
 		writeError(w, http.StatusServiceUnavailable, "relay full, retry later")
+		return
+	case networkFull:
+		// A place comes back when one of the network's fleets is deleted or idles out: no time to name.
+		w.Header().Set("Retry-After", retryAfter(time.Hour))
+		writeError(w, http.StatusTooManyRequests, "too many fleets from this network")
 		return
 	}
 	defer release()
@@ -145,7 +188,7 @@ func (h *fleetsHandler) createFleet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := h.deps.Now()
-	if err := h.deps.Store.CreateFleet(ctx, store.Fleet{ID: id, SecretHash: hash, HeadscaleUser: user, CreatedAt: now, LastOnline: now}); err != nil {
+	if err := h.deps.Store.CreateFleet(ctx, store.Fleet{ID: id, SecretHash: hash, HeadscaleUser: user, CreatedAt: now, LastOnline: now, Origin: origin, Origin48: origin48}); err != nil {
 		log.Printf("create fleet %s: store: %v", id, err)
 		h.rollback(ctx, id, user, false)
 		writeError(w, http.StatusInternalServerError, "internal error")

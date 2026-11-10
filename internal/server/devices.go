@@ -24,6 +24,20 @@ func (h *fleetsHandler) createDeviceCode(w http.ResponseWriter, r *http.Request)
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), opTimeout)
 	defer cancel()
+	// Devices are not boxes and NodesPerFleet does not count them: this is their own limit. The
+	// codes not used yet may take the fleet past it, by MaxPendingDeviceCodes at most.
+	if h.cfg.MaxDevicesPerFleet > 0 {
+		devices, err := h.deps.Store.DeviceIDs(ctx, f.ID)
+		if err != nil {
+			log.Printf("fleet %s: count devices: %v", f.ID, err)
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		if len(devices) >= h.cfg.MaxDevicesPerFleet {
+			writeError(w, http.StatusConflict, "device quota reached")
+			return
+		}
+	}
 	code, err := devicecode.New()
 	if err != nil {
 		log.Printf("fleet %s: device code: %v", f.ID, err)
