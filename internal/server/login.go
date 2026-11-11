@@ -40,6 +40,7 @@ type loginPageData struct {
 	Lang, Title, Label, Button, Hint, Message string
 	Form, IsError                             bool
 	Marker                                    template.HTML // html/template drops comments; this one is a constant
+	Host                                      string        // the relay's own name, under the logo: the person sees where they are
 }
 
 type loginHandler struct {
@@ -63,7 +64,7 @@ func render(w http.ResponseWriter, r *http.Request, status int, form, isErr bool
 	h.Set("X-Frame-Options", "DENY")
 	h.Set("Referrer-Policy", "no-referrer")
 	w.WriteHeader(status)
-	if err := loginTmpl.Execute(w, loginPageData{lang, t.Title, t.Label, t.Button, t.Hint, msg(t), form, isErr, "<!-- recasaos-device-login -->"}); err != nil {
+	if err := loginTmpl.Execute(w, loginPageData{lang, t.Title, t.Label, t.Button, t.Hint, msg(t), form, isErr, "<!-- recasaos-device-login -->", r.Host}); err != nil {
 		log.Printf("login page: %v", err)
 	}
 }
