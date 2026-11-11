@@ -85,6 +85,8 @@ type Config struct {
 	ClientHeader string
 	// MonthlyReference is the monthly traffic the operator budgets, in bytes; 0: none.
 	MonthlyReference int64
+	// Version is the relay's own, shown at the foot of the page so the operator knows what runs; empty: left out.
+	Version string
 }
 
 // Deps are the same collaborators the enrolment handlers use.
@@ -360,7 +362,7 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 		"MaxFleets": h.cfg.MaxFleets, "NodesPerFleet": h.cfg.NodesPerFleet, "CSRF": h.csrf,
 		"Month": monthTotal, "SharedMonth": sharedTotal, "Kind": kind, "UpNow": upNow, "Live": live.OK, "Deleted": deleted, "DeletedShared": deletedShared,
 		"Reference": h.cfg.MonthlyReference, "Range": rangeKey,
-		"Names": names, "Banned": banned,
+		"Names": names, "Banned": banned, "Version": h.cfg.Version,
 	}); err != nil {
 		log.Printf("admin: render: %v", err)
 	}

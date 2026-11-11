@@ -4,9 +4,10 @@ WORKDIR /src
 COPY go.mod go.sum ./
 COPY cmd ./cmd
 COPY internal ./internal
-# CMD picks the binary: enrolment (default) or share.
+# CMD picks the binary: enrolment (default) or share. VERSION is the tag being built, shown on the admin page.
 ARG CMD=enrolment
-RUN CGO_ENABLED=0 go build -o /app ./cmd/${CMD}
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o /app ./cmd/${CMD}
 # The store directory: SQLite in WAL mode needs to create relay.db-wal and -shm next to the file.
 RUN mkdir /data
 

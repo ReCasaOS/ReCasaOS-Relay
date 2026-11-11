@@ -78,6 +78,7 @@ polygon { fill:var(--c); fill-opacity:.75; }
 .add input { flex:1; height:2.25rem; padding:0 .75rem; border:1px solid var(--line); border-radius:.625rem; background:var(--bg); color:var(--fg); font:inherit; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
 .add button { height:2.25rem; border-radius:1.125rem; padding:0 .875rem; }
 p.mut { margin:.25rem .25rem .75rem; }
+.foot { margin-top:1.5rem; text-align:center; }
 </style>
 </head>
 <body>
@@ -164,6 +165,7 @@ p.mut { margin:.25rem .25rem .75rem; }
 </div>
 </section>
 </div>
+{{if .Version}}<footer class="mut xs foot">relay {{.Version}}</footer>{{end}}
 <script>
 // First, so nothing below can stop the reload.
 setInterval(function(){ if (!document.hidden) location.reload() }, 15000)

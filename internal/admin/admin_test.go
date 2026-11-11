@@ -613,3 +613,27 @@ func TestAdminRevokeBansAndReleases(t *testing.T) {
 		t.Fatalf("revoke of an invalid name: %d", w.Code)
 	}
 }
+
+// The foot of the page names the version that runs, when the build set one.
+func TestIndexShowsVersion(t *testing.T) {
+	st, err := store.Open(t.TempDir() + "/relay.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	hs := fakes.NewHS(&fakes.Log{}, func() time.Time { return t0 })
+	h, err := New(Config{Token: token, NodesPerFleet: 50, MaxFleets: 1000, Version: "v9.9.9"}, Deps{
+		Store: st, Headscale: hs, Now: func() time.Time { return t0 },
+		Remover: &fleets.Remover{Store: st, Headscale: hs, Locks: &fleets.Locks{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := env{h, hs, st}
+	if body := e.do("GET", "/admin/", token, nil).Body.String(); !strings.Contains(body, "<footer class=\"mut xs foot\">relay v9.9.9</footer>") {
+		t.Errorf("no version in the foot of the page:\n%s", body)
+	}
+	if body := setup(t).do("GET", "/admin/", token, nil).Body.String(); strings.Contains(body, "<footer") {
+		t.Error("a foot without a version")
+	}
+}

@@ -28,6 +28,9 @@ import (
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
 )
 
+// version is set at build time (-ldflags "-X main.version=v1.2.3"); the admin page shows it.
+var version = "dev"
+
 func getenv(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -79,7 +82,7 @@ func run() error {
 			deps.Meter = mtr
 		}
 		adminH, err = admin.New(admin.Config{Token: tok, NodesPerFleet: cfg.NodesPerFleet, MaxFleets: cfg.MaxFleets,
-			ClientHeader: cfg.TrustedProxyHeader, MonthlyReference: reference}, deps)
+			ClientHeader: cfg.TrustedProxyHeader, MonthlyReference: reference, Version: version}, deps)
 		if err != nil {
 			return err
 		}
