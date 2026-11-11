@@ -50,7 +50,7 @@ jobs:
             # A pre-release tag (v1.2.0-rc1) must not move `latest`.
             case "$VERSION" in *-*) ;; *) tags+=(-t "$image:latest") ;; esac
             docker build --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
-              --label "org.opencontainers.image.version=$VERSION" "${tags[@]}" $extra "$context"
+              --label "org.opencontainers.image.version=$VERSION" --build-arg "VERSION=$VERSION" "${tags[@]}" $extra "$context"
           done
           for pair in "${pairs[@]}"; do
             read -r name _ <<<"$pair"
