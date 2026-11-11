@@ -362,7 +362,7 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 		"MaxFleets": h.cfg.MaxFleets, "NodesPerFleet": h.cfg.NodesPerFleet, "CSRF": h.csrf,
 		"Month": monthTotal, "SharedMonth": sharedTotal, "Kind": kind, "UpNow": upNow, "Live": live.OK, "Deleted": deleted, "DeletedShared": deletedShared,
 		"Reference": h.cfg.MonthlyReference, "Range": rangeKey,
-		"Names": names, "Banned": banned, "Version": h.cfg.Version,
+		"Names": names, "Banned": banned, "Reserved": sharename.Reserved(), "Version": h.cfg.Version,
 	}); err != nil {
 		log.Printf("admin: render: %v", err)
 	}

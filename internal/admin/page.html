@@ -77,6 +77,10 @@ polygon { fill:var(--c); fill-opacity:.75; }
 .add { display:flex; gap:.5rem; }
 .add input { flex:1; height:2.25rem; padding:0 .75rem; border:1px solid var(--line); border-radius:.625rem; background:var(--bg); color:var(--fg); font:inherit; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
 .add button { height:2.25rem; border-radius:1.125rem; padding:0 .875rem; }
+.builtin { border:0; border-top:1px solid var(--line); border-radius:0; margin:0; background:transparent; }
+.builtin summary { padding:.5rem 1rem; }
+.builtin .names { gap:.375rem; }
+.builtin .chip { height:1.25rem; font-size:.7rem; }
 p.mut { margin:.25rem .25rem .75rem; }
 .foot { margin-top:1.5rem; text-align:center; }
 </style>
@@ -153,16 +157,21 @@ p.mut { margin:.25rem .25rem .75rem; }
 </div>
 </section>
 <section class="card">
-<div class="hd"><span class="tile s g" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg></span><h2>Forbidden names</h2><span class="chip">{{len .Banned}}</span></div>
+<div class="hd"><span class="tile s g" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg></span><h2>Forbidden names</h2><span class="chip">{{len .Banned}} yours &middot; {{len .Reserved}} built-in</span></div>
 <div class="bd pad names">
 {{if .Banned}}{{range .Banned}}<span class="chip"><code>{{.}}</code><form method="post" action="/admin/share/banned/{{.}}/delete">
 <input type="hidden" name="csrf" value="{{$.CSRF}}"><button aria-label="Remove {{.}}" title="Remove">&#x2715;</button></form></span>
-{{end}}{{else}}<span class="mut">No forbidden name.</span>{{end}}
+{{end}}{{else}}<span class="mut">No forbidden name of yours.</span>{{end}}
 </div>
 <div class="bd pad">
 <form method="post" action="/admin/share/banned" class="add">
 <input type="hidden" name="csrf" value="{{.CSRF}}"><input name="name" placeholder="name (a-z, 0-9, dashes)" aria-label="Name to forbid" required minlength="3" maxlength="32" pattern="[a-z0-9]([a-z0-9-]{1,30}[a-z0-9])?"> <button class="plain">Forbid</button></form>
 </div>
+<!-- the names the relay refuses on its own, whatever the list above: shown folded, no button, they live in the code -->
+<details class="builtin">
+<summary class="mut xs">Built-in: {{len .Reserved}} names no box can claim, in the relay itself</summary>
+<div class="bd pad names">{{range .Reserved}}<span class="chip"><code>{{.}}</code></span> {{end}}</div>
+</details>
 </section>
 </div>
 {{if .Version}}<footer class="mut xs foot">relay {{.Version}}</footer>{{end}}
