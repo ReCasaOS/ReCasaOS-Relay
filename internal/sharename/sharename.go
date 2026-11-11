@@ -52,6 +52,11 @@ var reserved = []string{
 	"bnp", "bnpparibas", "creditagricole", "credit-agricole", "societegenerale", "societe-generale", "lcl", "boursorama", "caissedepargne", "banquepopulaire", "cic", "creditmutuel", "credit-mutuel", "labanquepostale", "fortuneo", "hellobank", "ing", "axa", "maif", "macif",
 }
 
+// Reserved is the built-in list, for the operator page to show; a copy, so nobody edits it.
+func Reserved() []string {
+	return slices.Clone(reserved)
+}
+
 // ValidLabel checks the syntax only (a reserved word passes): the operator may forbid one.
 func ValidLabel(name string) error {
 	if !re.MatchString(name) {

@@ -637,3 +637,20 @@ func TestIndexShowsVersion(t *testing.T) {
 		t.Error("a foot without a version")
 	}
 }
+
+// The built-in list shows on the page, folded, apart from the operator's own.
+func TestIndexShowsBuiltInReservedNames(t *testing.T) {
+	body := setup(t).do("GET", "/admin/", token, nil).Body.String()
+	block := between(t, body, `<details class="builtin">`, "</details>")
+	for _, want := range []string{"names no box can claim", "<code>paypal</code>", "<code>login</code>"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("built-in list lacks %q", want)
+		}
+	}
+	if strings.Contains(block, "<button") {
+		t.Error("a built-in name has a button")
+	}
+	if !strings.Contains(body, "0 yours &middot; ") {
+		t.Error("the head of the card does not count both lists")
+	}
+}
