@@ -25,21 +25,23 @@ code { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-si
 .chip.ok { background:var(--okbg); color:var(--ok); } .chip.bad { background:var(--badbg); color:var(--bad); } .chip.warn { background:var(--warnbg); color:var(--warn); }
 .dot { display:inline-block; width:.5rem; height:.5rem; border-radius:50%; background:var(--mut); flex-shrink:0; }
 .dot.on { background:var(--ok); } .dot.off { background:var(--bad); }
-.stats { display:grid; grid-template-columns:repeat(auto-fit, minmax(9.5rem, 1fr)); gap:.625rem; margin-bottom:1rem; }
+.stats { display:grid; grid-template-columns:repeat(auto-fit, minmax(8rem, 1fr)); gap:.625rem; margin-bottom:1rem; }
 .stat { display:flex; flex-direction:column-reverse; gap:.125rem; padding:.625rem .875rem; border:1px solid var(--line); border-radius:.75rem; background:var(--card); }
 .stat b { font-size:1.125rem; font-variant-numeric:tabular-nums; }
 .stat span { color:var(--mut); font-size:.75rem; }
 details { border:1px solid var(--line); border-radius:.875rem; background:var(--card); margin-bottom:.75rem; }
 details.bad { border-color:rgba(239,68,68,.45); }
-summary { list-style:none; cursor:pointer; display:flex; align-items:center; gap:.75rem; flex-wrap:wrap; padding:.75rem 1rem; }
+summary { list-style:none; cursor:pointer; display:flex; align-items:center; gap:.75rem; padding:.75rem 1rem; }
+@media (max-width: 900px) { summary { flex-wrap:wrap; } }
 summary::-webkit-details-marker { display:none; }
+summary .id { flex:0 1 14ch; min-width:6ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 summary code { font-weight:600; font-size:1rem; }
-summary .when { color:var(--mut); font-size:.8rem; }
-.sp { flex:1; }
-.ref { display:flex; flex-direction:column; align-items:flex-end; gap:.25rem; min-width:12rem; }
+summary .when { flex:1 1 8rem; min-width:0; overflow:hidden; color:var(--mut); font-size:.8rem; text-overflow:ellipsis; white-space:nowrap; }
+summary .chip { flex-shrink:0; }
+.ref { display:flex; flex-shrink:0; flex-direction:column; align-items:flex-end; gap:.25rem; min-width:11rem; white-space:nowrap; }
 .bar { width:100%; height:6px; background:var(--line); border-radius:3px; overflow:hidden; display:block; }
 .bar i { display:block; height:100%; background:var(--ok); } .bar.warn i { background:var(--s3); } .bar.over i { background:var(--bad); }
-.chev { width:.6rem; height:.6rem; margin:0 .25rem 0 .25rem; border-right:2px solid var(--mut); border-bottom:2px solid var(--mut); transform:translateY(-.15rem) rotate(45deg); transition:transform .15s; }
+.chev { flex-shrink:0; width:.6rem; height:.6rem; margin:0 .25rem 0 .25rem; border-right:2px solid var(--mut); border-bottom:2px solid var(--mut); transform:translateY(-.15rem) rotate(45deg); transition:transform .15s; }
 details[open] .chev { transform:translateY(.15rem) rotate(-135deg); }
 .body { border-top:1px solid var(--line); padding:.5rem .25rem .25rem; overflow-x:auto; }
 table { width:100%; border-collapse:collapse; }
@@ -110,13 +112,12 @@ p.mut { margin:.25rem .25rem .75rem; }
 <details data-id="{{.ID}}"{{if .Err}} class="bad"{{end}}>
 <summary>
 <span class="tile s {{if .Err}}g{{else}}v{{end}}" aria-hidden="true">&#9776;</span>
-<code>{{.ID}}</code>
+<span class="id" title="{{.ID}}"><code>{{.ID}}</code></span>
 {{if .Err}}<span class="chip bad">nodes unavailable</span>{{else}}<span class="chip {{if eq .Online (len .Nodes)}}ok{{else if .Online}}warn{{else}}bad{{end}}">{{.Online}} / {{len .Nodes}} online</span>{{if .Devices}}<span class="chip">{{len .Devices}} devices</span>{{end}}{{end}}
 {{if $.Live}}<span class="chip rt">↑ {{rate .Up}} now</span>{{end}}
 <span class="when">created {{ago .Created $.Now}} · last activity {{ago .LastOnline $.Now}}</span>
-<span class="sp"></span>
 <span class="ref">{{if $.Reference}}<span class="bar {{.RefClass}}"><i style="width:{{.RefPct}}%"></i></span><span class="xs"><b>{{bytes .Month}} / {{bytes $.Reference}}</b> <span class="mut">· {{bytes .Shared}} shared</span></span>{{else}}<span class="xs"><b>{{bytes .Month}}</b> <span class="mut">this month · {{bytes .Shared}} shared</span></span>{{end}}</span>
-<form method="post" action="/admin/fleets/{{.ID}}/delete" onsubmit="return confirm('Delete fleet {{.ID}} and every node in it?')">
+<form method="post" action="/admin/fleets/{{.ID}}/delete" onsubmit="return confirm('Delete fleet {{.ID}} and every node in it?')" style="flex-shrink:0">
 <input type="hidden" name="csrf" value="{{$.CSRF}}"><button>Delete fleet</button>
 </form>
 <span class="chev" aria-hidden="true"></span>
