@@ -33,3 +33,27 @@ func TestValidHost(t *testing.T) {
 		}
 	}
 }
+
+// The built-in list: the relay's labels, a domain's usual hosts, the words of a phishing page, the brands imitated.
+func TestSharenameReservedList(t *testing.T) {
+	for _, name := range []string{"login", "paypal", "impots", "support", "smtp", "mx2", "verification", "free", "banque", "creditagricole"} {
+		if err := Valid(name); err != ErrReserved {
+			t.Errorf("%q: %v, want ErrReserved", name, err)
+		}
+	}
+	for _, name := range []string{"maison", "photos-dupont", "jellyfin-de-marc", "nas-garage"} {
+		if err := Valid(name); err != nil {
+			t.Errorf("%q: %v, want nil", name, err)
+		}
+	}
+	seen := map[string]bool{}
+	for _, name := range reserved {
+		if err := ValidLabel(name); err != nil {
+			t.Errorf("reserved %q is not even a valid label", name)
+		}
+		if seen[name] {
+			t.Errorf("reserved %q listed twice", name)
+		}
+		seen[name] = true
+	}
+}
