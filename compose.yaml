@@ -122,6 +122,8 @@ services:
       PEEK_TIMEOUT: ${PEEK_TIMEOUT:-5s}
       FRONT_PROXY_PROTOCOL: ${FRONT_PROXY_PROTOCOL:-true}
       TUNNEL_RATE_PER_HOUR: ${TUNNEL_RATE_PER_HOUR:-60}
+      CONNS_PER_IP: ${CONNS_PER_IP:-256}
+      CONNS_PER_IP_PER_BOX: ${CONNS_PER_IP_PER_BOX:-64}
     # ports:
     #   - "80:80"
     #   - "443:443"

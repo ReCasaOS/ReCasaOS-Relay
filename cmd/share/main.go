@@ -80,12 +80,18 @@ func run() error {
 	}()
 	log.Printf("share listening on %s (TLS), %s (HTTP) and %s (tunnels)", cfg.ListenTLS, cfg.ListenHTTP, cfg.ListenTunnel)
 
+	// One per-IP count over both ports; a second one bounds what one address takes of a box's tunnel.
+	perIP := newConnCap(cfg.ConnsPerIP, "per IP")
+	perBox := newConnCap(cfg.ConnsPerIPPerBox, "per IP and box")
 	var inflight, acceptors sync.WaitGroup
 	acceptors.Add(2)
-	go func() { defer acceptors.Done(); accept(lt, &inflight, func(c net.Conn) { handleTLS(cfg, reg, c) }) }()
 	go func() {
 		defer acceptors.Done()
-		accept(lh, &inflight, func(c net.Conn) { toFront(c, cfg.FrontHTTP, cfg.FrontProxyProtocol) })
+		accept(lt, &inflight, perIP, func(c net.Conn) { handleTLS(cfg, reg, perBox, c) })
+	}()
+	go func() {
+		defer acceptors.Done()
+		accept(lh, &inflight, perIP, func(c net.Conn) { toFront(c, cfg.FrontHTTP, cfg.FrontProxyProtocol) })
 	}()
 	acceptors.Wait()
 
@@ -104,8 +110,9 @@ func run() error {
 	}
 }
 
-// accept serves l until it is closed.
-func accept(l net.Listener, wg *sync.WaitGroup, handle func(net.Conn)) {
+// accept serves l until it is closed. A connection from an address that already holds perIP's max is
+// closed at once, before any byte is read.
+func accept(l net.Listener, wg *sync.WaitGroup, perIP *connCap, handle func(net.Conn)) {
 	var delay time.Duration
 	for {
 		c, err := l.Accept()
@@ -124,12 +131,17 @@ func accept(l net.Listener, wg *sync.WaitGroup, handle func(net.Conn)) {
 			continue
 		}
 		delay = 0
+		k := ipKey(c.RemoteAddr())
+		if !perIP.acquire(k) {
+			c.Close()
+			continue
+		}
 		wg.Add(1)
-		go func() { defer wg.Done(); defer c.Close(); handle(c) }()
+		go func() { defer wg.Done(); defer perIP.release(k); defer c.Close(); handle(c) }()
 	}
 }
 
-func handleTLS(cfg Config, reg *tunnel.Registry, c net.Conn) {
+func handleTLS(cfg Config, reg *tunnel.Registry, perBox *connCap, c net.Conn) {
 	name, replay, err := sni.PeekServerName(c, cfg.PeekTimeout)
 	if err != nil && !errors.Is(err, sni.ErrNotTLS) {
 		return
@@ -139,7 +151,7 @@ func handleTLS(cfg Config, reg *tunnel.Registry, c net.Conn) {
 	case front: // non-TLS bytes (err == ErrNotTLS) go to front as well
 		toFront(replay, cfg.FrontTLS, cfg.FrontProxyProtocol)
 	case box != "":
-		toTunnel(reg, box, c, replay)
+		toTunnel(reg, perBox, box, c, replay)
 	}
 }
 
