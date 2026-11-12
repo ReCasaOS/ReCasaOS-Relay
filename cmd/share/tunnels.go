@@ -61,12 +61,22 @@ func resolver(enrolmentURL string) tunnel.Resolver {
 	}
 }
 
-// toTunnel sends the visitor connection c (replay holds its peeked ClientHello) into box's tunnel.
-func toTunnel(reg *tunnel.Registry, box string, c, replay net.Conn) {
+// toTunnel sends the visitor connection c (replay holds its peeked ClientHello) into box's tunnel,
+// unless c's address already holds perBox's max streams of that box: one address alone must not fill
+// the tunnel's tunnel.MaxStreams and lock every other visitor out.
+func toTunnel(reg *tunnel.Registry, perBox *connCap, box string, c, replay net.Conn) {
 	t, ok := reg.Get(box)
 	if !ok {
 		return
 	}
+	k := ipKey(c.RemoteAddr())
+	if k != "" {
+		k += " -> " + box
+	}
+	if !perBox.acquire(k) {
+		return
+	}
+	defer perBox.release(k)
 	stream, err := t.Open(context.Background())
 	if err != nil {
 		if !errors.Is(err, tunnel.ErrFull) { // Open logs that one, at most once a minute

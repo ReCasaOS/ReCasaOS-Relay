@@ -114,7 +114,7 @@ func TestVisitorGoesThroughTunnel(t *testing.T) {
 			return
 		}
 		defer c.Close()
-		toTunnel(reg, "alpha", c, c)
+		toTunnel(reg, newConnCap(tunnel.MaxStreams, "test"), "alpha", c, c)
 	}()
 	defer func() { <-done }()
 	visitor, err := net.Dial("tcp", l.Addr().String())
@@ -253,7 +253,11 @@ func TestTunnelStreamCap(t *testing.T) {
 	visitor, c := tcpPair(t)
 	defer visitor.Close()
 	done := make(chan struct{})
-	go func() { defer close(done); defer c.Close(); toTunnel(reg, "alpha", c, c) }()
+	go func() {
+		defer close(done)
+		defer c.Close()
+		toTunnel(reg, newConnCap(tunnel.MaxStreams, "test"), "alpha", c, c)
+	}()
 	select {
 	case <-done:
 	case <-time.After(time.Second):
@@ -281,7 +285,11 @@ func TestIdleVisitorIsClosed(t *testing.T) {
 	defer visitor.Close()
 	done := make(chan struct{})
 	start := time.Now()
-	go func() { defer close(done); defer c.Close(); toTunnel(reg, "alpha", c, c) }()
+	go func() {
+		defer close(done)
+		defer c.Close()
+		toTunnel(reg, newConnCap(tunnel.MaxStreams, "test"), "alpha", c, c)
+	}()
 	in, err := box.Accept()
 	if err != nil {
 		t.Fatal(err)

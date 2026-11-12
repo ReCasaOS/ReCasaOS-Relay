@@ -414,6 +414,8 @@ In `.env`, next to the ones of section 4:
 | `SHARE_ACME_RATE_PER_HOUR` | `20` | `enrolment` | ACME TXT writes per hour per box |
 | `PEEK_TIMEOUT` | `5s` | `share` | how long a new connection has to send its TLS hello / HTTP request line |
 | `TUNNEL_RATE_PER_HOUR` | `60` | `share` | tunnel dials (`/v1/share/tunnel`) per hour per client IP (`X-Client-IP`, set by `front`), counted before the signature check; `429` with `Retry-After` beyond |
+| `CONNS_PER_IP` | `256` | `share` | open connections per client IP (IPv6: per /64) on 80 and 443 together, boxes' own control and DERP connections included (about 3 per box, 2 per phone: one carrier-NAT address fills it near 85 boxes); past it a new connection is closed before any byte is read |
+| `CONNS_PER_IP_PER_BOX` | `64` | `share` | visitor connections one client IP may hold into one box's tunnel (256 at most per tunnel), so one address cannot lock the other visitors out; four addresses still can, this is no defence against many; past it the connection is closed |
 | `LISTEN_TLS`, `LISTEN_HTTP`, `LISTEN_TUNNEL` | `:443`, `:80`, `:8082` | `share` | listen addresses inside the container |
 | `FRONT_TLS`, `FRONT_HTTP` | `front:443`, `front:80` | `share` | where non-box traffic goes |
 | `FRONT_PROXY_PROTOCOL` | `true` | `share` | send a PROXY v2 header (the visitor's address) to `FRONT_TLS` and `FRONT_HTTP`; see "Client address" |
@@ -421,7 +423,7 @@ In `.env`, next to the ones of section 4:
 | `ENROLMENT_URL` | `http://enrolment:8081` | `share` | name lookups and usage posts, compose network only |
 | `LISTEN_DNS` | `:53` | `enrolment` | DNS listen address inside the container |
 
-The rows from `PEEK_TIMEOUT` on are the processes' own defaults (`compose.yaml` passes `LISTEN_TLS`, `LISTEN_HTTP`, `LISTEN_TUNNEL`, `FRONT_TLS`, `FRONT_HTTP`, `ENROLMENT_URL`, `PEEK_TIMEOUT`, `FRONT_PROXY_PROTOCOL` and `TUNNEL_RATE_PER_HOUR` to `share`, and `SHARE_PSL_TXT` to `enrolment`, as shown there); none needs changing except `SHARE_PSL_TXT` once you have a PSL request.
+The rows from `PEEK_TIMEOUT` on are the processes' own defaults (`compose.yaml` passes `LISTEN_TLS`, `LISTEN_HTTP`, `LISTEN_TUNNEL`, `FRONT_TLS`, `FRONT_HTTP`, `ENROLMENT_URL`, `PEEK_TIMEOUT`, `FRONT_PROXY_PROTOCOL`, `TUNNEL_RATE_PER_HOUR`, `CONNS_PER_IP` and `CONNS_PER_IP_PER_BOX` to `share`; neither cap counts loopback, private or link-local sources, which is what Docker's userland proxy and boxes on the relay's own LAN arrive from, and `SHARE_PSL_TXT` to `enrolment`, as shown there); none needs changing except `SHARE_PSL_TXT` once you have a PSL request.
 
 ### Compose override
 

@@ -33,7 +33,7 @@ func TestAcceptSurvivesTemporaryError(t *testing.T) {
 	defer peer.Close()
 	served := make(chan struct{})
 	var wg sync.WaitGroup
-	accept(&flakyListener{conn: c}, &wg, func(net.Conn) { close(served) })
+	accept(&flakyListener{conn: c}, &wg, newConnCap(1, "test"), func(net.Conn) { close(served) })
 	wg.Wait()
 	select {
 	case <-served:

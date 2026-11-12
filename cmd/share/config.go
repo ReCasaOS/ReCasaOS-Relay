@@ -20,6 +20,8 @@ type Config struct {
 	RelayHost, ShareDomain              string
 	PeekTimeout                         time.Duration
 	TunnelRatePerHour                   int  // tunnel dials per hour, per client IP, counted before the signature check
+	ConnsPerIP                          int  // open connections per client IP (IPv6: per /64), on 80 and 443 together
+	ConnsPerIPPerBox                    int  // open visitor streams per client IP into one box's tunnel
 	FrontProxyProtocol                  bool // send a PROXY v2 header to FrontTLS/FrontHTTP
 }
 
@@ -65,6 +67,12 @@ func ConfigFromEnv() (Config, error) {
 	}
 	if c.TunnelRatePerHour, err = strconv.Atoi(getenv("TUNNEL_RATE_PER_HOUR", "60")); err != nil || c.TunnelRatePerHour <= 0 {
 		return Config{}, fmt.Errorf("TUNNEL_RATE_PER_HOUR: want a positive integer, got %q", os.Getenv("TUNNEL_RATE_PER_HOUR"))
+	}
+	if c.ConnsPerIP, err = strconv.Atoi(getenv("CONNS_PER_IP", "256")); err != nil || c.ConnsPerIP <= 0 {
+		return Config{}, fmt.Errorf("CONNS_PER_IP: want a positive integer, got %q", os.Getenv("CONNS_PER_IP"))
+	}
+	if c.ConnsPerIPPerBox, err = strconv.Atoi(getenv("CONNS_PER_IP_PER_BOX", "64")); err != nil || c.ConnsPerIPPerBox <= 0 {
+		return Config{}, fmt.Errorf("CONNS_PER_IP_PER_BOX: want a positive integer, got %q", os.Getenv("CONNS_PER_IP_PER_BOX"))
 	}
 	if c.FrontProxyProtocol, err = strconv.ParseBool(getenv("FRONT_PROXY_PROTOCOL", "true")); err != nil {
 		return Config{}, fmt.Errorf("FRONT_PROXY_PROTOCOL: want true or false, got %q", os.Getenv("FRONT_PROXY_PROTOCOL"))
