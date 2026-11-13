@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strconv"
 	"sync"
 	"testing"
@@ -184,7 +185,7 @@ func TestVisitorSeenOnceStreamIsOpen(t *testing.T) {
 	go func() {
 		defer close(done)
 		defer c1.Close()
-		toTunnel(reg, perBox, e, "alpha", fromAddr{c1, visitor}, c1)
+		toTunnel(reg, perBox, nil, e, "alpha", fromAddr{c1, visitor}, c1)
 	}()
 	in, err := box.Accept()
 	if err != nil {
@@ -192,7 +193,7 @@ func TestVisitorSeenOnceStreamIsOpen(t *testing.T) {
 	}
 	v2, c2 := tcpPair(t) // same address, past the per-box cap
 	defer v2.Close()
-	toTunnel(reg, perBox, e, "alpha", fromAddr{c2, visitor}, c2)
+	toTunnel(reg, perBox, nil, e, "alpha", fromAddr{c2, visitor}, c2)
 	c2.Close()
 	in.Close()
 	v1.Close()
@@ -245,5 +246,53 @@ func TestPutBackKeepsOrderAndCounts(t *testing.T) {
 	}
 	if c := e.refs[e.refOrder[0]].Count; c != 2 {
 		t.Fatalf("row 0 count %d, want 2", c)
+	}
+}
+
+// Distinct rows per (hour, name) are capped across flushes; past the cap the counts go into one row
+// with no key, so the totals stay right.
+func TestRefusalRowsCappedPerNameAndHour(t *testing.T) {
+	now := t0
+	e := clockedEvents(&now)
+	key := func(i int) string { return netip.AddrFrom4([4]byte{203, 0, byte(i >> 8), byte(i)}).String() + "/32" }
+	var posts []eventsBody
+	for i := range 3 * maxRefusalRows {
+		if i == maxRefusalRows/2 || i == 2*maxRefusalRows {
+			posts = append(posts, flushed(t, e)...) // the cap holds over a flush
+		}
+		e.refused("mybox", key(i), "manual", "range")
+	}
+	e.refused("other", key(1), "manual", "range") // another name has its own budget
+	posts = append(posts, flushed(t, e)...)
+	rows, total, overflow := 0, int64(0), int64(0)
+	for _, b := range posts {
+		for _, r := range b.Refusals {
+			if r.Name != "mybox" {
+				continue
+			}
+			rows++
+			total += r.Count
+			if r.Key == "" {
+				overflow += r.Count
+			}
+		}
+	}
+	if total != 3*maxRefusalRows || overflow != 2*maxRefusalRows {
+		t.Fatalf("total %d, overflow %d: want %d refusals, %d of them in the keyless row", total, overflow, 3*maxRefusalRows, 2*maxRefusalRows)
+	}
+	if rows > maxRefusalRows+2 { // the keyless row once per flush that had one
+		t.Fatalf("%d rows for one name in one hour, want at most %d", rows, maxRefusalRows+2)
+	}
+	if p := flushed(t, e); len(p) != 0 {
+		t.Fatalf("posts = %+v, want nothing left", p)
+	}
+	e.refused("other", key(2), "manual", "range")
+	if p := flushed(t, e); len(p) != 1 || p[0].Refusals[0].Key != key(2) {
+		t.Fatalf("posts = %+v, want the other name's key kept", p)
+	}
+	now = now.Add(time.Hour) // a new hour, a new budget
+	e.refused("mybox", key(5000), "manual", "range")
+	if p := flushed(t, e); len(p) != 1 || p[0].Refusals[0].Key != key(5000) {
+		t.Fatalf("posts = %+v, want the key kept in a new hour", p)
 	}
 }

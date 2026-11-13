@@ -337,3 +337,32 @@ func BenchmarkDecide500k(b *testing.B) {
 	}
 	runtime.KeepAlive(s)
 }
+
+// A refusal is recorded only for a name some box serves: an unclaimed name closes silently, so a
+// banned client cannot fill the refusal table with names it makes up.
+func TestUnclaimedNameRecordsNoRefusal(t *testing.T) {
+	var s snapshot
+	s.Manual.Range = []string{"0.0.0.0/0"}
+	h := holderWith(snap(t, s))
+	_, _, reg, _ := rig(t)
+	e := newEvents()
+	for _, name := range []string{"app.nobody.box.relay.test", "app.alpha.box.relay.test"} {
+		v, c := tcpPair(t)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			defer c.Close()
+			handleTLS(filterCfg("127.0.0.1:1"), reg, newConnCap(5, "t"), h, e, fromAddr{c, testVisitor})
+		}()
+		v.Write(clientHello(name))
+		if b, _ := io.ReadAll(v); len(b) != 0 {
+			t.Fatalf("%s: refused visitor received %d bytes", name, len(b))
+		}
+		v.Close()
+		<-done
+	}
+	p := flushed(t, e)
+	if len(p) != 1 || len(p[0].Refusals) != 1 || p[0].Refusals[0].Name != "alpha" || p[0].Refusals[0].Reason != "manual" {
+		t.Fatalf("posts = %+v, want one manual refusal, for alpha only", p)
+	}
+}

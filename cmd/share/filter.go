@@ -260,7 +260,12 @@ type filterHolder struct {
 	loggedNone, down bool
 }
 
-func (h *filterHolder) get() *filter { return h.cur.Load() }
+func (h *filterHolder) get() *filter {
+	if h == nil {
+		return nil
+	}
+	return h.cur.Load()
+}
 
 // poll fetches the snapshot once. 304, an error or a bad body keep the filter in force; the log says once
 // when polling starts failing and once when it recovers (no URL, no address: the URL is internal).

@@ -78,7 +78,7 @@ func (h *internalHandler) events(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid request")
 			return
 		}
-		if k, ok := community.Key(f.Key); ok {
+		if k, ok := community.Key(f.Key); ok || f.Key == "" { // "": share's row past its per-name cap
 			refs = append(refs, store.Refusal{Hour: f.Hour.UTC().Truncate(time.Hour), Name: f.Name, Key: k, Reason: f.Reason, Source: f.Source, Count: f.Count})
 		}
 	}

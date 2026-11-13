@@ -185,7 +185,7 @@ td.wrap { min-width:14rem; }
 <h3 class="mut">Refused today by address (top 50)</h3>
 {{if .CapKeys}}<table>
 <tr><th>Address</th><th class="r">Refusals</th></tr>
-{{range .CapKeys}}<tr><td class="n"><code>{{.Key}}</code></td><td class="r" data-n="cap-key-{{.Key}}">{{.Count}}</td></tr>
+{{range .CapKeys}}<tr><td class="n">{{with .Key}}<code>{{.}}</code>{{else}}<span class="mut">other addresses</span>{{end}}</td><td class="r" data-n="cap-key-{{.Key}}">{{.Count}}</td></tr>
 {{end}}</table>{{else}}<p class="mut">No connection refused by a cap today.</p>{{end}}
 </div>
 <div class="bd">

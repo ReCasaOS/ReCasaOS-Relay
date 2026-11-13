@@ -13,9 +13,10 @@ import (
 )
 
 const (
-	seenEvery     = 10 * time.Minute // an accepted (key, node) pair is reported at most this often
-	maxEvents     = 10000            // pending items kept while enrolment is unreachable
-	eventsPerPost = 2000
+	seenEvery      = 10 * time.Minute // an accepted (key, node) pair is reported at most this often
+	maxEvents      = 10000            // pending items kept while enrolment is unreachable
+	eventsPerPost  = 2000
+	maxRefusalRows = 1000 // distinct refusal rows per (hour, name); past it, counted in one row with no key
 )
 
 type seenItem struct {
@@ -48,11 +49,12 @@ type events struct {
 	seenAt   map[seenItem]time.Time // last recorded, pruned on flush
 	seenQ    []seenItem             // oldest first
 	refs     map[refKey]*refItem
-	refOrder []refKey // oldest first
+	refOrder []refKey          // oldest first
+	rows     map[[2]string]int // distinct rows recorded per (hour, name), kept across flushes
 }
 
 func newEvents() *events {
-	return &events{now: time.Now, seenAt: map[seenItem]time.Time{}, refs: map[refKey]*refItem{}}
+	return &events{now: time.Now, seenAt: map[seenItem]time.Time{}, refs: map[refKey]*refItem{}, rows: map[[2]string]int{}}
 }
 
 // eventKey is the address key of the contract: IPv4 as a.b.c.d/32, IPv6 as its /64. Addresses that are
@@ -96,14 +98,23 @@ func (e *events) seen(key, nodeID string) {
 	e.trim()
 }
 
-// refused counts one refusal in the current hour.
+// refused counts one refusal in the current hour. Past maxRefusalRows distinct rows for the name in
+// that hour, it counts into one row with no key.
 func (e *events) refused(name, key, reason, source string) {
 	if e == nil || key == "" {
 		return
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.addRef(refItem{Hour: e.now().UTC().Truncate(time.Hour).Format(time.RFC3339), Name: name, Key: key, Reason: reason, Source: source, Count: 1})
+	hour := e.now().UTC().Truncate(time.Hour).Format(time.RFC3339)
+	if _, ok := e.refs[refKey{hour, name, key, reason, source}]; !ok {
+		if hn := [2]string{hour, name}; e.rows[hn] >= maxRefusalRows {
+			key = ""
+		} else {
+			e.rows[hn]++
+		}
+	}
+	e.addRef(refItem{Hour: hour, Name: name, Key: key, Reason: reason, Source: source, Count: 1})
 	e.trim()
 }
 
@@ -164,6 +175,12 @@ func (e *events) flush(ctx context.Context, url string) {
 	for k, t := range e.seenAt {
 		if t.Before(cut) {
 			delete(e.seenAt, k)
+		}
+	}
+	hour := e.now().UTC().Truncate(time.Hour).Format(time.RFC3339)
+	for hn := range e.rows {
+		if hn[0] != hour {
+			delete(e.rows, hn)
 		}
 	}
 	seen, refs := e.seenQ, make([]refItem, 0, len(e.refOrder))

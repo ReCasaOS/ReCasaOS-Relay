@@ -159,17 +159,7 @@ func handleTLS(cfg Config, reg *tunnel.Registry, perBox *connCap, fh *filterHold
 	case front: // non-TLS bytes (err == ErrNotTLS) go to front as well
 		toFront(replay, cfg.FrontTLS, cfg.FrontProxyProtocol)
 	case box != "":
-		// Only share names are filtered: the relay host (enrolment, Headscale, /admin) must stay
-		// reachable from any country. A refused visitor gets a plain close.
-		if f := fh.get(); f != nil {
-			if a, ok := remoteAddr(c); ok {
-				if reason, source := f.decide(a, box); reason != "" {
-					ev.refused(box, eventKey(a), reason, source)
-					return
-				}
-			}
-		}
-		toTunnel(reg, perBox, ev, box, c, replay)
+		toTunnel(reg, perBox, fh, ev, box, c, replay)
 	}
 }
 

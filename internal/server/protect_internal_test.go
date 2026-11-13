@@ -123,3 +123,17 @@ func TestEventsValidation(t *testing.T) {
 	big := `{"seen":[` + strings.Repeat(`{"key":"203.0.113.7","node_id":"1"},`, 30000) + `{"key":"203.0.113.7","node_id":"1"}]}`
 	wantStatus(t, e.call("POST", "/internal/share/events", big, nil), 413, "")
 }
+
+// share counts refusals past its per-name row cap into one row with no key: it must be kept, or
+// the totals would be short.
+func TestEventsKeepKeylessRefusalRow(t *testing.T) {
+	e := setupProtect(t)
+	ctx := context.Background()
+	body := `{"refusals":[{"hour":"2026-11-13T10:00:00Z","name":"mybox","key":"","reason":"manual","source":"range","count":7},
+	                      {"hour":"2026-11-13T10:00:00Z","name":"mybox","key":"10.0.0.1","reason":"manual","source":"range","count":2}]}`
+	wantStatus(t, e.call("POST", "/internal/share/events", body, nil), 204, "")
+	rs, _ := e.st.RefusalsOf(ctx, "mybox", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), 10)
+	if len(rs) != 1 || rs[0].Key != "" || rs[0].Count != 7 {
+		t.Fatalf("%+v, want the keyless row only (a private key is still dropped)", rs)
+	}
+}

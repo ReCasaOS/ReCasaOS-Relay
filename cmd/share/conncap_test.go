@@ -101,7 +101,7 @@ func TestVisitorPastPerBoxCapIsTurnedAway(t *testing.T) {
 	via := func(c net.Conn, done chan struct{}) {
 		defer close(done)
 		defer c.Close()
-		toTunnel(reg, perBox, nil, "alpha", fromAddr{c, visitor}, c)
+		toTunnel(reg, perBox, nil, nil, "alpha", fromAddr{c, visitor}, c)
 	}
 
 	v1, c1 := tcpPair(t)

@@ -64,12 +64,23 @@ func resolver(enrolmentURL string) tunnel.Resolver {
 }
 
 // toTunnel sends the visitor connection c (replay holds its peeked ClientHello) into box's tunnel,
-// unless c's address already holds perBox's max streams of that box: one address alone must not fill
-// the tunnel's tunnel.MaxStreams and lock every other visitor out.
-func toTunnel(reg *tunnel.Registry, perBox *connCap, ev *events, box string, c, replay net.Conn) {
+// unless fh's filter refuses c's address for that box, or c's address already holds perBox's max
+// streams of that box: one address alone must not fill the tunnel's tunnel.MaxStreams and lock every
+// other visitor out. A name no tunnel serves closes silently, before the filter: nothing is recorded.
+func toTunnel(reg *tunnel.Registry, perBox *connCap, fh *filterHolder, ev *events, box string, c, replay net.Conn) {
 	t, ok := reg.Get(box)
 	if !ok {
 		return
+	}
+	// Only share names are filtered: the relay host (enrolment, Headscale, /admin) must stay
+	// reachable from any country. A refused visitor gets a plain close.
+	if f := fh.get(); f != nil {
+		if a, ok := remoteAddr(c); ok {
+			if reason, source := f.decide(a, box); reason != "" {
+				ev.refused(box, eventKey(a), reason, source)
+				return
+			}
+		}
 	}
 	k := ipKey(c.RemoteAddr())
 	if k != "" {
