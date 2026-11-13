@@ -390,7 +390,7 @@ func TestIndexAutoReloadScript(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "setInterval(function(){ if (!document.hidden) location.reload() }, 15000)") {
 		t.Error("no visibility-guarded reload")
 	}
-	if got := w.Header().Get("Content-Security-Policy"); got != "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'" {
+	if got := w.Header().Get("Content-Security-Policy"); got != "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'" {
 		t.Errorf("CSP changed: %s", got)
 	}
 }

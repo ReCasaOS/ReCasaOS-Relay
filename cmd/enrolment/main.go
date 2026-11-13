@@ -171,6 +171,10 @@ func run() error {
 	var adminH http.Handler
 	if tok := os.Getenv("ADMIN_TOKEN"); tok != "" {
 		deps := admin.Deps{Store: st, Headscale: hs, Remover: remover, Journal: jw}
+		// Read by /admin/journal: ours and front's (ingested) in /data/logs, share's volume; set empty: off.
+		if dirs := lookupenv("LOG_READ_DIRS", "/data/logs,/logs/share"); dirs != "" {
+			deps.JournalReader = &journal.Reader{Dirs: strings.Split(dirs, ",")}
+		}
 		if mtr != nil { // never put a nil *Meter in the interface
 			deps.Meter = mtr
 		}

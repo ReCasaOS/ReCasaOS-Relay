@@ -111,6 +111,8 @@ type Deps struct {
 	Protect *protect.Compiler
 	// Journal receives the operator's protection actions; nil: none are written.
 	Journal *journal.Writer
+	// JournalReader reads the journal for /admin/journal; nil: the page says it is off.
+	JournalReader *journal.Reader
 }
 
 type handler struct {
@@ -142,6 +144,8 @@ func New(cfg Config, deps Deps) (http.Handler, error) {
 	mux.HandleFunc("POST /admin/share/names/{name}/revoke", h.ban)
 	mux.HandleFunc("POST /admin/share/banned/{name}/delete", h.unban)
 	mux.HandleFunc("GET /admin/protection", h.protection)
+	mux.HandleFunc("GET /admin/journal", h.journal)
+	mux.HandleFunc("GET /admin/journal/stream", h.journalStream)
 	mux.HandleFunc("POST /admin/protection/feeds", h.addFeed)
 	mux.HandleFunc("POST /admin/protection/feeds/presets/{key}", h.addPreset)
 	mux.HandleFunc("POST /admin/protection/feeds/{id}", h.editFeed)
@@ -162,7 +166,7 @@ func New(cfg Config, deps Deps) (http.Handler, error) {
 func (h *handler) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'")
 		ip := h.client(r)
 		// Checked before the token, so a correct guess past the limit is not revealed.
 		if h.limiter.Blocked(ip) {
