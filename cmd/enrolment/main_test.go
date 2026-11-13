@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPolicyIsAppliedBeforeServing(t *testing.T) {
@@ -62,4 +65,14 @@ func TestListenZoneRefusesLongPSLTXT(t *testing.T) {
 	}
 	pc.Close()
 	l.Close()
+}
+
+func TestOpenJournalFailureGivesNil(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "afile")
+	if err := os.WriteFile(f, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if jw := openJournal(f, "enrolment", time.Hour, 1<<20); jw != nil {
+		t.Fatal("want nil journal")
+	}
 }

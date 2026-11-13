@@ -90,7 +90,8 @@ func TestBansRejectsBadItems(t *testing.T) {
 		if i == len(bad)-1 {
 			body = it
 		}
-		wantStatus(t, e.as(b, "POST", "/v1/share/bans", body), 400, "")
+		wantStatus(t, e.as(b, "PUT", "/v1/share/protection", `{"relay_filter":true,"share_bans":false}`), 200, "") // resync: no new line
+	wantStatus(t, e.as(b, "POST", "/v1/share/bans", body), 400, "")
 	}
 	many := strings.Repeat(item("203.0.113.7", "scan", "jellyfin", since)+",", 200) + item("203.0.113.7", "scan", "jellyfin", since)
 	wantStatus(t, e.as(b, "POST", "/v1/share/bans", `{"bans":[`+many+`]}`), 400, "")

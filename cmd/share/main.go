@@ -39,11 +39,14 @@ func run() error {
 	}
 	var jw *journal.Writer // nil without LOG_DIR: every journal call is then a no-op
 	if cfg.LogDir != "" {
+		// The relay must not stop because of its log: on failure, run without a journal.
 		if jw, err = journal.Open(cfg.LogDir, "share", cfg.LogKeep, cfg.LogMaxSize, time.Now); err != nil {
-			return err
+			log.Printf("journal disabled: %v", err)
+			jw = nil
+		} else {
+			log.SetOutput(io.MultiWriter(os.Stderr, jw.Log()))
+			defer closeJournal(jw)
 		}
-		log.SetOutput(io.MultiWriter(os.Stderr, jw.Log()))
-		defer closeJournal(jw)
 	}
 	lt, err := net.Listen("tcp", cfg.ListenTLS)
 	if err != nil {

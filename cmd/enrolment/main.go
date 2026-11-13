@@ -64,6 +64,17 @@ func journalLimits() (keep time.Duration, size int64, err error) {
 	return keep, size, nil
 }
 
+// openJournal opens the journal; the relay must not stop because of its log, so a failure is
+// reported on stderr and gives nil (no journal).
+func openJournal(dir, svc string, keep time.Duration, size int64) *journal.Writer {
+	jw, err := journal.Open(dir, svc, keep, size, time.Now)
+	if err != nil {
+		log.Printf("journal disabled: %v", err)
+		return nil
+	}
+	return jw
+}
+
 // closeJournal flushes the journal, but a hanging disk must not hold the shutdown for more than 5 s.
 func closeJournal(jw *journal.Writer) {
 	done := make(chan struct{})
@@ -91,11 +102,10 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		if jw, err = journal.Open(dir, "enrolment", keep, size, time.Now); err != nil {
-			return err
+		if jw = openJournal(dir, "enrolment", keep, size); jw != nil {
+			log.SetOutput(io.MultiWriter(os.Stderr, jw.Log()))
+			defer closeJournal(jw)
 		}
-		log.SetOutput(io.MultiWriter(os.Stderr, jw.Log()))
-		defer closeJournal(jw)
 	}
 	apiKey := os.Getenv("HEADSCALE_API_KEY")
 	if apiKey == "" {

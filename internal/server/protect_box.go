@@ -40,7 +40,7 @@ func (h *shareHandler) putProtection(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := opCtx(r)
 	defer cancel()
 	now := h.deps.Now()
-	old, _, err := h.deps.Store.GetProtection(ctx, ref.NodeID)
+	old, had, err := h.deps.Store.GetProtection(ctx, ref.NodeID)
 	if err != nil {
 		internalError(w, "get protection", err)
 		return
@@ -58,8 +58,10 @@ func (h *shareHandler) putProtection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.invalidate()
-	h.deps.Journal.Write(journal.Entry{Src: "relay", Event: "protection",
-		Msg: fmt.Sprintf("%s relay_filter=%t share_bans=%t", ref.NodeID, p.RelayFilter, p.ShareBans)})
+	if !had || old.RelayFilter != p.RelayFilter || old.ShareBans != p.ShareBans { // boxes PUT at every resync
+		h.deps.Journal.Write(journal.Entry{Src: "relay", Event: "protection",
+			Msg: fmt.Sprintf("%s relay_filter=%t share_bans=%t", ref.NodeID, p.RelayFilter, p.ShareBans)})
+	}
 	bans, err := h.deps.Store.ActiveBans(ctx, now)
 	if err != nil {
 		internalError(w, "active bans", err)
