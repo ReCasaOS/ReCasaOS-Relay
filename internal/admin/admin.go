@@ -19,9 +19,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ReCasaOS/recasaos-relay/internal/feeds"
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
+	"github.com/ReCasaOS/recasaos-relay/internal/geo"
 	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
 	"github.com/ReCasaOS/recasaos-relay/internal/meter"
+	"github.com/ReCasaOS/recasaos-relay/internal/protect"
 	"github.com/ReCasaOS/recasaos-relay/internal/ratelimit"
 	"github.com/ReCasaOS/recasaos-relay/internal/sharename"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
@@ -38,7 +41,7 @@ const requestsPerHour = 120
 //go:embed page.html
 var pageHTML string
 
-var page = template.Must(template.New("page").Funcs(template.FuncMap{
+var funcs = template.FuncMap{
 	"ago": func(t, now time.Time) string {
 		switch d := now.Sub(t); {
 		case d < time.Minute:
@@ -73,7 +76,9 @@ var page = template.Must(template.New("page").Funcs(template.FuncMap{
 	},
 	"bytes": func(n int64) string { return humanBytes(float64(n)) },
 	"rate":  humanRate,
-}).Parse(pageHTML))
+}
+
+var page = template.Must(template.New("page").Funcs(funcs).Parse(pageHTML))
 
 // Config is what the page shows next to the live numbers.
 type Config struct {
@@ -97,6 +102,10 @@ type Deps struct {
 	Now       func() time.Time // default time.Now
 	// Meter feeds the traffic figures; a true nil interface when metering is off.
 	Meter interface{ Live() meter.Live }
+	// The protection page's collaborators; each may be nil (the page then says what is missing).
+	Feeds   *feeds.Fetcher
+	Geo     *geo.DB
+	Protect *protect.Compiler
 }
 
 type handler struct {
@@ -127,6 +136,15 @@ func New(cfg Config, deps Deps) (http.Handler, error) {
 	mux.HandleFunc("POST /admin/share/banned", h.ban)
 	mux.HandleFunc("POST /admin/share/names/{name}/revoke", h.ban)
 	mux.HandleFunc("POST /admin/share/banned/{name}/delete", h.unban)
+	mux.HandleFunc("GET /admin/protection", h.protection)
+	mux.HandleFunc("POST /admin/protection/feeds", h.addFeed)
+	mux.HandleFunc("POST /admin/protection/feeds/presets/{key}", h.addPreset)
+	mux.HandleFunc("POST /admin/protection/feeds/{id}", h.editFeed)
+	mux.HandleFunc("POST /admin/protection/feeds/{id}/{action}", h.feedAction) // toggle, refresh, delete
+	mux.HandleFunc("POST /admin/protection/manual", h.addManual)
+	mux.HandleFunc("POST /admin/protection/manual/{id}/delete", h.deleteManual)
+	mux.HandleFunc("POST /admin/protection/allow", h.addAllow)
+	mux.HandleFunc("POST /admin/protection/allow/{id}/delete", h.deleteAllow)
 	return h.guard(mux), nil
 }
 
@@ -157,6 +175,11 @@ func (h *handler) guard(next http.Handler) http.Handler {
 		if r.Method == http.MethodPost {
 			r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 			if subtle.ConstantTimeCompare([]byte(r.PostFormValue("csrf")), []byte(h.csrf)) != 1 {
+				// The protection routes answer 403; the older ones keep the 400 their callers know.
+				if strings.HasPrefix(r.URL.Path, "/admin/protection/") {
+					http.Error(w, "forbidden", http.StatusForbidden)
+					return
+				}
 				http.Error(w, "bad request", http.StatusBadRequest)
 				return
 			}
