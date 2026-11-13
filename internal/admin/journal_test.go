@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -418,13 +419,13 @@ func TestJournalSearchOnMovesBack(t *testing.T) {
 }
 
 func TestJournalBusy(t *testing.T) {
-	entered, release := make(chan struct{}), make(chan struct{})
+	entered, release := make(chan struct{}, 1), make(chan struct{})
+	var once sync.Once
 	holder := &journal.Reader{Dirs: []string{t.TempDir()}, Now: func() time.Time {
-		select {
-		case entered <- struct{}{}: // the first call, inside Page: it holds the one search slot
+		once.Do(func() { // the first call, inside Page: it holds the one search slot
+			entered <- struct{}{}
 			<-release
-		default:
-		}
+		})
 		return time.Now()
 	}}
 	held := make(chan struct{})
