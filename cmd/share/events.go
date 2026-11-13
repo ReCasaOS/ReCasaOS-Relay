@@ -89,7 +89,9 @@ func (e *events) seen(key, nodeID string) {
 	if t, ok := e.seenAt[k]; ok && now.Sub(t) < seenEvery {
 		return
 	}
-	e.seenAt[k] = now
+	if len(e.seenAt) < maxEvents { // shortcut: full under a flood, a new pair is sent but not remembered (may repeat within 10 min)
+		e.seenAt[k] = now
+	}
 	e.seenQ = append(e.seenQ, k)
 	e.trim()
 }
@@ -101,29 +103,47 @@ func (e *events) refused(name, key, reason, source string) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.addRef(refItem{Hour: e.now().UTC().Truncate(time.Hour).Format(time.RFC3339), Name: name, Key: key, Reason: reason, Source: source, Count: 1}, false)
+	e.addRef(refItem{Hour: e.now().UTC().Truncate(time.Hour).Format(time.RFC3339), Name: name, Key: key, Reason: reason, Source: source, Count: 1})
 	e.trim()
 }
 
-// addRef adds r's count to its row; a new row goes last, or first with front (a batch put back).
-func (e *events) addRef(r refItem, front bool) {
+// addRef adds r's count to its row; a new row goes last.
+func (e *events) addRef(r refItem) {
 	k := refKey{r.Hour, r.Name, r.Key, r.Reason, r.Source}
 	if p, ok := e.refs[k]; ok {
 		p.Count += r.Count
 		return
 	}
 	e.refs[k] = &r
-	if front {
-		e.refOrder = append([]refKey{k}, e.refOrder...)
-	} else {
-		e.refOrder = append(e.refOrder, k)
+	e.refOrder = append(e.refOrder, k)
+}
+
+// putBack puts rows (oldest first, distinct) before what was recorded meanwhile, in one pass, adding
+// the counts of rows that were recorded again.
+func (e *events) putBack(rows []refItem) {
+	order, back := make([]refKey, 0, len(rows)+len(e.refOrder)), make(map[refKey]bool, len(rows))
+	for _, r := range rows {
+		k := refKey{r.Hour, r.Name, r.Key, r.Reason, r.Source}
+		if p, ok := e.refs[k]; ok {
+			r.Count += p.Count
+		}
+		e.refs[k] = &r
+		back[k] = true
+		order = append(order, k)
 	}
+	for _, k := range e.refOrder {
+		if !back[k] {
+			order = append(order, k)
+		}
+	}
+	e.refOrder = order
 }
 
 // trim drops the oldest pending items past maxEvents (seen first: a refusal count cannot be rebuilt).
 func (e *events) trim() {
 	for over := len(e.seenQ) + len(e.refOrder) - maxEvents; over > 0; over-- {
 		if len(e.seenQ) > 0 {
+			delete(e.seenAt, e.seenQ[0]) // never sent: a later sighting must be queued again
 			e.seenQ = e.seenQ[1:]
 		} else {
 			delete(e.refs, e.refOrder[0])
@@ -163,18 +183,13 @@ func (e *events) flush(ctx context.Context, url string) {
 		if code == http.StatusNoContent {
 			continue
 		}
-		if code >= 400 && code < 500 {
+		if code >= 400 && code < 500 && code != http.StatusRequestTimeout && code != http.StatusTooManyRequests {
 			log.Printf("share: events: HTTP %d, dropping %d items", code, n+m)
 			continue
 		}
 		e.mu.Lock() // put back: this chunk and the rest, before anything newer
 		e.seenQ = append(append(b.Seen, seen...), e.seenQ...)
-		for i := len(refs) - 1; i >= 0; i-- {
-			e.addRef(refs[i], true)
-		}
-		for i := len(b.Refusals) - 1; i >= 0; i-- {
-			e.addRef(b.Refusals[i], true)
-		}
+		e.putBack(append(append([]refItem{}, b.Refusals...), refs...))
 		e.trim()
 		e.mu.Unlock()
 		return

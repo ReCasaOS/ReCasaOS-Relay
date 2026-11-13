@@ -203,3 +203,47 @@ func TestVisitorSeenOnceStreamIsOpen(t *testing.T) {
 		t.Fatalf("posts = %+v, want seen (key, node 7) and one cap/ip-box refusal for alpha", p)
 	}
 }
+
+func TestTrimmedPairIsQueuedAgain(t *testing.T) {
+	now := t0
+	e := clockedEvents(&now)
+	for i := range maxEvents + 5 {
+		e.seen("203.0.113.7/32", strconv.Itoa(i))
+	}
+	e.seen("203.0.113.7/32", "0") // trimmed, never sent: not suppressed
+	if got := e.seenQ[len(e.seenQ)-1]; got.NodeID != "0" {
+		t.Fatalf("last queued = %+v, want the trimmed pair queued again", got)
+	}
+	for i := range 3 * maxEvents {
+		e.seen("203.0.113.8/32", strconv.Itoa(i))
+	}
+	if len(e.seenAt) > maxEvents || len(e.seenQ) > maxEvents {
+		t.Fatalf("seenAt %d, seenQ %d, want both <= %d", len(e.seenAt), len(e.seenQ), maxEvents)
+	}
+}
+
+func TestPutBackKeepsOrderAndCounts(t *testing.T) {
+	now := t0
+	e := clockedEvents(&now)
+	f := &fakeEnrolment{eventsStatus: http.StatusTooManyRequests} // transient: kept
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	for i := range maxEvents {
+		e.refused(strconv.Itoa(i), "203.0.113.7/32", "cap", "ip-box")
+	}
+	e.flush(context.Background(), srv.URL+"/internal/share/events")
+	e.refused("0", "203.0.113.7/32", "cap", "ip-box") // again, while the first rows waited
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.refOrder) != maxEvents {
+		t.Fatalf("%d rows, want %d", len(e.refOrder), maxEvents)
+	}
+	for i, k := range e.refOrder {
+		if k.Name != strconv.Itoa(i) {
+			t.Fatalf("row %d is %q: order lost", i, k.Name)
+		}
+	}
+	if c := e.refs[e.refOrder[0]].Count; c != 2 {
+		t.Fatalf("row 0 count %d, want 2", c)
+	}
+}
