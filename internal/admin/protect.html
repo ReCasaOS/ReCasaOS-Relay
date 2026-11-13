@@ -30,6 +30,10 @@ td.wrap { min-width:14rem; }
 <div class="t"><h1>Relay protection</h1><span class="mut xs">Who may reach the shared apps of this relay. Connections to the relay itself are never filtered.</span></div>
 <a class="chip" href="/admin/">Relay admin</a>
 </div>
+{{define "ban"}}{{with .B}}<tr><td class="n"><code>{{.Key}}</code></td><td class="mut">{{.Kind}}</td><td class="mut wrap">{{.Reasons}}</td><td class="r">{{.Fleets}}</td>
+<td class="mut">{{ago .Since $.Now}}</td><td class="mut">{{if .Until.IsZero}}permanent{{else}}{{until .Until $.Now}}{{end}}</td><td class="r">{{.Strike}}</td>
+<td class="r"><form method="post" action="/admin/protection/community/lift"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="key" value="{{.Key}}"><button>Lift</button></form>
+<form method="post" action="/admin/protection/community/allow"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="key" value="{{.Key}}"><button class="plain">Allow</button></form></td></tr>{{end}}{{end}}
 {{define "feedform"}}<input type="hidden" name="csrf" value="{{.CSRF}}">
 <div class="fields">
 <label>Name<input name="name" required maxlength="64" value="{{with .F}}{{.Name}}{{end}}"></label>
@@ -46,7 +50,18 @@ td.wrap { min-width:14rem; }
 
 <section class="card" id="overview">
 <div class="hd"><h2>Overview</h2></div>
-<div class="bd pad"><p class="mut">Refused connections by reason, today and over 7 days, will show here.</p></div>
+<div class="bd">
+<table>
+<tr>{{range .Reasons}}<th class="r">{{.}}</th>{{end}}</tr>
+<tr>{{range $i, $r := .Reasons}}<td class="r" data-n="today-{{$r}}">{{index $.Today $i}}</td>{{end}}</tr>
+</table>
+<p class="mut xs pad">Refused today (since 00:00 UTC), by reason. <b data-n="sharing">{{.Sharing}}</b> box(es) share their bans &middot; <b data-n="active-bans">{{.ActiveBans}}</b> active community ban(s).</p>
+</div>
+<div class="chart">
+<div class="tabs"><span class="mut">Refused per day, last 7 days</span></div>
+{{.Chart}}
+<div class="lg">{{range $i, $s := .Series}}<span><b class="c{{$i}}"></b>{{$s.Name}}</span>{{end}}</div>
+</div>
 </section>
 
 <section class="card" id="feeds">
@@ -85,7 +100,25 @@ td.wrap { min-width:14rem; }
 
 <section class="card" id="community">
 <div class="hd"><h2>Community list</h2></div>
-<div class="bd pad"><p class="mut">Addresses and ranges banned from the reports of the boxes will show here.</p></div>
+<div class="bd" id="active-bans-table">
+{{if .Timed}}<table>
+<tr><th>Key</th><th>Kind</th><th>Reasons</th><th class="r">Fleets</th><th>Since</th><th>Until</th><th class="r">Strike</th><th></th></tr>
+{{range .Timed}}{{template "ban" dict "B" . "Now" $.Now "CSRF" $.CSRF}}{{end}}</table>{{else}}<p class="mut">No timed ban.</p>{{end}}
+</div>
+<div class="bd" id="permanent">
+<h3 class="mut">Permanent bans</h3>
+{{if .Permanent}}<table>
+<tr><th>Key</th><th>Kind</th><th>Reasons</th><th class="r">Fleets</th><th>Since</th><th>Until</th><th class="r">Strike</th><th></th></tr>
+{{range .Permanent}}{{template "ban" dict "B" . "Now" $.Now "CSRF" $.CSRF}}{{end}}</table>{{else}}<p class="mut">No permanent ban.</p>{{end}}
+</div>
+<div class="bd">
+<h3 class="mut">Flagged networks</h3>
+{{if .Flags}}<table>
+<tr><th>ASN</th><th>Network</th><th class="r">Banned ranges</th><th></th></tr>
+{{range .Flags}}<tr><td class="n"><code>AS{{.ASN}}</code></td><td class="mut wrap">{{.Org}}</td><td class="r">{{.Ranges}}</td>
+<td class="r"><form method="post" action="/admin/protection/asn/{{.ASN}}/ban" onsubmit="return confirm('Ban the whole network permanently?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button>Ban network</button></form></td></tr>
+{{end}}</table>{{else}}<p class="mut">{{if .Geo}}No network holds several banned ranges.{{else}}Network data not available: the DB-IP files are not loaded.{{end}}</p>{{end}}
+</div>
 </section>
 
 <section class="card" id="manual">
@@ -113,7 +146,17 @@ td.wrap { min-width:14rem; }
 
 <section class="card" id="names">
 <div class="hd"><h2>Shared names</h2></div>
-<div class="bd pad"><p class="mut">Refusals and settings of each shared name will show here; suspending a name or forbidding one stays on the <a href="/admin/">relay admin</a> page for now.</p></div>
+<div class="bd">
+{{if .Names}}<table>
+<tr><th>Name</th>{{range .Reasons}}<th class="r">{{.}}</th>{{end}}<th>relay filter</th><th>share bans</th><th></th></tr>
+{{range .Names}}{{$n := .Name}}<tr><td class="n"><code>{{.Name}}</code>{{if .IsSuspended}} <span class="chip warn">suspended</span>{{end}}</td>
+{{range $i, $c := .Today}}<td class="r" data-n="name-{{$n}}-{{index $.Reasons $i}}">{{$c}}</td>{{end}}
+<td class="mut">{{.Filter}}</td><td class="mut">{{.Bans}}</td>
+<td class="r"><form method="post" action="/admin/protection/names/{{.Name}}/{{if .IsSuspended}}resume{{else}}suspend{{end}}"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="plain">{{if .IsSuspended}}Resume{{else}}Suspend{{end}}</button></form>
+<form method="post" action="/admin/share/names/{{.Name}}/revoke" onsubmit="return confirm('Revoke and forbid this name?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button>Revoke</button></form></td></tr>
+{{end}}</table>{{else}}<p class="mut">No shared name.</p>{{end}}
+<p class="mut xs pad">Refused today by reason. Suspending refuses every visitor of a name until you resume it.</p>
+</div>
 </section>
 
 <section class="card" id="allow">
@@ -137,7 +180,21 @@ td.wrap { min-width:14rem; }
 
 <section class="card" id="caps">
 <div class="hd"><h2>Connection caps</h2></div>
-<div class="bd pad"><p class="mut">Refusals by address and by name, and the caps in force, will show here.</p></div>
+<div class="bd pad"><p>Caps in force: <b>{{.ConnsPerIP}}</b> connections per address, <b>{{.ConnsPerIPPerBox}}</b> per address and box.</p></div>
+<div class="bd">
+<h3 class="mut">Refused today by address (top 50)</h3>
+{{if .CapKeys}}<table>
+<tr><th>Address</th><th class="r">Refusals</th></tr>
+{{range .CapKeys}}<tr><td class="n"><code>{{.Key}}</code></td><td class="r" data-n="cap-key-{{.Key}}">{{.Count}}</td></tr>
+{{end}}</table>{{else}}<p class="mut">No connection refused by a cap today.</p>{{end}}
+</div>
+<div class="bd">
+<h3 class="mut">Refused today by name</h3>
+{{if .CapNames}}<table>
+<tr><th>Name</th><th class="r">Refusals</th></tr>
+{{range .CapNames}}<tr><td class="n">{{if .Key}}<code>{{.Key}}</code>{{else}}<span class="mut">no box (address cap)</span>{{end}}</td><td class="r" data-n="cap-name-{{.Key}}">{{.Count}}</td></tr>
+{{end}}</table>{{else}}<p class="mut">None.</p>{{end}}
+</div>
 </section>
 {{if .Version}}<footer class="mut xs foot">relay {{.Version}}</footer>{{end}}
 </body>

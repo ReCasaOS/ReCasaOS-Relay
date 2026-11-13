@@ -18,8 +18,8 @@ import (
 	"time"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/admin"
-	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/dnszone"
+	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/gc"
 	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
 	"github.com/ReCasaOS/recasaos-relay/internal/meter"
@@ -36,6 +36,19 @@ func getenv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envPositive reads a positive integer, def when unset.
+func envPositive(key string, def int) (int, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("%s: a positive integer", key)
+	}
+	return n, nil
 }
 
 func main() {
@@ -67,6 +80,14 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("MONTHLY_TRAFFIC_REFERENCE: %w", err)
 	}
+	connsPerIP, err := envPositive("CONNS_PER_IP", 256)
+	if err != nil {
+		return err
+	}
+	connsPerBox, err := envPositive("CONNS_PER_IP_PER_BOX", 64)
+	if err != nil {
+		return err
+	}
 	// Traffic metering needs the derper's debug key; without it nothing is metered (the key is never logged).
 	var mtr *meter.Meter
 	if key := os.Getenv("DERPER_DEBUG_KEY"); key != "" {
@@ -82,7 +103,8 @@ func run() error {
 			deps.Meter = mtr
 		}
 		adminH, err = admin.New(admin.Config{Token: tok, NodesPerFleet: cfg.NodesPerFleet, MaxFleets: cfg.MaxFleets,
-			ClientHeader: cfg.TrustedProxyHeader, MonthlyReference: reference, Version: version}, deps)
+			ClientHeader: cfg.TrustedProxyHeader, MonthlyReference: reference, Version: version,
+			ConnsPerIP: connsPerIP, ConnsPerIPPerBox: connsPerBox}, deps)
 		if err != nil {
 			return err
 		}

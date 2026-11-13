@@ -85,6 +85,14 @@ func fleetSeries(points []store.UsagePoint, names map[string]string, c chartRang
 	return out
 }
 
+// topLabel: byte rates, except the refusals chart, which counts.
+func topLabel(kind string, v float64) string {
+	if kind == "refused" {
+		return strconv.FormatInt(int64(v), 10)
+	}
+	return humanRate(v)
+}
+
 const chartW, chartBase, chartTop = 600.0, 110.0, 16.0
 
 // stackedChart draws the series stacked, the first at the bottom, as one band polygon each (class
@@ -117,7 +125,7 @@ func stackedChart(series []chartSeries, buckets int, kind string) template.HTML 
 	b.WriteString(`<svg viewBox="0 0 600 120" width="100%" role="img" aria-label="` + kind + ` rate per node" data-buckets="` + strconv.Itoa(buckets) + `">`)
 	b.WriteString(`<line x1="0" y1="110" x2="600" y2="110" class="axis"/>`)
 	if top > 0 {
-		b.WriteString(`<line x1="0" y1="16" x2="600" y2="16" class="axis grid"/><text x="2" y="12" class="lbl">` + humanRate(top) + `</text>`)
+		b.WriteString(`<line x1="0" y1="16" x2="600" y2="16" class="axis grid"/><text x="2" y="12" class="lbl">` + topLabel(kind, top) + `</text>`)
 	}
 	for s := range series {
 		b.WriteString(`<polygon class="c` + strconv.Itoa(min(s, topNodes)) + `" points="`)

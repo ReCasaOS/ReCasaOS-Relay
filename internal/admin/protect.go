@@ -95,13 +95,22 @@ func (h *handler) protection(w http.ResponseWriter, r *http.Request) {
 	for i, p := range feeds.Presets {
 		presets[i] = presetView{p, added[p.Key]}
 	}
+	data, err := h.protectStats(ctx, now)
+	if err != nil {
+		h.storeError(w, "protection stats", err)
+		return
+	}
 	edit, _ := strconv.ParseInt(r.URL.Query().Get("edit"), 10, 64)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := protectPage.Execute(w, map[string]any{
+	for k, v := range map[string]any{
 		"Now": now, "CSRF": h.csrf, "Version": h.cfg.Version, "Edit": edit,
 		"Feeds": views, "Presets": presets, "Fetcher": h.deps.Feeds != nil,
 		"Manual": manual, "Allow": allow, "Geo": h.deps.Geo != nil && h.deps.Geo.Version() != "",
-	}); err != nil {
+		"ConnsPerIP": h.cfg.ConnsPerIP, "ConnsPerIPPerBox": h.cfg.ConnsPerIPPerBox,
+	} {
+		data[k] = v
+	}
+	if err := protectPage.Execute(w, data); err != nil {
 		log.Printf("admin: render protection: %v", err)
 	}
 }

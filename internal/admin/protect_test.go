@@ -309,3 +309,145 @@ func TestDeleteFeedRemovesCopy(t *testing.T) {
 		t.Errorf("copy left after delete: %v", err)
 	}
 }
+
+func openBan(t *testing.T, e env, key, kind string, strike int, until time.Time) {
+	t.Helper()
+	if err := e.st.OpenBan(context.Background(), store.CommunityBan{Key: key, Kind: kind, Strike: strike, Since: t0.Add(-time.Hour), Until: until, Reasons: "scan", Fleets: 3}, []string{"aaaa", "bbbb"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func claim(t *testing.T, e env, fleet, node, name string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := e.st.SetBoxKey(ctx, fleet, node, "key"+node, t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.ClaimName(ctx, node, name, t0); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLiftKeepsStrikes(t *testing.T) {
+	ctx := context.Background()
+	e, c := setup(t).withCompiler(t)
+	openBan(t, e, "198.51.100.7/32", "address", 2, t0.Add(time.Hour))
+	if _, _, err := c.Current(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if w := e.do("POST", "/admin/protection/community/lift", token, form(e, "key", "198.51.100.7/32")); w.Code != 303 || w.Header().Get("Location") != "/admin/protection#community" {
+		t.Fatalf("lift: %d %s", w.Code, w.Header().Get("Location"))
+	}
+	if b, _ := e.st.ActiveBans(ctx, t0); len(b) != 0 {
+		t.Errorf("still banned: %+v", b)
+	}
+	if n, _, err := e.st.Strikes(ctx, "198.51.100.7/32"); err != nil || n != 2 {
+		t.Errorf("strikes %d, %v", n, err)
+	}
+	for _, bad := range []string{"198.51.100.7/24", "garbage", "", "10.0.0.0/7"} {
+		if w := e.do("POST", "/admin/protection/community/lift", token, form(e, "key", bad)); w.Code != 400 {
+			t.Errorf("lift %q: %d", bad, w.Code)
+		}
+	}
+}
+
+func TestAllowFromCommunity(t *testing.T) {
+	ctx := context.Background()
+	e, _ := setup(t).withCompiler(t)
+	openBan(t, e, "198.51.100.0/24", "range", 1, time.Time{})
+	if w := e.do("POST", "/admin/protection/community/allow", token, form(e, "key", "198.51.100.0/24")); w.Code != 303 {
+		t.Fatalf("allow: %d", w.Code)
+	}
+	al, _ := e.st.AllowList(ctx)
+	if len(al) != 1 || al[0].Prefix != "198.51.100.0/24" || al[0].Note != "from community list" {
+		t.Errorf("allow list %+v", al)
+	}
+	if b, _ := e.st.ActiveBans(ctx, t0); len(b) != 0 {
+		t.Errorf("still banned: %+v", b)
+	}
+	if w := e.do("POST", "/admin/protection/community/allow", token, form(e, "key", "10.0.0.0/7")); w.Code != 400 {
+		t.Errorf("too broad: %d", w.Code)
+	}
+}
+
+func TestBanFlaggedASN(t *testing.T) {
+	ctx := context.Background()
+	e := setup(t)
+	if w := e.do("POST", "/admin/protection/asn/64500/ban", token, form(e)); w.Code != 303 || w.Header().Get("Location") != "/admin/protection#community" {
+		t.Fatalf("ban: %d %s", w.Code, w.Header().Get("Location"))
+	}
+	ms, _ := e.st.ManualBans(ctx, t0)
+	if len(ms) != 1 || ms[0].Kind != "asn" || ms[0].Value != "64500" || !ms[0].Until.IsZero() || ms[0].Note != "flagged network" {
+		t.Errorf("manual %+v", ms)
+	}
+	for _, bad := range []string{"0", "x", "-1"} {
+		if w := e.do("POST", "/admin/protection/asn/"+bad+"/ban", token, form(e)); w.Code != 400 {
+			t.Errorf("asn %q: %d", bad, w.Code)
+		}
+	}
+}
+
+func TestSuspendResume(t *testing.T) {
+	ctx := context.Background()
+	e, c := setup(t).withCompiler(t)
+	claim(t, e, "aaaa", "7", "mybox")
+	body, _, _ := c.Current(ctx)
+	if strings.Contains(string(body), `"mybox"`) {
+		t.Fatalf("suspended before: %s", body)
+	}
+	if w := e.do("POST", "/admin/protection/names/mybox/suspend", token, form(e)); w.Code != 303 || w.Header().Get("Location") != "/admin/protection#names" {
+		t.Fatalf("suspend: %d %s", w.Code, w.Header().Get("Location"))
+	}
+	body, _, _ = c.Current(ctx)
+	if !strings.Contains(string(body), `"suspended":["mybox"]`) {
+		t.Errorf("snapshot after suspend: %s", body)
+	}
+	if !strings.Contains(e.do("GET", "/admin/protection", token, nil).Body.String(), "/admin/protection/names/mybox/resume") {
+		t.Error("no Resume button")
+	}
+	if w := e.do("POST", "/admin/protection/names/mybox/resume", token, form(e)); w.Code != 303 {
+		t.Fatalf("resume: %d", w.Code)
+	}
+	body, _, _ = c.Current(ctx)
+	if !strings.Contains(string(body), `"suspended":[]`) {
+		t.Errorf("snapshot after resume: %s", body)
+	}
+	if w := e.do("POST", "/admin/protection/names/Bad_Name/suspend", token, form(e)); w.Code != 400 {
+		t.Errorf("bad name: %d", w.Code)
+	}
+}
+
+func TestOverviewCounts(t *testing.T) {
+	ctx := context.Background()
+	e := setup(t)
+	claim(t, e, "aaaa", "7", "mybox")
+	claim(t, e, "bbbb", "8", "oldbox")
+	e.st.SetProtection(ctx, "7", store.Protection{RelayFilter: true, ShareBans: true})
+	openBan(t, e, "198.51.100.7/32", "address", 1, t0.Add(time.Hour))
+	openBan(t, e, "203.0.113.9/32", "address", 4, time.Time{})
+	today, yesterday := time.Date(2026, 11, 4, 3, 0, 0, 0, time.UTC), time.Date(2026, 11, 3, 23, 0, 0, 0, time.UTC)
+	if err := e.st.AddRefusals(ctx, []store.Refusal{
+		{Hour: today, Name: "mybox", Key: "192.0.2.1/32", Reason: "manual", Source: "manual", Count: 7},
+		{Hour: today, Name: "mybox", Key: "192.0.2.2/32", Reason: "cap", Source: "ip-box", Count: 5},
+		{Hour: today, Name: "", Key: "192.0.2.3/32", Reason: "cap", Source: "ip", Count: 11},
+		{Hour: yesterday, Name: "mybox", Key: "192.0.2.1/32", Reason: "manual", Source: "manual", Count: 100},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body := e.do("GET", "/admin/protection", token, nil).Body.String()
+	for _, want := range []string{
+		`data-n="today-manual">7<`, `data-n="today-cap">16<`, `data-n="today-suspended">0<`, // yesterday's 100 is not today
+		`data-n="sharing">1<`, `data-n="active-bans">2<`,
+		`data-n="name-mybox-cap">5<`, `data-n="cap-key-192.0.2.3/32">11<`, `data-n="cap-name-mybox">5<`,
+		"<svg", "relay filter", "not set", "/admin/share/names/mybox/revoke", "256", "64",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	// The permanent ban is in its own table, the timed one in the other.
+	perm, act := strings.Index(body, `id="permanent"`), strings.Index(body, `id="active-bans-table"`)
+	if perm < 0 || act < 0 || !(strings.Index(body, "203.0.113.9/32") > perm) || !(strings.Index(body, "198.51.100.7/32") > act) || strings.Index(body, "198.51.100.7/32") > perm {
+		t.Error("bans not split into active and permanent tables")
+	}
+}

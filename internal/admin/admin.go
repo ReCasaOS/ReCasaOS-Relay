@@ -92,6 +92,8 @@ type Config struct {
 	MonthlyReference int64
 	// Version is the relay's own, shown at the foot of the page so the operator knows what runs; empty: left out.
 	Version string
+	// ConnsPerIP and ConnsPerIPPerBox are the caps `share` enforces, shown on the protection page only.
+	ConnsPerIP, ConnsPerIPPerBox int
 }
 
 // Deps are the same collaborators the enrolment handlers use.
@@ -145,6 +147,10 @@ func New(cfg Config, deps Deps) (http.Handler, error) {
 	mux.HandleFunc("POST /admin/protection/manual/{id}/delete", h.deleteManual)
 	mux.HandleFunc("POST /admin/protection/allow", h.addAllow)
 	mux.HandleFunc("POST /admin/protection/allow/{id}/delete", h.deleteAllow)
+	mux.HandleFunc("POST /admin/protection/community/lift", h.liftCommunity)
+	mux.HandleFunc("POST /admin/protection/community/allow", h.allowCommunity)
+	mux.HandleFunc("POST /admin/protection/asn/{asn}/ban", h.banASN)
+	mux.HandleFunc("POST /admin/protection/names/{name}/{action}", h.nameAction) // suspend, resume
 	return h.guard(mux), nil
 }
 
