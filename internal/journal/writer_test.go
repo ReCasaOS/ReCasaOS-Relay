@@ -165,6 +165,121 @@ func TestDeletesOlderThanKeep(t *testing.T) {
 	}
 }
 
+func fastSweep(t *testing.T) {
+	old := sweepEvery
+	sweepEvery = 5 * time.Millisecond
+	t.Cleanup(func() { sweepEvery = old })
+}
+
+func waitGone(t *testing.T, dir, name string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for exists(dir, name) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s still there", name)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestIdleWriterDoesNotKeepOldFile(t *testing.T) {
+	fastSweep(t)
+	dir := t.TempDir()
+	c := newClock(noon)
+	w := open(t, dir, "share", 168*time.Hour, 1<<30, c)
+	w.Write(Entry{Src: "share", IP: "203.0.113.7"})
+	c.set(noon.Add(9 * 24 * time.Hour)) // no line since: the open file must still age out
+	waitGone(t, dir, "share-2026-11-13.jsonl")
+}
+
+func TestFutureDatedFileDeleted(t *testing.T) {
+	dir := t.TempDir()
+	mkfile(t, dir, "share-2026-11-20.jsonl", 10)
+	w := open(t, dir, "share", 168*time.Hour, 1<<30, newClock(noon))
+	w.Close()
+	if exists(dir, "share-2026-11-20.jsonl") {
+		t.Fatal("future-dated file kept")
+	}
+
+	// A clock that jumped forward then came back does not pin the future file.
+	fastSweep(t)
+	dir = t.TempDir()
+	c := newClock(noon)
+	w = open(t, dir, "share", 168*time.Hour, 1<<30, c)
+	c.set(noon.Add(7 * 24 * time.Hour))
+	w.Write(Entry{Src: "share"})
+	deadline := time.Now().Add(5 * time.Second)
+	for !exists(dir, "share-2026-11-20.jsonl") {
+		if time.Now().After(deadline) {
+			t.Fatal("jumped line not written")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	c.set(noon)
+	waitGone(t, dir, "share-2026-11-20.jsonl")
+}
+
+func TestSizeCapSweepsWithoutWaitingForTick(t *testing.T) {
+	dir := t.TempDir()
+	mkfile(t, dir, "share-2026-11-12.jsonl", 200)
+	w := open(t, dir, "share", 168*time.Hour, 300, newClock(noon)) // tick is 1 min
+	if !exists(dir, "share-2026-11-12.jsonl") {
+		t.Fatal("200 <= 300: nothing to delete yet")
+	}
+	for i := 0; i < 5; i++ {
+		w.Write(Entry{Src: "share", Host: "a.example", IP: "203.0.113.7"}) // ~90 bytes each
+	}
+	w.Close()
+	if exists(dir, "share-2026-11-12.jsonl") {
+		t.Fatal("cap passed, oldest not deleted before the next tick")
+	}
+}
+
+func TestCloseReturnsUnderSteadyWrites(t *testing.T) {
+	w := open(t, t.TempDir(), "share", 168*time.Hour, 1<<30, newClock(noon))
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				w.Write(Entry{Src: "share"})
+			}
+		}
+	}()
+	time.Sleep(20 * time.Millisecond)
+	closed := make(chan struct{})
+	go func() { w.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return under steady writes")
+	}
+}
+
+// failGate blocks file writes until opened, then fails them all.
+type failGate struct{ open chan struct{} }
+
+func (g failGate) Write(p []byte) (int, error) { <-g.open; return 0, io.ErrShortWrite }
+
+func TestDropCountKeptWhenNotWritten(t *testing.T) {
+	g := failGate{open: make(chan struct{})}
+	old := wrapFile
+	wrapFile = func(*os.File) io.Writer { return g }
+	t.Cleanup(func() { wrapFile = old })
+	w := open(t, t.TempDir(), "share", 168*time.Hour, 1<<30, newClock(noon))
+	for i := 0; i < 2*queueSize; i++ {
+		w.Write(Entry{Src: "share"})
+	}
+	close(g.open)
+	w.Close()
+	if w.dropped.Load() == 0 {
+		t.Fatal("drop count lost although its line could not be written")
+	}
+}
+
 func TestSizeCapDeletesOldestFirst(t *testing.T) {
 	dir := t.TempDir()
 	mkfile(t, dir, "share-2026-11-10.jsonl", 100)
@@ -247,6 +362,9 @@ func TestLogWriterSplitsLines(t *testing.T) {
 	}
 	io.WriteString(lw, "two\nthree\n\n")
 	log.New(lw, "", 0).Printf("four %d", 4)
+	log.New(lw, "", log.LstdFlags).Printf("five")
+	log.New(lw, "", log.LstdFlags|log.Lmicroseconds).Printf("six")
+	io.WriteString(lw, "2026/11/13 seven\n") // not a full prefix: kept
 	w.Close()
 	var msgs []string
 	for _, e := range readEntries(t, filepath.Join(dir, "enrolment-2026-11-13.jsonl")) {
@@ -255,7 +373,7 @@ func TestLogWriterSplitsLines(t *testing.T) {
 		}
 		msgs = append(msgs, e.Msg)
 	}
-	if got := strings.Join(msgs, "|"); got != "one|two|three|four 4" {
+	if got := strings.Join(msgs, "|"); got != "one|two|three|four 4|five|six|2026/11/13 seven" {
 		t.Fatalf("msgs %q", got)
 	}
 }
