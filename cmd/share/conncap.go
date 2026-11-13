@@ -14,6 +14,7 @@ type connCap struct {
 	mu     sync.Mutex
 	open   map[string]int
 	logged time.Time
+	cuts   cutLog // its refusals in the journal
 }
 
 func newConnCap(max int, what string) *connCap {

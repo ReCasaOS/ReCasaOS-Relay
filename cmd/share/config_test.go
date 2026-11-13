@@ -13,7 +13,7 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Config{ListenTLS: ":443", ListenHTTP: ":80", ListenTunnel: ":8082", FrontTLS: "front:443", FrontHTTP: "front:80",
-		EnrolmentURL: "http://enrolment:8081", RelayHost: "relay.test", ShareDomain: "box.relay.test", PeekTimeout: 5 * time.Second, TunnelRatePerHour: 60, ConnsPerIP: 256, ConnsPerIPPerBox: 64, FrontProxyProtocol: true}
+		EnrolmentURL: "http://enrolment:8081", RelayHost: "relay.test", ShareDomain: "box.relay.test", PeekTimeout: 5 * time.Second, TunnelRatePerHour: 60, ConnsPerIP: 256, ConnsPerIPPerBox: 64, FrontProxyProtocol: true, LogDir: "/logs", LogKeep: 168 * time.Hour, LogMaxSize: 1 << 30}
 	if c != want {
 		t.Fatalf("got %+v", c)
 	}
@@ -33,6 +33,10 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 			t.Fatalf("%s=0 was accepted", k)
 		}
 		t.Setenv(k, "")
+	}
+	t.Setenv("LOG_DIR", "") // set empty: no journal
+	if c, err := ConfigFromEnv(); err != nil || c.LogDir != "" {
+		t.Fatalf("LOG_DIR empty: LogDir=%q, %v", c.LogDir, err)
 	}
 	t.Setenv("SHARE_DOMAIN", "")
 	if _, err := ConfigFromEnv(); err == nil {
@@ -81,5 +85,21 @@ func TestConfigFromEnvValidatesHosts(t *testing.T) {
 	t.Setenv("SHARE_DOMAIN", "Box.Relay.Test")
 	if c, err := ConfigFromEnv(); err != nil || c.RelayHost != "relay.test" || c.ShareDomain != "box.relay.test" {
 		t.Fatalf("got %+v, %v", c, err)
+	}
+}
+
+func TestLogKeepAbove7DaysRefused(t *testing.T) {
+	t.Setenv("RELAY_HOST", "relay.test")
+	t.Setenv("SHARE_DOMAIN", "box.relay.test")
+	for _, v := range []string{"169h", "0", "-1h", "soon"} {
+		t.Setenv("LOG_KEEP", v)
+		if _, err := ConfigFromEnv(); err == nil {
+			t.Fatalf("LOG_KEEP=%s was accepted", v)
+		}
+	}
+	t.Setenv("LOG_KEEP", "168h")
+	t.Setenv("LOG_MAX_SIZE", "-5")
+	if _, err := ConfigFromEnv(); err == nil {
+		t.Fatal("LOG_MAX_SIZE=-5 was accepted")
 	}
 }

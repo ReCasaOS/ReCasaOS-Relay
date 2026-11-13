@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/feeds"
+	"github.com/ReCasaOS/recasaos-relay/internal/journal"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
 )
 
@@ -120,6 +121,11 @@ func (h *handler) storeError(w http.ResponseWriter, what string, err error) {
 	http.Error(w, "store error", http.StatusInternalServerError)
 }
 
+// event journals one operator action; the message never holds a feed's URL or key.
+func (h *handler) event(ev, ip, host, msg string) {
+	h.deps.Journal.Write(journal.Entry{Src: "relay", Event: ev, IP: ip, Host: host, Msg: msg})
+}
+
 // done ends every protection write: the snapshot is rebuilt at its next poll.
 func (h *handler) done(w http.ResponseWriter, r *http.Request, to string) {
 	if h.deps.Protect != nil {
@@ -207,6 +213,7 @@ func (h *handler) addFeed(w http.ResponseWriter, r *http.Request) {
 		h.storeError(w, "add feed", err)
 		return
 	}
+	h.event("feed_admin", "", "", f.Name+" add")
 	h.done(w, r, "#feeds")
 }
 
@@ -230,8 +237,10 @@ func (h *handler) addPreset(w http.ResponseWriter, r *http.Request) {
 		case err != nil:
 			h.storeError(w, "add preset", err)
 		case p.NeedsKey:
+			h.event("feed_admin", "", "", p.Name+" add")
 			h.done(w, r, "?edit="+strconv.FormatInt(id, 10)+"#feeds")
 		default:
+			h.event("feed_admin", "", "", p.Name+" add")
 			h.done(w, r, "#feeds")
 		}
 		return
@@ -274,7 +283,7 @@ func (h *handler) feed(ctx context.Context, w http.ResponseWriter, r *http.Reque
 	return store.Feed{}, false
 }
 
-func (h *handler) updateFeed(ctx context.Context, w http.ResponseWriter, r *http.Request, f store.Feed) {
+func (h *handler) updateFeed(ctx context.Context, w http.ResponseWriter, r *http.Request, f store.Feed, action string) {
 	// The CrowdSec preset's URL holds "<integration id>" until the operator fills it in.
 	if f.Enabled && strings.Contains(f.URL, "<") {
 		http.Error(w, "replace the <…> part of the URL first", http.StatusBadRequest)
@@ -287,6 +296,7 @@ func (h *handler) updateFeed(ctx context.Context, w http.ResponseWriter, r *http
 		h.storeError(w, "update feed", err)
 		return
 	}
+	h.event("feed_admin", "", "", f.Name+" "+action)
 	h.done(w, r, "#feeds")
 }
 
@@ -301,7 +311,7 @@ func (h *handler) editFeed(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
-	h.updateFeed(ctx, w, r, f)
+	h.updateFeed(ctx, w, r, f, "edit")
 }
 
 func (h *handler) feedAction(w http.ResponseWriter, r *http.Request) {
@@ -319,7 +329,7 @@ func (h *handler) feedAction(w http.ResponseWriter, r *http.Request) {
 	switch action {
 	case "toggle":
 		f.Enabled = !f.Enabled
-		h.updateFeed(ctx, w, r, f)
+		h.updateFeed(ctx, w, r, f, "toggle")
 	case "refresh":
 		if h.deps.Feeds == nil {
 			http.Error(w, "list downloads are not available on this relay", http.StatusServiceUnavailable)
@@ -330,6 +340,7 @@ func (h *handler) feedAction(w http.ResponseWriter, r *http.Request) {
 		rctx, rcancel := context.WithTimeout(context.WithoutCancel(r.Context()), refreshTimeout)
 		defer rcancel()
 		_ = h.deps.Feeds.Refresh(rctx, f.ID)
+		h.event("feed_admin", "", "", f.Name+" refresh")
 		h.done(w, r, "#feeds")
 	case "delete":
 		if err := h.deps.Store.DeleteFeed(ctx, f.ID); err != nil {
@@ -341,6 +352,7 @@ func (h *handler) feedAction(w http.ResponseWriter, r *http.Request) {
 				log.Printf("admin: feed %d: remove copy: %v", f.ID, err)
 			}
 		}
+		h.event("feed_admin", "", "", f.Name+" delete")
 		h.done(w, r, "#feeds")
 	}
 }
@@ -416,6 +428,7 @@ func (h *handler) addManual(w http.ResponseWriter, r *http.Request) {
 		h.storeError(w, "add manual ban", err)
 		return
 	}
+	h.event("manual_add", "", "", m.Kind+" "+m.Value)
 	h.done(w, r, "#manual")
 }
 
@@ -437,18 +450,39 @@ func (h *handler) addAllow(w http.ResponseWriter, r *http.Request) {
 		h.storeError(w, "add allow", err)
 		return
 	}
+	h.event("allow_add", e.Prefix, "", "")
 	h.done(w, r, "#allow")
 }
 
 func (h *handler) deleteManual(w http.ResponseWriter, r *http.Request) {
-	h.deleteRow(w, r, h.deps.Store.DeleteManual, "#manual")
+	h.deleteRow(w, r, h.deps.Store.DeleteManual, "#manual", "manual_del", func(ctx context.Context, id int64) (ip, msg string) {
+		if ms, err := h.deps.Store.ManualBans(ctx, h.deps.Now()); err == nil {
+			for _, m := range ms {
+				if m.ID == id {
+					return "", m.Kind + " " + m.Value
+				}
+			}
+		}
+		return "", "id " + strconv.FormatInt(id, 10)
+	})
 }
 
 func (h *handler) deleteAllow(w http.ResponseWriter, r *http.Request) {
-	h.deleteRow(w, r, h.deps.Store.DeleteAllow, "#allow")
+	h.deleteRow(w, r, h.deps.Store.DeleteAllow, "#allow", "allow_del", func(ctx context.Context, id int64) (ip, msg string) {
+		if as, err := h.deps.Store.AllowList(ctx); err == nil {
+			for _, a := range as {
+				if a.ID == id {
+					return a.Prefix, ""
+				}
+			}
+		}
+		return "", "id " + strconv.FormatInt(id, 10)
+	})
 }
 
-func (h *handler) deleteRow(w http.ResponseWriter, r *http.Request, del func(context.Context, int64) error, section string) {
+// deleteRow deletes the row of the path's {id}; describe, read before the delete, gives the journal line.
+func (h *handler) deleteRow(w http.ResponseWriter, r *http.Request, del func(context.Context, int64) error, section, event string,
+	describe func(context.Context, int64) (ip, msg string)) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		http.NotFound(w, r)
@@ -456,9 +490,11 @@ func (h *handler) deleteRow(w http.ResponseWriter, r *http.Request, del func(con
 	}
 	ctx, cancel := writeCtx(r)
 	defer cancel()
+	ip, msg := describe(ctx, id)
 	if err := del(ctx, id); err != nil {
 		h.storeError(w, "delete "+section[1:], err)
 		return
 	}
+	h.event(event, ip, "", msg)
 	h.done(w, r, section)
 }

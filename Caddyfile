@@ -7,7 +7,28 @@
 	auto_https off
 }
 
+# Access log for the journal (/admin/journal): JSON lines sent to `enrolment`, which keeps them in its own
+# daily files (LOG_KEEP). Headers are never sent (Authorization, cookies, X-Box-Signature). With `enrolment`
+# down, Caddy starts and serves anyway (soft_start), prints the lines on its own output and reconnects.
+(journal) {
+	log {
+		output net tcp/enrolment:8083 {
+			dial_timeout 2s
+			soft_start
+		}
+		format filter {
+			wrap json
+			fields {
+				request>headers delete
+				resp_headers delete
+			}
+		}
+	}
+}
+
 :8080 {
+	import journal
+
 	# derper's debug pages (node keys, client addresses) are for `enrolment` only, on the compose network.
 	@debug path /debug /debug/*
 	handle @debug {
@@ -28,6 +49,15 @@
 		reverse_proxy share:8082 {
 			# share rate-limits tunnel dials per client IP, before checking the signature.
 			header_up X-Client-IP {client_ip}
+		}
+	}
+
+	# The live journal: each line goes to the browser as it comes. More specific than @enrolment, so it wins.
+	@journalstream path /admin/journal/stream
+	handle @journalstream {
+		reverse_proxy enrolment:8081 {
+			header_up X-Client-IP {client_ip}
+			flush_interval -1
 		}
 	}
 

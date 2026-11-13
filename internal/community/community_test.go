@@ -59,7 +59,7 @@ func (v *env) report(ref store.BoxRef, key, reason string, seen bool) {
 	if seen {
 		v.must(v.st.RecordSeen(ctx, v.now, []store.Seen{{Key: key, NodeID: ref.NodeID}}))
 	}
-	v.must(v.e.Accept(ctx, ref, []Item{{Key: key, Reason: reason, App: "jellyfin", Since: v.now}}))
+	v.must(accept(v.e, ctx, ref, []Item{{Key: key, Reason: reason, App: "jellyfin", Since: v.now}}))
 }
 
 func (v *env) tick() bool {
@@ -208,7 +208,7 @@ func TestAcceptDropsBadItems(t *testing.T) {
 	a := v.box("A", "1", 8*day, true)
 	ctx := context.Background()
 	v.must(v.st.RecordSeen(ctx, v.now, []store.Seen{{Key: "10.1.2.3/32", NodeID: "1"}, {Key: ip, NodeID: "1"}}))
-	v.must(v.e.Accept(ctx, a, []Item{
+	v.must(accept(v.e, ctx, a, []Item{
 		{Key: "10.1.2.3/32", Reason: "scan", App: "x", Since: v.now},
 		{Key: ip, Reason: "scan", App: "x"}, // zero since
 		{Key: "203.0.113.0/24", Reason: "scan", App: "x", Since: v.now},
@@ -218,7 +218,7 @@ func TestAcceptDropsBadItems(t *testing.T) {
 		t.Fatalf("reports = %+v, %v", rs, err)
 	}
 	// A bare address is stored as its key.
-	v.must(v.e.Accept(ctx, a, []Item{{Key: "203.0.113.7", Reason: "scan", App: "x", Since: v.now}}))
+	v.must(accept(v.e, ctx, a, []Item{{Key: "203.0.113.7", Reason: "scan", App: "x", Since: v.now}}))
 	if rs, err := v.st.ReportsSince(ctx, time.Time{}); err != nil || len(rs) != 1 || rs[0].Key != ip || rs[0].FleetID != "A" {
 		t.Fatalf("reports = %+v, %v", rs, err)
 	}
@@ -297,7 +297,7 @@ func TestEndedBanDoesNotReopenOnItsOwnReports(t *testing.T) {
 	v.must(v.st.RecordSeen(context.Background(), v.now, []store.Seen{{Key: ip, NodeID: "1"}, {Key: ip, NodeID: "2"}}))
 	ctx := context.Background()
 	for _, r := range []store.BoxRef{a, b} {
-		v.must(v.e.Accept(ctx, r, []Item{{Key: ip, Reason: "scan", App: "x", Since: t0}}))
+		v.must(accept(v.e, ctx, r, []Item{{Key: ip, Reason: "scan", App: "x", Since: t0}}))
 	}
 	v.tick()
 	v.at(v.now.Add(day))
@@ -444,15 +444,46 @@ func TestAcceptDropsSinceOutOfBounds(t *testing.T) {
 	a := v.box("A", "1", 8*day, true)
 	ctx := context.Background()
 	v.must(v.st.RecordSeen(ctx, v.now, []store.Seen{{Key: ip, NodeID: "1"}}))
-	v.must(v.e.Accept(ctx, a, []Item{
+	v.must(accept(v.e, ctx, a, []Item{
 		{Key: ip, Reason: "scan", App: "x", Since: v.now.Add(-day - time.Second)},
 		{Key: ip, Reason: "scan", App: "x", Since: v.now.Add(3 * time.Minute)},
 	}))
 	if rs, err := v.st.ReportsSince(ctx, time.Time{}); err != nil || len(rs) != 0 {
 		t.Fatalf("reports = %+v, %v", rs, err)
 	}
-	v.must(v.e.Accept(ctx, a, []Item{{Key: ip, Reason: "scan", App: "x", Since: v.now.Add(-day + time.Minute)}}))
+	v.must(accept(v.e, ctx, a, []Item{{Key: ip, Reason: "scan", App: "x", Since: v.now.Add(-day + time.Minute)}}))
 	if rs, err := v.st.ReportsSince(ctx, time.Time{}); err != nil || len(rs) != 1 {
 		t.Fatalf("reports = %+v, %v", rs, err)
+	}
+}
+
+func accept(e *Engine, ctx context.Context, ref store.BoxRef, items []Item) error {
+	_, err := e.Accept(ctx, ref, items)
+	return err
+}
+
+func TestAcceptReturnsAcceptedCount(t *testing.T) {
+	v := newEnv(t)
+	a := v.box("fleet-a", "node-a", 30*24*time.Hour, true)
+	v.must(v.st.RecordSeen(context.Background(), v.now, []store.Seen{{Key: "203.0.113.7/32", NodeID: a.NodeID}}))
+	n, err := v.e.Accept(context.Background(), a, []Item{
+		{Key: "203.0.113.7", Reason: "scan", App: "x", Since: v.now},
+		{Key: "203.0.113.8", Reason: "scan", App: "x", Since: v.now}, // never seen: dropped
+	})
+	if err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+}
+
+func TestOnOpenCalledPerBan(t *testing.T) {
+	v := newEnv(t)
+	var got []store.CommunityBan
+	v.e.OnOpen = func(b store.CommunityBan) { got = append(got, b) }
+	a, b := v.box("fleet-a", "node-a", 30*24*time.Hour, true), v.box("fleet-b", "node-b", 30*24*time.Hour, true)
+	v.report(a, "203.0.113.7/32", "scan", true)
+	v.report(b, "203.0.113.7/32", "scan", true)
+	v.tick()
+	if len(got) != 1 || got[0].Key != "203.0.113.7/32" || got[0].Fleets != 2 {
+		t.Fatalf("%+v", got)
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"path/filepath"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/ReCasaOS/recasaos-relay/internal/community"
 	"github.com/ReCasaOS/recasaos-relay/internal/feeds"
 	"github.com/ReCasaOS/recasaos-relay/internal/geo"
+	"github.com/ReCasaOS/recasaos-relay/internal/journal"
 	"github.com/ReCasaOS/recasaos-relay/internal/protect"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
 )
@@ -21,21 +23,36 @@ type protection struct {
 	geo      *geo.DB
 	compiler *protect.Compiler
 	engine   *community.Engine
+	journal  *journal.Writer // nil: no journal
 }
 
 // newProtection keeps its files next to the store: <data>/feeds/ and <data>/geo/. Without sharing
 // it holds the store only: nothing is filtered or downloaded, but the loop still applies the
 // retention to what sharing left in relay.db (sharing may have been turned off).
-func newProtection(st store.Store, storePath string, sharing bool, maxEntries int, minFleetAge time.Duration) *protection {
+func newProtection(st store.Store, storePath string, sharing bool, maxEntries int, minFleetAge time.Duration, jw *journal.Writer) *protection {
 	if !sharing {
-		return &protection{store: st}
+		return &protection{store: st, journal: jw}
 	}
 	data := filepath.Dir(storePath)
 	g := &geo.DB{Dir: filepath.Join(data, "geo")}
 	f := &feeds.Fetcher{Store: st, Dir: filepath.Join(data, "feeds"), TotalMax: maxEntries}
 	c := &protect.Compiler{Store: st, Feeds: f, Geo: g}
 	e := &community.Engine{Store: st, Allowed: c.Allowed, MinFleetAge: minFleetAge}
-	return &protection{store: st, feeds: f, geo: g, compiler: c, engine: e}
+	f.OnResult = func(name string, count int, err error) {
+		if err != nil { // already stripped of the URL; the name is the operator's own label
+			jw.Write(journal.Entry{Src: "relay", Event: "feed_fail", Msg: name + ": " + err.Error()})
+			return
+		}
+		jw.Write(journal.Entry{Src: "relay", Event: "feed_ok", Msg: fmt.Sprintf("%s: %d entries", name, count)})
+	}
+	e.OnOpen = func(b store.CommunityBan) {
+		length := "permanent"
+		if !b.Until.IsZero() {
+			length = fmt.Sprintf("%d h", int(b.Until.Sub(b.Since).Round(time.Hour)/time.Hour))
+		}
+		jw.Write(journal.Entry{Src: "relay", Event: "ban_open", IP: b.Key, Msg: fmt.Sprintf("community ban · %d fleets · %s", b.Fleets, length)})
+	}
+	return &protection{store: st, feeds: f, geo: g, compiler: c, engine: e, journal: jw}
 }
 
 // run ticks at once (to open the DB-IP files, with sharing), then every `every` until ctx is done; it returns
@@ -87,6 +104,7 @@ func (p *protection) tick(ctx context.Context) {
 			log.Printf("protection: DB-IP update: %v", err)
 		}
 		if changed {
+			p.journal.Write(journal.Entry{Src: "relay", Event: "geo_ok", Msg: "DB-IP " + p.geo.Version()})
 			p.compiler.Invalidate()
 		}
 	}

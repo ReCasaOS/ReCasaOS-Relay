@@ -256,6 +256,8 @@ func remoteAddr(c net.Conn) (netip.Addr, bool) {
 type filterHolder struct {
 	cur atomic.Pointer[filter]
 
+	cuts cutLog // filter cuts in the journal
+
 	// touched by the poller only
 	loggedNone, down bool
 }

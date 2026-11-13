@@ -31,6 +31,9 @@ type Fetcher struct {
 	Client   *http.Client
 	Now      func() time.Time
 	TotalMax int // total of enabled feeds' entries; <= 0 means no cap
+	// OnResult is called after each download attempt with the feed's name, its entry count and
+	// the error (never carrying the URL); nil: nothing.
+	OnResult func(name string, count int, err error)
 }
 
 func (f *Fetcher) now() time.Time {
@@ -110,6 +113,9 @@ func (f *Fetcher) fetch(ctx context.Context, fd store.Feed, all []store.Feed) (r
 	}
 	if rerr := f.Store.FeedResult(ctx, fd.ID, at, n, msg); rerr != nil && err == nil {
 		err = rerr
+	}
+	if f.OnResult != nil {
+		f.OnResult(fd.Name, n, err)
 	}
 	return replaced, err
 }

@@ -36,6 +36,8 @@ type Engine struct {
 	Allowed func(netip.Prefix) bool
 	// MinFleetAge is how old a fleet must be for its reports to count; zero means 7 days.
 	MinFleetAge time.Duration
+	// OnOpen is called for each ban opened; nil: nothing.
+	OnOpen func(store.CommunityBan)
 }
 
 type Item struct {
@@ -89,20 +91,22 @@ func (e *Engine) allowed(p netip.Prefix) bool { return e.Allowed != nil && e.All
 
 // Accept stores the items of box ref that pass the acceptance rules and drops the others
 // silently: sharing on, fleet old enough with a share name, and the address seen reaching this
-// box through the relay from 24 h before the ban started. Field rules are the route's job.
-func (e *Engine) Accept(ctx context.Context, ref store.BoxRef, items []Item) error {
+// box through the relay from 24 h before the ban started. Field rules are the route's job. It
+// returns how many items it stored.
+func (e *Engine) Accept(ctx context.Context, ref store.BoxRef, items []Item) (int, error) {
 	now := e.now()
 	p, ok, err := e.Store.GetProtection(ctx, ref.NodeID)
 	if err != nil || !ok || !p.ShareBans {
-		return err
+		return 0, err
 	}
 	age := e.MinFleetAge
 	if age == 0 {
 		age = 7 * day
 	}
 	if ok, err := e.Store.FleetEligible(ctx, ref.FleetID, now.Add(-age)); err != nil || !ok {
-		return err
+		return 0, err
 	}
+	n := 0
 	for _, it := range items {
 		key, ok := Key(it.Key)
 		if !ok || it.Since.IsZero() || it.Since.Before(now.Add(-day)) || it.Since.After(now.Add(maxAhead)) {
@@ -110,17 +114,18 @@ func (e *Engine) Accept(ctx context.Context, ref store.BoxRef, items []Item) err
 		}
 		seen, err := e.Store.SeenBetween(ctx, key, ref.NodeID, it.Since.Add(-day), now)
 		if err != nil {
-			return err
+			return n, err
 		}
 		if !seen {
 			continue
 		}
 		r := store.Report{NodeID: ref.NodeID, FleetID: ref.FleetID, Key: key, Reason: it.Reason, App: it.App, Since: it.Since}
 		if err := e.Store.AddReport(ctx, r, now); err != nil {
-			return err
+			return n, err
 		}
+		n++
 	}
-	return nil
+	return n, nil
 }
 
 // evidence is what opens a ban: the fleets and reasons behind it.
@@ -162,10 +167,17 @@ func (e *Engine) open(ctx context.Context, key, kind string, now time.Time, ev e
 		until = now.Add(d)
 	}
 	openers := sortedKeys(ev.fleets)
-	return e.Store.OpenBan(ctx, store.CommunityBan{
+	b := store.CommunityBan{
 		Key: key, Kind: kind, Strike: strike, Since: now, Until: until,
 		Reasons: strings.Join(sortedKeys(ev.reasons), ","), Fleets: len(openers),
-	}, openers)
+	}
+	if err := e.Store.OpenBan(ctx, b, openers); err != nil {
+		return err
+	}
+	if e.OnOpen != nil {
+		e.OnOpen(b)
+	}
+	return nil
 }
 
 // rangeOf is the /24 or /48 holding an address key.

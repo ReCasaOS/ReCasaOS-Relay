@@ -23,6 +23,7 @@ import (
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/geo"
 	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
+	"github.com/ReCasaOS/recasaos-relay/internal/journal"
 	"github.com/ReCasaOS/recasaos-relay/internal/meter"
 	"github.com/ReCasaOS/recasaos-relay/internal/protect"
 	"github.com/ReCasaOS/recasaos-relay/internal/ratelimit"
@@ -108,6 +109,12 @@ type Deps struct {
 	Feeds   *feeds.Fetcher
 	Geo     *geo.DB
 	Protect *protect.Compiler
+	// Journal receives the operator's protection actions; nil: none are written.
+	Journal *journal.Writer
+	// JournalReader reads the journal for /admin/journal; nil: the page says it is off.
+	JournalReader *journal.Reader
+	// Shutdown, closed when the server shuts down, ends the live journals (they would hold Shutdown).
+	Shutdown <-chan struct{}
 }
 
 type handler struct {
@@ -117,6 +124,7 @@ type handler struct {
 	csrf      string
 	nodeFetch chan struct{} // bounds the Headscale calls of one page load
 	limiter   *ratelimit.Limiter
+	streams   chan struct{} // live journals open
 }
 
 // New returns the admin handler. The token must be at least MinTokenLen long.
@@ -130,7 +138,7 @@ func New(cfg Config, deps Deps) (http.Handler, error) {
 	sum := sha256.Sum256([]byte("csrf:" + cfg.Token))
 	h := &handler{cfg: cfg, deps: deps, tokenSum: sha256.Sum256([]byte(cfg.Token)),
 		csrf: hex.EncodeToString(sum[:]), nodeFetch: make(chan struct{}, 8),
-		limiter: ratelimit.New(requestsPerHour, deps.Now)}
+		limiter: ratelimit.New(requestsPerHour, deps.Now), streams: make(chan struct{}, maxStreams)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /admin/{$}", h.index)
 	mux.HandleFunc("POST /admin/fleets/{id}/delete", h.deleteFleet)
@@ -139,6 +147,8 @@ func New(cfg Config, deps Deps) (http.Handler, error) {
 	mux.HandleFunc("POST /admin/share/names/{name}/revoke", h.ban)
 	mux.HandleFunc("POST /admin/share/banned/{name}/delete", h.unban)
 	mux.HandleFunc("GET /admin/protection", h.protection)
+	mux.HandleFunc("GET /admin/journal", h.journal)
+	mux.HandleFunc("GET /admin/journal/stream", h.journalStream)
 	mux.HandleFunc("POST /admin/protection/feeds", h.addFeed)
 	mux.HandleFunc("POST /admin/protection/feeds/presets/{key}", h.addPreset)
 	mux.HandleFunc("POST /admin/protection/feeds/{id}", h.editFeed)
@@ -159,7 +169,7 @@ func New(cfg Config, deps Deps) (http.Handler, error) {
 func (h *handler) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'")
 		ip := h.client(r)
 		// Checked before the token, so a correct guess past the limit is not revealed.
 		if h.limiter.Blocked(ip) {

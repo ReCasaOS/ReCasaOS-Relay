@@ -3,6 +3,14 @@
 # operator replaces with their own host through an override, docs/self-hosting.md) sends boxes to /derp on the public host, which `front` proxies to derper; only its STUN port is published.
 # derper admits a node only if Headscale's /verify knows its key, and refuses everyone when Headscale
 # cannot be reached (fail-closed).
+
+# Docker's log of a container, capped at 3 files of 10 MB (by size, not by age).
+x-capped-logs: &capped-logs
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   headscale:
     image: headscale/headscale:v0.29.7
@@ -42,8 +50,12 @@ services:
       - headscale
       - derper
       - enrolment
+    # Its access log goes to `enrolment` (port 8083, the Caddyfile's `(journal)`), which keeps it in its journal.
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    # Docker's log of the container is capped: its output carries client addresses (front prints its access
+    # log there while `enrolment` cannot take it).
+    logging: *capped-logs
     # Plain HTTP: put your TLS reverse proxy in front of this port (it serves Headscale and /v1/*).
     # With public sharing, 80/443 move to `share` and this list is emptied by the docs override (docs/self-hosting.md, section 14).
     ports:
@@ -94,16 +106,29 @@ services:
       # The caps `share` enforces, read here only to show them on /admin: keep them equal to share's below.
       CONNS_PER_IP: ${CONNS_PER_IP:-256}
       CONNS_PER_IP_PER_BOX: ${CONNS_PER_IP_PER_BOX:-64}
+      # Journal: days kept (at most 168h) and the size cap, in bytes, of each of its two journals (its own, front's).
+      LOG_KEEP: ${LOG_KEEP:-168h}
+      LOG_MAX_SIZE: ${ENROLMENT_LOG_MAX_SIZE:-268435456}
+      # Set empty in .env: no journal (ENROLMENT_LOG_DIR), or no front access log (LOG_INGEST_ADDR). Either way also
+      # remove `import journal` from the Caddyfile, or front prints its access log on its own output instead.
+      LOG_DIR: ${ENROLMENT_LOG_DIR-/data/logs}
+      LOG_INGEST_ADDR: ${LOG_INGEST_ADDR-:8083}
     volumes:
       - enrolment-data:/data
+      # share's log, read for /admin/journal (enrolment's own and front's are in /data/logs).
+      - share-logs:/logs/share:ro
     # Reached only through `front` (Caddyfile): never publish this port, the rate limiter trusts X-Client-IP.
+    # 8083 takes front's access log (LOG_INGEST_ADDR, empty: off); never publish nor route it either.
     expose:
       - "8081"
+      - "8083"
     # With SHARE_DOMAIN set it also serves the delegated DNS zone on 53 (UDP and TCP; SHARE_PUBLIC_IP required).
     # Port 53 is published only by the `compose.share.yaml` override of the docs (docs/self-hosting.md, section 14),
     # on the public IP explicitly (<ip>:53:53/udp and /tcp), never on 0.0.0.0: systemd-resolved holds 127.0.0.53:53.
     # The SHARE_* variables are set by that override too.
     stop_grace_period: 40s # in-flight create-fleet calls may take up to 30 s
+    # Capped like front's: its output carries client addresses too.
+    logging: *capped-logs
 
   # Optional (docker compose --profile share): reads the TLS server name on 80/443 and forwards to `front`
   # (or, for shared boxes, into their tunnel). In production its ports are 80/443 and the `front` ports move
@@ -133,14 +158,24 @@ services:
       TUNNEL_RATE_PER_HOUR: ${TUNNEL_RATE_PER_HOUR:-60}
       CONNS_PER_IP: ${CONNS_PER_IP:-256}
       CONNS_PER_IP_PER_BOX: ${CONNS_PER_IP_PER_BOX:-64}
+      # Journal: days kept (at most 168h) and the size cap of share's log files, in bytes.
+      LOG_KEEP: ${LOG_KEEP:-168h}
+      LOG_MAX_SIZE: ${SHARE_LOG_MAX_SIZE:-1073741824}
+      # Set empty in .env: no journal.
+      LOG_DIR: ${SHARE_LOG_DIR-/logs}
+    volumes:
+      - share-logs:/logs
     # ports:
     #   - "80:80"
     #   - "443:443"
     stop_grace_period: 40s
+    # Capped like front's: its output carries client addresses too.
+    logging: *capped-logs
 
 volumes:
   headscale-data:
   enrolment-data:
+  share-logs:
 
 configs:
   derper-debug-key:

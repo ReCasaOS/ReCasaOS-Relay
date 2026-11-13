@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/community"
+	"github.com/ReCasaOS/recasaos-relay/internal/journal/journaltest"
 	"github.com/ReCasaOS/recasaos-relay/internal/protect"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
 )
@@ -207,4 +208,30 @@ func TestProtectRoutesHaveTheirOwnLimiter(t *testing.T) {
 	wantStatus(t, e.as(b, "GET", "/v1/share", ""), 429, "")
 	wantStatus(t, e.as(b, "PUT", "/v1/share/protection", `{"relay_filter":true}`), 200, "")
 	wantStatus(t, e.as(b, "GET", "/v1/share/refusals", ""), 200, "")
+}
+
+func TestJournalProtectionPut(t *testing.T) {
+	jw, read := journaltest.New(t, "enrolment")
+	e := &shareEnv{delEnv: setupDelDeps(t, func(c *Config) { c.ShareDomain = "share.example"; c.TrustedProxyHeader = "X-Client-IP" },
+		func(d *Deps) { d.Community = &community.Engine{Store: d.Store, Now: d.Now}; d.Journal = jw })}
+	b := e.linked(t, "box-a")
+	wantStatus(t, e.as(b, "PUT", "/v1/share/protection", `{"relay_filter":true,"share_bans":false}`), 200, "")
+	wantStatus(t, e.as(b, "PUT", "/v1/share/protection", `{"relay_filter":true,"share_bans":false}`), 200, "") // resync: no new line
+	wantStatus(t, e.as(b, "PUT", "/v1/share/protection", `{"relay_filter":true,"share_bans":true}`), 200, "")
+	wantStatus(t, e.as(b, "POST", "/v1/share/bans", `{"bans":[]}`), 204, "")
+	var n int
+	for _, l := range read() {
+		if l.Event == "protection" {
+			n++
+			if want := b.node + " relay_filter=true share_bans=" + map[int]string{1: "false", 2: "true"}[n]; l.Src != "relay" || l.Msg != want {
+				t.Fatalf("%+v", l)
+			}
+		}
+		if l.Event == "reports" {
+			t.Fatalf("a post that accepts nothing writes no line: %+v", l)
+		}
+	}
+	if n != 2 {
+		t.Fatalf("protection lines: %d", n)
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net"
@@ -22,6 +23,7 @@ import (
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/gc"
 	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
+	"github.com/ReCasaOS/recasaos-relay/internal/journal"
 	"github.com/ReCasaOS/recasaos-relay/internal/meter"
 	"github.com/ReCasaOS/recasaos-relay/internal/policy"
 	"github.com/ReCasaOS/recasaos-relay/internal/server"
@@ -30,6 +32,25 @@ import (
 
 // version is set at build time (-ldflags "-X main.version=v1.2.3"); the admin page shows it.
 var version = "dev"
+
+// readDirs splits a comma-separated list of folders, without spaces or empty items.
+func readDirs(s string) []string {
+	var out []string
+	for _, d := range strings.Split(s, ",") {
+		if d = strings.TrimSpace(d); d != "" {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// lookupenv is def only when key is unset: set empty, it stays empty (an off switch).
+func lookupenv(key, def string) string {
+	if v, ok := os.LookupEnv(key); ok {
+		return v
+	}
+	return def
+}
 
 func getenv(key, def string) string {
 	if v := os.Getenv(key); v != "" {
@@ -51,6 +72,38 @@ func envPositive(key string, def int) (int, error) {
 	return n, nil
 }
 
+// journalLimits reads LOG_KEEP (at most 7 days) and LOG_MAX_SIZE (bytes, default 256 MiB).
+func journalLimits() (keep time.Duration, size int64, err error) {
+	if keep, err = time.ParseDuration(getenv("LOG_KEEP", "168h")); err != nil || keep <= 0 || keep > 168*time.Hour {
+		return 0, 0, fmt.Errorf("LOG_KEEP: want a duration above 0 and at most 168h, got %q", os.Getenv("LOG_KEEP"))
+	}
+	if size, err = strconv.ParseInt(getenv("LOG_MAX_SIZE", "268435456"), 10, 64); err != nil || size <= 0 {
+		return 0, 0, fmt.Errorf("LOG_MAX_SIZE: want a positive number of bytes, got %q", os.Getenv("LOG_MAX_SIZE"))
+	}
+	return keep, size, nil
+}
+
+// openJournal opens the journal; the relay must not stop because of its log, so a failure is
+// reported on stderr and gives nil (no journal).
+func openJournal(dir, svc string, keep time.Duration, size int64) *journal.Writer {
+	jw, err := journal.Open(dir, svc, keep, size, time.Now)
+	if err != nil {
+		log.Printf("journal disabled: %v", err)
+		return nil
+	}
+	return jw
+}
+
+// closeJournal flushes the journal, but a hanging disk must not hold the shutdown for more than 5 s.
+func closeJournal(jw *journal.Writer) {
+	done := make(chan struct{})
+	go func() { jw.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+	}
+}
+
 func main() {
 	if err := run(); err != nil {
 		log.Fatal(err)
@@ -61,6 +114,29 @@ func run() error {
 	cfg, err := server.ConfigFromEnv()
 	if err != nil {
 		return err
+	}
+	var jw *journal.Writer // nil with LOG_DIR set empty: every journal call is then a no-op
+	if dir := lookupenv("LOG_DIR", "/data/logs"); dir != "" {
+		keep, size, err := journalLimits()
+		if err != nil {
+			return err
+		}
+		if jw = openJournal(dir, "enrolment", keep, size); jw != nil {
+			log.SetOutput(io.MultiWriter(os.Stderr, jw.Log()))
+			defer closeJournal(jw)
+		}
+		// front's access log (the Caddyfile's `(journal)`) in front-*.jsonl next to ours; set empty: off.
+		if addr := lookupenv("LOG_INGEST_ADDR", ":8083"); addr != "" {
+			if fw := openJournal(dir, "front", keep, size); fw != nil {
+				defer closeJournal(fw)
+				if l, err := net.Listen("tcp", addr); err != nil {
+					log.Printf("front access log not kept: %v", err)
+				} else {
+					defer l.Close()
+					go serveIngest(l, fw)
+				}
+			}
+		}
 	}
 	apiKey := os.Getenv("HEADSCALE_API_KEY")
 	if apiKey == "" {
@@ -99,13 +175,18 @@ func run() error {
 	// Relay-side protection of shared apps, only with sharing: the filter routes `share` polls exist
 	// only then, and without them nothing would use the feeds or DB-IP. Its retention runs either
 	// way (nil pointers below: the handlers and the page treat them as absent).
-	prot := newProtection(st, storePath, cfg.ShareDomain != "", cfg.FilterMaxEntries, cfg.CommunityMinFleetAge)
+	prot := newProtection(st, storePath, cfg.ShareDomain != "", cfg.FilterMaxEntries, cfg.CommunityMinFleetAge, jw)
 	srvDeps := server.Deps{Store: st, Headscale: hs, PolicyHook: pol.Hook, Remover: remover,
-		Protect: prot.compiler, Community: prot.engine}
+		Protect: prot.compiler, Community: prot.engine, Journal: jw}
 	// The operator page, under /admin, only when ADMIN_TOKEN is set (404 otherwise).
 	var adminH http.Handler
+	stopStreams := make(chan struct{}) // closed by srv.Shutdown: the live journals must not hold it
 	if tok := os.Getenv("ADMIN_TOKEN"); tok != "" {
-		deps := admin.Deps{Store: st, Headscale: hs, Remover: remover}
+		deps := admin.Deps{Store: st, Headscale: hs, Remover: remover, Journal: jw, Shutdown: stopStreams}
+		// Read by /admin/journal: ours and front's (ingested) in /data/logs, share's volume; set empty: off.
+		if dirs := readDirs(lookupenv("LOG_READ_DIRS", "/data/logs,/logs/share")); dirs != nil {
+			deps.JournalReader = &journal.Reader{Dirs: dirs}
+		}
 		if mtr != nil { // never put a nil *Meter in the interface
 			deps.Meter = mtr
 		}
@@ -127,6 +208,7 @@ func run() error {
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    16 << 10,
 	}
+	srv.RegisterOnShutdown(func() { close(stopStreams) })
 
 	// The delegated zone box.<SHARE_DOMAIN>, only when sharing is on; bound now so a bad address or a
 	// busy port stops the start instead of failing later.

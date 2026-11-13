@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPolicyIsAppliedBeforeServing(t *testing.T) {
@@ -24,6 +27,25 @@ func TestNeverServesWithoutPolicy(t *testing.T) {
 		func() error { served = true; return nil })
 	if err == nil || served {
 		t.Fatalf("startup must fail without serving (err=%v, served=%v)", err, served)
+	}
+}
+
+func TestLookupenvKeepsEmpty(t *testing.T) {
+	t.Setenv("RELAY_TEST_SWITCH", "")
+	if got := lookupenv("RELAY_TEST_SWITCH", "on"); got != "" {
+		t.Fatalf("set empty: %q, want empty (off)", got)
+	}
+	if got := lookupenv("RELAY_TEST_UNSET_SWITCH", "on"); got != "on" {
+		t.Fatalf("unset: %q, want the default", got)
+	}
+}
+
+func TestReadDirs(t *testing.T) {
+	if got := readDirs(" /data/logs , ,/logs/share,"); strings.Join(got, "|") != "/data/logs|/logs/share" {
+		t.Fatalf("%q", got)
+	}
+	if readDirs(" ") != nil {
+		t.Fatal("blank is not off")
 	}
 }
 
@@ -62,4 +84,14 @@ func TestListenZoneRefusesLongPSLTXT(t *testing.T) {
 	}
 	pc.Close()
 	l.Close()
+}
+
+func TestOpenJournalFailureGivesNil(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "afile")
+	if err := os.WriteFile(f, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if jw := openJournal(f, "enrolment", time.Hour, 1<<20); jw != nil {
+		t.Fatal("want nil journal")
+	}
 }

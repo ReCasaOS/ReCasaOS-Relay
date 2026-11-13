@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Relay journal</title>
+<style>
+{{template "css"}}
+.card { margin-bottom:1rem; }
+.filters { display:flex; flex-wrap:wrap; align-items:center; gap:.5rem 1rem; padding:.75rem 1rem; }
+.filters label { display:inline-flex; align-items:center; gap:.375rem; }
+.filters input[type=search], .filters select { height:2.25rem; padding:0 .75rem; border:1px solid var(--line); border-radius:.625rem; background:var(--bg); color:var(--fg); font:inherit; }
+.filters input[type=search] { flex:1 1 14rem; min-width:0; }
+.filters button { height:2.25rem; border-radius:1.125rem; padding:0 .875rem; }
+.bar2 { display:flex; align-items:center; gap:.5rem; padding:.5rem 1rem; border-top:1px solid var(--line); }
+.bar2 .grow { flex:1; min-width:0; }
+#feed { border-top:1px solid var(--line); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.8rem; }
+.ln { display:grid; grid-template-columns:8.5rem 3.5rem 9.5rem minmax(10rem,18rem) 1fr; gap:0 .75rem; padding:.2rem 1rem; border-left:3px solid transparent; }
+.ln + .ln { border-top:1px solid var(--line); }
+.ln > * { min-width:0; overflow-wrap:anywhere; }
+.ln .tm { color:var(--mut); white-space:nowrap; }
+.ln .src { font-weight:600; } .src.share { color:var(--s1); } .src.front { color:var(--s2); } .src.relay { color:var(--s3); } .src.log { color:var(--mut); }
+.ln.ok { border-left-color:var(--ok); } .ln.bad { border-left-color:var(--bad); background:var(--badbg); } .ln.warn { border-left-color:var(--warn); }
+.ln.bad .tx { color:var(--bad); } .ln.warn .tx { color:var(--warn); }
+button.q { height:auto; padding:0; border:0; border-radius:0; background:none; color:var(--fg); font:inherit; text-align:left; cursor:pointer; overflow-wrap:anywhere; }
+button.q:hover { background:none; color:var(--accent); text-decoration:underline; }
+@media (max-width: 768px) { .ln { grid-template-columns:auto auto 1fr; } .ln .tx { grid-column:1 / -1; } .ln .host { grid-column:1 / -1; } }
+.more { display:flex; flex-wrap:wrap; gap:.75rem; align-items:center; padding:.625rem 1rem; border-top:1px solid var(--line); }
+.more a { color:var(--accent); font-weight:600; } .more:empty { display:none; }
+</style>
+</head>
+<body>
+<div class="head">
+<span class="tile" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 10h16M4 15h10M4 20h7"/></svg></span>
+<div class="t"><h1>Relay journal</h1><span class="mut xs">Visitors of shared apps, requests to the relay, relay events and service messages, newest first. Times in UTC.</span></div>
+<a class="chip" href="/admin/">Relay admin</a>
+<a class="chip" href="/admin/protection">Protection</a>
+</div>
+{{define "line"}}<div class="ln {{.Class}}" data-time="{{.Time}}"><span class="tm" title="{{.Time}}">{{.When}}</span><span class="src {{.Src}}">{{.Src}}</span><span class="ip">{{if .IP}}<button type="button" class="q">{{.IP}}</button>{{end}}</span><span class="host">{{if .Host}}<button type="button" class="q">{{.Host}}</button>{{end}}</span><span class="tx">{{.Text}}</span></div>{{end}}
+<section class="card">
+<form id="filters" method="get" action="/admin/journal" class="filters">
+{{range .Sources}}<label><input type="checkbox" name="src" value="{{.Key}}"{{if .On}} checked{{end}}>{{.Label}}</label>{{end}}
+<label><input type="checkbox" name="problems" value="1"{{if .Problems}} checked{{end}}>Problems only</label>
+<input type="search" name="q" value="{{.Q}}" maxlength="200" placeholder="address, host, path, reason…" aria-label="Search">
+<select name="range" aria-label="Period">{{range .Ranges}}<option value="{{.Key}}"{{if eq .Key $.Range}} selected{{end}}>{{.Label}}</option>{{end}}</select>
+<button class="plain">Show</button>
+</form>
+{{if .Off}}<p class="mut pad">The journal is off on this relay: <code>LOG_READ_DIRS</code> is empty.</p>
+{{else}}
+<div class="bar2">
+<span class="grow mut xs" id="note">{{if .Busy}}<span class="err">Another search is running, try again in a moment.</span>{{else if .Live}}{{else if .Before}}Older lines, up to {{.Before}}.{{else}}Live only on the last hour.{{end}}</span>
+{{if .Live}}<span class="chip ok" id="live"><span class="dot on"></span>live</span><button type="button" class="plain" id="pause">Pause</button>{{end}}
+</div>
+<div id="feed"{{if .Live}} data-live{{end}}>{{range .Lines}}{{template "line" .}}{{end}}</div>
+{{if and (not .Lines) (not .Busy) (not .Empty)}}<p class="mut pad" id="none">No line in this period.</p>{{end}}
+<div class="more" id="more">{{with .Older}}<a id="older" href="{{.}}">Older</a>{{end}}{{if .SearchOn}}<span class="mut xs">{{if .Empty}}The search stopped before finding anything: narrow the period or the filters.{{else}}The search stopped at its limit ({{.Budget}} per page) before the start of the period.{{end}}</span> <a href="{{.SearchOn}}">Search on</a>{{end}}</div>
+{{end}}
+</section>
+{{if .Version}}<footer class="mut xs foot">relay {{.Version}}</footer>{{end}}
+<script>
+(function () {
+var feed = document.getElementById('feed'), form = document.getElementById('filters')
+if (!feed) return
+// Clicking an address or a host searches for it.
+feed.addEventListener('click', function (ev) {
+  var b = ev.target.closest('button.q')
+  if (!b) return
+  form.elements.q.value = b.textContent
+  form.submit()
+})
+if (!feed.hasAttribute('data-live') || !window.EventSource) return
+var maxRows = 2000, paused = false, waiting = [], lost = 0, overflow = 0
+var note = document.getElementById('note'), live = document.getElementById('live'), pause = document.getElementById('pause')
+function span(cls, text) {
+  var s = document.createElement('span')
+  s.className = cls
+  if (text) {
+    var b = document.createElement('button')
+    b.type = 'button'
+    b.className = 'q'
+    b.textContent = text
+    s.appendChild(b)
+  }
+  return s
+}
+function row(l) {
+  var d = document.createElement('div'), tm = document.createElement('span'), src = document.createElement('span'), tx = document.createElement('span')
+  d.className = 'ln ' + (l.cls || '')
+  d.dataset.time = l.time || ''
+  tm.className = 'tm'; tm.title = l.time || ''; tm.textContent = l.when || ''
+  src.className = 'src ' + (l.src || ''); src.textContent = l.src || ''
+  tx.className = 'tx'; tx.textContent = l.text || ''
+  d.append(tm, src, span('ip', l.ip), span('host', l.host), tx)
+  return d
+}
+// Rows past maxRows leave at the bottom; Older then starts just after the newest of them.
+function trim() {
+  var gone = null
+  while (feed.children.length > maxRows) gone = feed.removeChild(feed.lastElementChild)
+  if (!gone) return
+  var a = document.getElementById('older')
+  if (!a) {
+    a = document.createElement('a')
+    a.id = 'older'
+    a.textContent = 'Older'
+    document.getElementById('more').prepend(a)
+  }
+  var p = new URLSearchParams(location.search)
+  p.set('before', new Date(Date.parse(gone.dataset.time) + 1).toISOString())
+  a.href = '?' + p
+}
+function show(l) {
+  feed.prepend(row(l))
+  var none = document.getElementById('none')
+  if (none) none.remove()
+  trim()
+}
+function say() {
+  var parts = []
+  if (paused) parts.push((waiting.length + overflow) + ' new line(s) waiting')
+  if (lost) parts.push(lost + ' line(s) not shown: too many at once, pause or filter')
+  note.textContent = parts.join(' · ')
+}
+var es = new EventSource('/admin/journal/stream' + location.search)
+es.onopen = function () { live.className = 'chip ok'; live.lastChild.textContent = 'live' }
+es.onerror = function () { live.className = 'chip warn'; live.lastChild.textContent = es.readyState === 2 ? 'stopped: reload the page' : 'reconnecting' }
+es.onmessage = function (m) {
+  var l
+  try { l = JSON.parse(m.data) } catch (e) { return }
+  if (l.dropped) { lost += l.dropped; say(); return }
+  if (!paused) return show(l)
+  if (waiting.length < maxRows) waiting.push(l); else overflow++
+  say()
+}
+pause.addEventListener('click', function () {
+  paused = !paused
+  pause.textContent = paused ? 'Resume' : 'Pause'
+  if (!paused) {
+    waiting.forEach(show)
+    lost += overflow
+    waiting = []; overflow = 0
+  }
+  say()
+})
+})()
+</script>
+</body>
+</html>

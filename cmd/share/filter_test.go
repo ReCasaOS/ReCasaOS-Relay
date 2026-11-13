@@ -165,7 +165,7 @@ func TestNoSnapshotLetsThrough(t *testing.T) {
 	go func() {
 		defer close(done)
 		defer c.Close()
-		handleTLS(filterCfg("127.0.0.1:1"), reg, newConnCap(5, "t"), &filterHolder{}, nil, fromAddr{c, testVisitor})
+		handleTLS(filterCfg("127.0.0.1:1"), reg, newConnCap(5, "t"), &filterHolder{}, nil, nil, fromAddr{c, testVisitor})
 	}()
 	v.Write(clientHello("app.alpha.box.relay.test"))
 	in, err := box.Accept()
@@ -191,7 +191,7 @@ func TestRelayHostNeverFiltered(t *testing.T) {
 	go func() {
 		defer close(done)
 		defer c.Close()
-		handleTLS(filterCfg(front), reg, newConnCap(5, "t"), h, nil, fromAddr{c, testVisitor})
+		handleTLS(filterCfg(front), reg, newConnCap(5, "t"), h, nil, nil, fromAddr{c, testVisitor})
 	}()
 	v.Write(ch)
 	v.(*net.TCPConn).CloseWrite()
@@ -209,7 +209,7 @@ func TestRelayHostNeverFiltered(t *testing.T) {
 	go func() {
 		defer close(done)
 		defer c.Close()
-		handleTLS(filterCfg("127.0.0.1:1"), reg, newConnCap(5, "t"), h, nil, fromAddr{c, testVisitor})
+		handleTLS(filterCfg("127.0.0.1:1"), reg, newConnCap(5, "t"), h, nil, nil, fromAddr{c, testVisitor})
 	}()
 	v.Write(clientHello("app.alpha.box.relay.test"))
 	if b, _ := io.ReadAll(v); len(b) != 0 {
@@ -352,7 +352,7 @@ func TestUnclaimedNameRecordsNoRefusal(t *testing.T) {
 		go func() {
 			defer close(done)
 			defer c.Close()
-			handleTLS(filterCfg("127.0.0.1:1"), reg, newConnCap(5, "t"), h, e, fromAddr{c, testVisitor})
+			handleTLS(filterCfg("127.0.0.1:1"), reg, newConnCap(5, "t"), h, e, nil, fromAddr{c, testVisitor})
 		}()
 		v.Write(clientHello(name))
 		if b, _ := io.ReadAll(v); len(b) != 0 {
