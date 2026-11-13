@@ -35,6 +35,9 @@ type fakeEnrolment struct {
 	filterDelay   time.Duration
 	notModified   int // 304 answers served
 	filterStatus  int // when set, answered instead (500: enrolment down)
+
+	eventsStatus int // when set, answered to /internal/share/events instead of 204
+	eventPosts   []eventsBody
 }
 
 func (f *fakeEnrolment) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -59,6 +62,17 @@ func (f *fakeEnrolment) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("ETag", etag)
 		io.WriteString(w, f.filterBody)
+	case r.URL.Path == "/internal/share/events":
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.eventsStatus != 0 {
+			http.Error(w, "refused", f.eventsStatus)
+			return
+		}
+		var b eventsBody
+		json.NewDecoder(r.Body).Decode(&b)
+		f.eventPosts = append(f.eventPosts, b)
+		w.WriteHeader(http.StatusNoContent)
 	case r.URL.Path == "/internal/share/usage":
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -136,7 +150,7 @@ func TestVisitorGoesThroughTunnel(t *testing.T) {
 			return
 		}
 		defer c.Close()
-		toTunnel(reg, newConnCap(tunnel.MaxStreams, "test"), "alpha", c, c)
+		toTunnel(reg, newConnCap(tunnel.MaxStreams, "test"), nil, "alpha", c, c)
 	}()
 	defer func() { <-done }()
 	visitor, err := net.Dial("tcp", l.Addr().String())
@@ -278,7 +292,7 @@ func TestTunnelStreamCap(t *testing.T) {
 	go func() {
 		defer close(done)
 		defer c.Close()
-		toTunnel(reg, newConnCap(tunnel.MaxStreams, "test"), "alpha", c, c)
+		toTunnel(reg, newConnCap(tunnel.MaxStreams, "test"), nil, "alpha", c, c)
 	}()
 	select {
 	case <-done:
@@ -310,7 +324,7 @@ func TestIdleVisitorIsClosed(t *testing.T) {
 	go func() {
 		defer close(done)
 		defer c.Close()
-		toTunnel(reg, newConnCap(tunnel.MaxStreams, "test"), "alpha", c, c)
+		toTunnel(reg, newConnCap(tunnel.MaxStreams, "test"), nil, "alpha", c, c)
 	}()
 	in, err := box.Accept()
 	if err != nil {

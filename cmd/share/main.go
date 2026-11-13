@@ -72,6 +72,8 @@ func run() error {
 		every(ctx, 30*time.Second, func(ctx context.Context) { fh.poll(ctx, cfg.EnrolmentURL) })
 	}()
 	go every(ctx, 15*time.Second, newUsage(reg, cfg.EnrolmentURL).tick)
+	ev := newEvents()
+	go every(ctx, 15*time.Second, func(ctx context.Context) { ev.flush(ctx, cfg.EnrolmentURL+"/internal/share/events") })
 	go func() {
 		<-ctx.Done()
 		lt.Close()
@@ -92,11 +94,11 @@ func run() error {
 	acceptors.Add(2)
 	go func() {
 		defer acceptors.Done()
-		accept(lt, &inflight, perIP, func(c net.Conn) { handleTLS(cfg, reg, perBox, fh, c) })
+		accept(lt, &inflight, perIP, ev, func(c net.Conn) { handleTLS(cfg, reg, perBox, fh, ev, c) })
 	}()
 	go func() {
 		defer acceptors.Done()
-		accept(lh, &inflight, perIP, func(c net.Conn) { toFront(c, cfg.FrontHTTP, cfg.FrontProxyProtocol) })
+		accept(lh, &inflight, perIP, ev, func(c net.Conn) { toFront(c, cfg.FrontHTTP, cfg.FrontProxyProtocol) })
 	}()
 	acceptors.Wait()
 
@@ -117,7 +119,7 @@ func run() error {
 
 // accept serves l until it is closed. A connection from an address that already holds perIP's max is
 // closed at once, before any byte is read.
-func accept(l net.Listener, wg *sync.WaitGroup, perIP *connCap, handle func(net.Conn)) {
+func accept(l net.Listener, wg *sync.WaitGroup, perIP *connCap, ev *events, handle func(net.Conn)) {
 	var delay time.Duration
 	for {
 		c, err := l.Accept()
@@ -138,6 +140,7 @@ func accept(l net.Listener, wg *sync.WaitGroup, perIP *connCap, handle func(net.
 		delay = 0
 		k := ipKey(c.RemoteAddr())
 		if !perIP.acquire(k) {
+			ev.refused("", connKey(c), "cap", "ip")
 			c.Close()
 			continue
 		}
@@ -146,7 +149,7 @@ func accept(l net.Listener, wg *sync.WaitGroup, perIP *connCap, handle func(net.
 	}
 }
 
-func handleTLS(cfg Config, reg *tunnel.Registry, perBox *connCap, fh *filterHolder, c net.Conn) {
+func handleTLS(cfg Config, reg *tunnel.Registry, perBox *connCap, fh *filterHolder, ev *events, c net.Conn) {
 	name, replay, err := sni.PeekServerName(c, cfg.PeekTimeout)
 	if err != nil && !errors.Is(err, sni.ErrNotTLS) {
 		return
@@ -160,12 +163,13 @@ func handleTLS(cfg Config, reg *tunnel.Registry, perBox *connCap, fh *filterHold
 		// reachable from any country. A refused visitor gets a plain close.
 		if f := fh.get(); f != nil {
 			if a, ok := remoteAddr(c); ok {
-				if reason, _ := f.decide(a, box); reason != "" {
+				if reason, source := f.decide(a, box); reason != "" {
+					ev.refused(box, eventKey(a), reason, source)
 					return
 				}
 			}
 		}
-		toTunnel(reg, perBox, box, c, replay)
+		toTunnel(reg, perBox, ev, box, c, replay)
 	}
 }
 

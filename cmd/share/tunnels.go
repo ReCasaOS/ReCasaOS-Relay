@@ -66,7 +66,7 @@ func resolver(enrolmentURL string) tunnel.Resolver {
 // toTunnel sends the visitor connection c (replay holds its peeked ClientHello) into box's tunnel,
 // unless c's address already holds perBox's max streams of that box: one address alone must not fill
 // the tunnel's tunnel.MaxStreams and lock every other visitor out.
-func toTunnel(reg *tunnel.Registry, perBox *connCap, box string, c, replay net.Conn) {
+func toTunnel(reg *tunnel.Registry, perBox *connCap, ev *events, box string, c, replay net.Conn) {
 	t, ok := reg.Get(box)
 	if !ok {
 		return
@@ -76,6 +76,7 @@ func toTunnel(reg *tunnel.Registry, perBox *connCap, box string, c, replay net.C
 		k += " -> " + box
 	}
 	if !perBox.acquire(k) {
+		ev.refused(box, connKey(c), "cap", "ip-box")
 		return
 	}
 	defer perBox.release(k)
@@ -87,6 +88,7 @@ func toTunnel(reg *tunnel.Registry, perBox *connCap, box string, c, replay net.C
 		return
 	}
 	defer stream.Close()
+	ev.seen(connKey(c), t.NodeID)
 	src, _ := c.RemoteAddr().(*net.TCPAddr)
 	dst, _ := c.LocalAddr().(*net.TCPAddr)
 	if src == nil || dst == nil || proxyproto.WriteV2(stream, src, dst) != nil {
