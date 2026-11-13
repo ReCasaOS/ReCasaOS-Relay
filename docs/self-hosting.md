@@ -415,7 +415,7 @@ In `.env`, next to the ones of section 4:
 | `PEEK_TIMEOUT` | `5s` | `share` | how long a new connection has to send its TLS hello / HTTP request line |
 | `TUNNEL_RATE_PER_HOUR` | `60` | `share` | tunnel dials (`/v1/share/tunnel`) per hour per client IP (`X-Client-IP`, set by `front`), counted before the signature check; `429` with `Retry-After` beyond |
 | `CONNS_PER_IP` | `256` | both | open connections per client IP (IPv6: per /64) on 80 and 443 together, boxes' own control and DERP connections included (about 3 per box, 2 per phone: one carrier-NAT address fills it near 85 boxes); past it a new connection is closed before any byte is read |
-| `CONNS_PER_IP_PER_BOX` | `64` | both | visitor connections one client IP may hold into one box's tunnel (256 at most per tunnel), so one address cannot lock the other visitors out; four addresses still can, this is no defence against many; past it the connection is closed. `share` enforces both caps; `enrolment` only shows them on `/admin`, so one value in `.env` serves both |
+| `CONNS_PER_IP_PER_BOX` | `64` | both | visitor connections one client IP may hold into one box's tunnel (256 at most per tunnel), so one address cannot lock the other visitors out; past it the connection is closed. `share` enforces both caps; `enrolment` only shows them on `/admin`, so one value in `.env` serves both |
 | `LISTEN_TLS`, `LISTEN_HTTP`, `LISTEN_TUNNEL` | `:443`, `:80`, `:8082` | `share` | listen addresses inside the container |
 | `FRONT_TLS`, `FRONT_HTTP` | `front:443`, `front:80` | `share` | where non-box traffic goes |
 | `FRONT_PROXY_PROTOCOL` | `true` | `share` | send a PROXY v2 header (the visitor's address) to `FRONT_TLS` and `FRONT_HTTP`; see "Client address" |
@@ -606,6 +606,7 @@ A fleet's reports count once per address, and reports during a running ban neith
 - the raw reports for **30 days**, deleted at once for a box that turns share my bans off;
 - refusal counts (hour, name, address, reason, source) for 7 days, shown on `/admin` and to the box that owns the name, never to another box;
 - community bans until they end, then deleted (an address's count of past bans is kept 30 days after its last ban ends);
+- your timed manual bans until they end, then deleted;
 - **permanent bans** until you lift them, listed apart on `/admin` with their date and reasons. Home addresses change hands: review that list from time to time.
 
 **Countries and networks.** Country and AS bans, and the networks shown on `/admin`, use DB-IP Lite (country and ASN), which `enrolment` downloads into `/data/geo/`, checks daily and replaces when the month changes. Until the files are there, country and AS bans match nothing and `/admin` says so. [IP Geolocation by DB-IP](https://db-ip.com), under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/): keep that attribution wherever you show its data. `/data/geo/` and `/data/feeds/` are downloaded again if lost; a backup of `/data` (section 7) carries them anyway.
