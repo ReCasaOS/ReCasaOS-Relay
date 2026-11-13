@@ -97,13 +97,11 @@ func run() error {
 		log.Printf("traffic metering is off: DERPER_DEBUG_KEY is not set")
 	}
 	// Relay-side protection of shared apps, only with sharing: the filter routes `share` polls exist
-	// only then, and without them nothing would use the feeds or DB-IP.
-	var prot *protection
-	srvDeps := server.Deps{Store: st, Headscale: hs, PolicyHook: pol.Hook, Remover: remover}
-	if cfg.ShareDomain != "" {
-		prot = newProtection(st, storePath, cfg.FilterMaxEntries, cfg.CommunityMinFleetAge)
-		srvDeps.Protect, srvDeps.Community = prot.compiler, prot.engine
-	}
+	// only then, and without them nothing would use the feeds or DB-IP. Its retention runs either
+	// way (nil pointers below: the handlers and the page treat them as absent).
+	prot := newProtection(st, storePath, cfg.ShareDomain != "", cfg.FilterMaxEntries, cfg.CommunityMinFleetAge)
+	srvDeps := server.Deps{Store: st, Headscale: hs, PolicyHook: pol.Hook, Remover: remover,
+		Protect: prot.compiler, Community: prot.engine}
 	// The operator page, under /admin, only when ADMIN_TOKEN is set (404 otherwise).
 	var adminH http.Handler
 	if tok := os.Getenv("ADMIN_TOKEN"); tok != "" {
@@ -111,9 +109,7 @@ func run() error {
 		if mtr != nil { // never put a nil *Meter in the interface
 			deps.Meter = mtr
 		}
-		if prot != nil {
-			deps.Feeds, deps.Geo, deps.Protect = prot.feeds, prot.geo, prot.compiler
-		}
+		deps.Feeds, deps.Geo, deps.Protect = prot.feeds, prot.geo, prot.compiler
 		adminH, err = admin.New(admin.Config{Token: tok, NodesPerFleet: cfg.NodesPerFleet, MaxFleets: cfg.MaxFleets,
 			ClientHeader: cfg.TrustedProxyHeader, MonthlyReference: reference, Version: version,
 			ConnsPerIP: connsPerIP, ConnsPerIPPerBox: connsPerBox}, deps)
@@ -188,13 +184,11 @@ func run() error {
 				defer close(janitorDone)
 				gc.Run(ctx, gc.Deps{Remover: remover, IdleAfter: cfg.IdleAfter, JoinKeyTTL: cfg.JoinKeyTTL}, cfg.GCEvery)
 			}()
-			if prot != nil {
-				protectStarted = true
-				go func() {
-					defer close(protectDone)
-					prot.run(ctx, time.Minute)
-				}()
-			}
+			protectStarted = true
+			go func() {
+				defer close(protectDone)
+				prot.run(ctx, time.Minute)
+			}()
 			if mtr != nil {
 				meterStarted = true
 				go func() {

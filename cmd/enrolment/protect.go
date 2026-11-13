@@ -23,8 +23,13 @@ type protection struct {
 	engine   *community.Engine
 }
 
-// newProtection keeps its files next to the store: <data>/feeds/ and <data>/geo/.
-func newProtection(st store.Store, storePath string, maxEntries int, minFleetAge time.Duration) *protection {
+// newProtection keeps its files next to the store: <data>/feeds/ and <data>/geo/. Without sharing
+// it holds the store only: nothing is filtered or downloaded, but the loop still applies the
+// retention to what sharing left in relay.db (sharing may have been turned off).
+func newProtection(st store.Store, storePath string, sharing bool, maxEntries int, minFleetAge time.Duration) *protection {
+	if !sharing {
+		return &protection{store: st}
+	}
 	data := filepath.Dir(storePath)
 	g := &geo.DB{Dir: filepath.Join(data, "geo")}
 	f := &feeds.Fetcher{Store: st, Dir: filepath.Join(data, "feeds"), TotalMax: maxEntries}
@@ -33,7 +38,7 @@ func newProtection(st store.Store, storePath string, maxEntries int, minFleetAge
 	return &protection{store: st, feeds: f, geo: g, compiler: c, engine: e}
 }
 
-// run ticks at once (to open the DB-IP files), then every `every` until ctx is done; it returns
+// run ticks at once (to open the DB-IP files, with sharing), then every `every` until ctx is done; it returns
 // only once the tick in flight has, so the store is never closed under it.
 func (p *protection) run(ctx context.Context, every time.Duration) {
 	t := time.NewTicker(every)
@@ -58,22 +63,34 @@ func (p *protection) safeTick(ctx context.Context) {
 }
 
 // tick refreshes the due feeds, opens and ends community bans, checks DB-IP and applies the
-// retention, then has the snapshot rebuilt if any of it changed. Errors are logged, never fatal;
-// none carries an address or a URL (feed errors are kept in the feed's last_error instead).
+// retention. Each step that changed something invalidates the snapshot at once, so a new ban does
+// not wait for a DB-IP download. Without sharing only the retention runs. Errors are logged,
+// never fatal; none carries an address or a URL (feed errors are kept in the feed's last_error).
 func (p *protection) tick(ctx context.Context) {
-	changed := p.feeds.Tick(ctx)
-	opened, err := p.engine.Tick(ctx)
-	if err != nil {
-		log.Printf("protection: community list: %v", err)
-	}
-	geoChanged, err := p.geo.Tick(ctx)
-	if err != nil {
-		log.Printf("protection: DB-IP update: %v", err)
+	if p.compiler == nil {
+		if err := p.store.EndExpired(ctx, time.Now()); err != nil {
+			log.Printf("protection: community list: %v", err)
+		}
+	} else {
+		if p.feeds.Tick(ctx) {
+			p.compiler.Invalidate()
+		}
+		opened, err := p.engine.Tick(ctx)
+		if err != nil {
+			log.Printf("protection: community list: %v", err)
+		}
+		if opened {
+			p.compiler.Invalidate()
+		}
+		changed, err := p.geo.Tick(ctx)
+		if err != nil {
+			log.Printf("protection: DB-IP update: %v", err)
+		}
+		if changed {
+			p.compiler.Invalidate()
+		}
 	}
 	if err := p.store.PruneProtection(ctx, time.Now()); err != nil {
 		log.Printf("protection: retention: %v", err)
-	}
-	if changed || opened || geoChanged {
-		p.compiler.Invalidate()
 	}
 }

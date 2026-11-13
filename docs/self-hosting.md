@@ -599,7 +599,7 @@ Anyone can create a fleet on a public relay, so a report counts only when all of
 
 A fleet's reports count once per address, and reports during a running ban neither extend nor raise it.
 
-**Personal data.** Visitor addresses are personal data: say so where you tell your users what your relay keeps. The relay keeps:
+**Personal data.** Visitor addresses are personal data: say so where you tell your users what your relay keeps. The relay keeps the following, and deletes it on time even after sharing is turned off:
 
 - each accepted connection (address and box) for **24 hours**, only to check reports as above;
 - the raw reports for **30 days**, deleted at once for a box that turns share my bans off;
