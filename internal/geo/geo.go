@@ -148,10 +148,11 @@ func (d *DB) fetch(ctx context.Context, file, remote string) error {
 	if base == "" {
 		base = defaultBase
 	}
-	cl := d.Client
-	if cl == nil {
-		cl = &http.Client{Timeout: 5 * time.Minute}
+	cl := http.Client{Timeout: 5 * time.Minute}
+	if d.Client != nil {
+		cl = *d.Client
 	}
+	cl.CheckRedirect = httpsOnly
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+remote, nil)
 	if err != nil {
 		return err
@@ -274,4 +275,15 @@ func unmap(p netip.Prefix) netip.Prefix {
 		return netip.PrefixFrom(a.Unmap(), p.Bits()-96)
 	}
 	return p
+}
+
+// httpsOnly is the redirect policy of the downloads: https only, 10 hops at most.
+func httpsOnly(r *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if r.URL.Scheme != "https" {
+		return errors.New("redirect to a non-https address refused")
+	}
+	return nil
 }

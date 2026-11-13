@@ -283,3 +283,22 @@ func TestTickReportsChange(t *testing.T) {
 		t.Fatalf("download: %v %v", changed, err)
 	}
 }
+
+// A redirect may only lead to https.
+func TestRedirectToHTTPRefused(t *testing.T) {
+	var plainHits atomic.Int32
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		plainHits.Add(1)
+		w.Write(gz(countryDB(t)))
+	}))
+	defer plain.Close()
+	src := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, plain.URL+r.URL.Path, http.StatusFound)
+	}))
+	defer src.Close()
+	now := time.Date(2026, 12, 3, 10, 0, 0, 0, time.UTC)
+	d := &DB{Dir: t.TempDir(), BaseURL: src.URL + "/", Client: src.Client(), Now: func() time.Time { return now }}
+	if _, err := d.Tick(t.Context()); err == nil || plainHits.Load() != 0 {
+		t.Fatalf("redirect to http: err %v, %d plain hits", err, plainHits.Load())
+	}
+}

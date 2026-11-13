@@ -129,9 +129,18 @@ func (f *Fetcher) download(ctx context.Context, fd store.Feed, all []store.Feed)
 	if fd.Preset == "abuseipdb" || fd.Preset == "abuseipdb-free" {
 		req.Header.Set("Accept", "text/plain")
 	}
-	client := f.Client
-	if client == nil {
-		client = &http.Client{Timeout: timeout}
+	client := http.Client{Timeout: timeout}
+	if f.Client != nil {
+		client = *f.Client
+	}
+	client.CheckRedirect = func(r *http.Request, via []*http.Request) error {
+		if r.URL.Host != via[0].URL.Host { // the key is for the list's own host, port included
+			r.Header.Del("Authorization")
+			if fd.AuthName != "" && fd.AuthName != "Authorization-Basic" {
+				r.Header.Del(fd.AuthName)
+			}
+		}
+		return httpsOnly(r, via)
 	}
 	resp, err := client.Do(req)
 	var ue *url.Error
@@ -195,4 +204,16 @@ func (f *Fetcher) download(ctx context.Context, fd store.Feed, all []store.Feed)
 		return 0, werr
 	}
 	return len(list), nil
+}
+
+// httpsOnly is the redirect policy of the downloads: https only, 10 hops at most. Its errors carry
+// no URL: one may hold a key.
+func httpsOnly(r *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if r.URL.Scheme != "https" {
+		return errors.New("redirect to a non-https address refused")
+	}
+	return nil
 }

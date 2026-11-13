@@ -236,3 +236,41 @@ func TestForgetRemovesCopy(t *testing.T) {
 		t.Fatalf("copy still there: %v", err)
 	}
 }
+
+// A redirect may only lead to https, and the feed's own header never follows it to another host.
+func TestRedirectsStayHTTPSAndKeepAuthOnHost(t *testing.T) {
+	var plainHits atomic.Int32
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { plainHits.Add(1); w.Write([]byte("1.1.1.1\n")) }))
+	defer plain.Close()
+	var got http.Header
+	other := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got = r.Header.Clone(); w.Write([]byte("1.1.1.1\n")) }))
+	defer other.Close()
+	var target string
+	src := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target+"/list?apikey=SECRET", http.StatusFound)
+	}))
+	defer src.Close()
+	e := newEnv(t)
+	e.f.Client = src.Client() // trusts every httptest TLS server
+
+	target = plain.URL
+	id := e.add(t, store.Feed{Name: "down", URL: src.URL, AuthName: "Key", AuthValue: "SECRET"})
+	err := e.f.Refresh(context.Background(), id)
+	if err == nil || plainHits.Load() != 0 || strings.Contains(err.Error(), "SECRET") {
+		t.Fatalf("redirect to http: err %v, %d plain hits", err, plainHits.Load())
+	}
+
+	target = other.URL
+	for _, f := range []store.Feed{
+		{Name: "key", URL: src.URL, AuthName: "Key", AuthValue: "SECRET"},
+		{Name: "basic", URL: src.URL, AuthName: "Authorization-Basic", AuthValue: "user:SECRET"},
+	} {
+		got = nil
+		if err := e.f.Refresh(context.Background(), e.add(t, f)); err != nil {
+			t.Fatalf("%s: %v", f.Name, err)
+		}
+		if got == nil || got.Get("Key") != "" || got.Get("Authorization") != "" {
+			t.Fatalf("%s: the other host got %v", f.Name, got)
+		}
+	}
+}
