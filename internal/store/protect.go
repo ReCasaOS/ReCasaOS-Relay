@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS share_refusals (
 	PRIMARY KEY (hour, name, key, reason, source)
 );
 CREATE INDEX IF NOT EXISTS share_refusals_name ON share_refusals(name, hour);
+CREATE INDEX IF NOT EXISTS share_reports_since ON share_reports(since);
 CREATE TABLE IF NOT EXISTS community_bans (
 	key TEXT PRIMARY KEY, kind TEXT NOT NULL, strike INTEGER NOT NULL, since INTEGER NOT NULL,
 	until INTEGER NOT NULL, reasons TEXT NOT NULL, fleets INTEGER NOT NULL
@@ -565,7 +566,8 @@ func (s *sqlStore) FleetEligible(ctx context.Context, fleetID string, createdBef
 
 // PruneProtection applies the retention of the contract: accepted connections 24 h, reports 30
 // days, refusal counters 7 days, strikes 30 days after their ban ended (a ban in force keeps
-// its strikes: last_end 0), openers 32 days (enough for "contributed this month").
+// its strikes: last_end 0), openers 32 days (enough for "contributed this month"), operator bans
+// once they end.
 func (s *sqlStore) PruneProtection(ctx context.Context, now time.Time) error {
 	day := 24 * time.Hour
 	for _, q := range []struct {
@@ -577,6 +579,7 @@ func (s *sqlStore) PruneProtection(ctx context.Context, now time.Time) error {
 		{`DELETE FROM share_refusals WHERE hour < ?`, now.Add(-7 * day)},
 		{`DELETE FROM community_strikes WHERE last_end <> 0 AND last_end < ?`, now.Add(-30 * day)},
 		{`DELETE FROM community_openers WHERE since < ?`, now.Add(-32 * day)},
+		{`DELETE FROM share_manual WHERE until <> 0 AND until <= ?`, now},
 	} {
 		if err := s.exec(ctx, "prune protection", q.sql, ts(q.cut)); err != nil {
 			return err

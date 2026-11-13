@@ -357,3 +357,30 @@ func TestSeenKeepsNewest(t *testing.T) {
 		t.Fatalf("later time not kept: %v %v", ok, err)
 	}
 }
+
+// Expired operator bans are deleted, not only hidden; a permanent one and one still running stay.
+func TestPruneDeletesExpiredManualBans(t *testing.T) {
+	ctx := context.Background()
+	s := openTmp(t)
+	now := pt0
+	for _, until := range []time.Time{now.Add(-time.Hour), now, now.Add(time.Hour), {}} {
+		if _, err := s.AddManual(ctx, ManualBan{Kind: "address", Value: "198.51.100.1", Since: now.Add(-2 * time.Hour), Until: until}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.PruneProtection(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := s.(*sqlStore).db.QueryRowContext(ctx, `SELECT COUNT(*) FROM share_manual`).Scan(&n); err != nil || n != 2 {
+		t.Fatalf("%d rows left (%v), want the running and the permanent ban", n, err)
+	}
+}
+
+// ReportsSince reads share_reports by since: it has its index.
+func TestReportsSinceIndexed(t *testing.T) {
+	var n int
+	if err := openTmp(t).(*sqlStore).db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'share_reports_since'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("index count %d (%v)", n, err)
+	}
+}
