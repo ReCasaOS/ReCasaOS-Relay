@@ -19,10 +19,10 @@ type Config struct {
 	EnrolmentURL                        string
 	RelayHost, ShareDomain              string
 	PeekTimeout                         time.Duration
-	TunnelRatePerHour                   int  // tunnel dials per hour, per client IP, counted before the signature check
-	ConnsPerIP                          int  // open connections per client IP (IPv6: per /64), on 80 and 443 together
-	ConnsPerIPPerBox                    int  // open visitor streams per client IP into one box's tunnel
-	FrontProxyProtocol                  bool // send a PROXY v2 header to FrontTLS/FrontHTTP
+	TunnelRatePerHour                   int           // tunnel dials per hour, per client IP, counted before the signature check
+	ConnsPerIP                          int           // open connections per client IP (IPv6: per /64), on 80 and 443 together
+	ConnsPerIPPerBox                    int           // open visitor streams per client IP into one box's tunnel
+	FrontProxyProtocol                  bool          // send a PROXY v2 header to FrontTLS/FrontHTTP
 	LogDir                              string        // journal directory; empty: no journal
 	LogKeep                             time.Duration // how long journal files are kept, at most 7 days
 	LogMaxSize                          int64         // journal size cap, bytes

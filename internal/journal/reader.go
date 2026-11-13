@@ -39,8 +39,8 @@ type Query struct {
 	From, To time.Time
 }
 
-// Reader reads the journal files in Dirs: ours (*.jsonl) and Caddy's access
-// log (*.log, current and rolled).
+// Reader reads the journal files in Dirs: ours (*.jsonl), and a Caddy access
+// log (*.log, current and rolled) if one is there.
 type Reader struct {
 	Dirs     []string
 	Now      func() time.Time // default time.Now

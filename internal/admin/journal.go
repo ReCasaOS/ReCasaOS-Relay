@@ -142,7 +142,7 @@ func (h *handler) journal(w http.ResponseWriter, r *http.Request) {
 			rg = x
 		}
 	}
-	// Always bounded: front's own files may keep lines past LOG_KEEP.
+	// Always bounded: files outlive LOG_KEEP while their writer is stopped, and a Caddy *.log has its own.
 	q.From = h.deps.Now().Add(-rg.D)
 	before, _ := time.Parse(time.RFC3339Nano, v.Get("before")) // unparsable: the newest page
 	type src struct {
