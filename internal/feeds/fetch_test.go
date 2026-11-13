@@ -274,3 +274,27 @@ func TestRedirectsStayHTTPSAndKeepAuthOnHost(t *testing.T) {
 		}
 	}
 }
+
+func TestOnResultAfterEachAttempt(t *testing.T) {
+	code := 200
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(code); w.Write([]byte("1.1.1.1\n")) }))
+	defer srv.Close()
+	e := newEnv(t)
+	type res struct {
+		name  string
+		count int
+		err   error
+	}
+	var got []res
+	e.f.OnResult = func(name string, count int, err error) { got = append(got, res{name, count, err}) }
+	id := e.add(t, store.Feed{Name: "L", URL: srv.URL + "/x?key=SECRET"})
+	e.f.Refresh(context.Background(), id)
+	code = 500
+	e.f.Refresh(context.Background(), id)
+	if len(got) != 2 || got[0].name != "L" || got[0].count != 1 || got[0].err != nil || got[1].err == nil {
+		t.Fatalf("%+v", got)
+	}
+	if strings.Contains(got[1].err.Error(), "SECRET") || strings.Contains(got[1].err.Error(), srv.URL) {
+		t.Fatalf("leak: %v", got[1].err)
+	}
+}

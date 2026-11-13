@@ -14,6 +14,7 @@ import (
 
 	"github.com/ReCasaOS/recasaos-relay/internal/feeds"
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
+	"github.com/ReCasaOS/recasaos-relay/internal/journal/journaltest"
 	"github.com/ReCasaOS/recasaos-relay/internal/protect"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
 )
@@ -449,5 +450,58 @@ func TestOverviewCounts(t *testing.T) {
 	perm, act := strings.Index(body, `id="permanent"`), strings.Index(body, `id="active-bans-table"`)
 	if perm < 0 || act < 0 || !(strings.Index(body, "203.0.113.9/32") > perm) || !(strings.Index(body, "198.51.100.7/32") > act) || strings.Index(body, "198.51.100.7/32") > perm {
 		t.Error("bans not split into active and permanent tables")
+	}
+}
+
+func TestJournalAdminManualAdd(t *testing.T) {
+	jw, read := journaltest.New(t, "enrolment")
+	e := setup(t).withDeps(t, func(d *Deps) { d.Journal = jw })
+	if c := e.do("POST", "/admin/protection/manual", token, form(e, "kind", "address", "value", "203.0.113.9", "hours", "0")).Code; c != 303 {
+		t.Fatal(c)
+	}
+	if c := e.do("POST", "/admin/protection/allow", token, form(e, "value", "198.51.100.0/24")).Code; c != 303 {
+		t.Fatal(c)
+	}
+	openBan(t, e, "203.0.113.7/32", "address", 1, t0.Add(time.Hour))
+	e.do("POST", "/admin/protection/community/lift", token, form(e, "key", "203.0.113.7/32"))
+	want := map[string][3]string{ // event: ip, host, msg
+		"manual_add": {"", "", "address 203.0.113.9/32"},
+		"allow_add":  {"198.51.100.0/24", "", ""},
+		"ban_lift":   {"203.0.113.7/32", "", ""},
+	}
+	got := map[string]bool{}
+	for _, l := range read() {
+		w, ok := want[l.Event]
+		if !ok {
+			continue
+		}
+		got[l.Event] = true
+		if l.Src != "relay" || l.Svc != "enrolment" || l.IP != w[0] || l.Msg != w[2] {
+			t.Errorf("%s: %+v", l.Event, l)
+		}
+	}
+	for ev := range want {
+		if !got[ev] {
+			t.Errorf("no %s line", ev)
+		}
+	}
+}
+
+func TestJournalFeedAdminHasNoKey(t *testing.T) {
+	jw, read := journaltest.New(t, "enrolment")
+	e := setup(t).withDeps(t, func(d *Deps) { d.Journal = jw })
+	e.do("POST", "/admin/protection/feeds", token, form(e, "name", "Mine", "url", "https://lists.example.net/x?key=SECRETKEY", "format", "text", "every_s", "3600",
+		"auth_name", "X-Key", "auth_value", "HEADERSECRET"))
+	var n int
+	for _, l := range read() {
+		if strings.Contains(l.Msg, "SECRET") || strings.Contains(l.Msg, "example.net") {
+			t.Fatalf("leak %+v", l)
+		}
+		if l.Event == "feed_admin" && l.Msg == "Mine add" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("feed_admin lines: %d", n)
 	}
 }

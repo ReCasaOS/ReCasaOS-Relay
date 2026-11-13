@@ -175,6 +175,8 @@ func (h *handler) liftCommunity(w http.ResponseWriter, r *http.Request) {
 	if err := h.deps.Store.LiftBan(ctx, key, h.deps.Now()); err != nil && !errors.Is(err, store.ErrNotFound) {
 		h.storeError(w, "lift ban", err)
 		return
+	} else if err == nil {
+		h.event("ban_lift", key, "", "")
 	}
 	h.done(w, r, "#community")
 }
@@ -191,9 +193,12 @@ func (h *handler) allowCommunity(w http.ResponseWriter, r *http.Request) {
 		h.storeError(w, "add allow", err)
 		return
 	}
+	h.event("allow_add", key, "", "from community list")
 	if err := h.deps.Store.LiftBan(ctx, key, h.deps.Now()); err != nil && !errors.Is(err, store.ErrNotFound) {
 		h.storeError(w, "lift ban", err)
 		return
+	} else if err == nil {
+		h.event("ban_lift", key, "", "")
 	}
 	h.done(w, r, "#community")
 }
@@ -210,6 +215,7 @@ func (h *handler) banASN(w http.ResponseWriter, r *http.Request) {
 		h.storeError(w, "ban asn", err)
 		return
 	}
+	h.event("manual_add", "", "", "asn "+v)
 	h.done(w, r, "#community")
 }
 
@@ -234,6 +240,9 @@ func (h *handler) nameAction(w http.ResponseWriter, r *http.Request) {
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		h.storeError(w, action+" name", err)
 		return
+	}
+	if err == nil {
+		h.event(action, "", name, "")
 	}
 	h.done(w, r, "#names")
 }

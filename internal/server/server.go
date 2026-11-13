@@ -13,6 +13,7 @@ import (
 	"github.com/ReCasaOS/recasaos-relay/internal/community"
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
+	"github.com/ReCasaOS/recasaos-relay/internal/journal"
 	"github.com/ReCasaOS/recasaos-relay/internal/protect"
 	"github.com/ReCasaOS/recasaos-relay/internal/ratelimit"
 	"github.com/ReCasaOS/recasaos-relay/internal/sharename"
@@ -76,6 +77,8 @@ type Deps struct {
 	Protect *protect.Compiler
 	// Community takes the bans boxes share; nil: POST /v1/share/bans answers 204 and stores nothing.
 	Community *community.Engine
+	// Journal receives the relay events of the box routes; nil: none are written.
+	Journal *journal.Writer
 }
 
 // New returns the service's HTTP handler.

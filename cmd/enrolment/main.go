@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net"
@@ -22,6 +23,7 @@ import (
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/gc"
 	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
+	"github.com/ReCasaOS/recasaos-relay/internal/journal"
 	"github.com/ReCasaOS/recasaos-relay/internal/meter"
 	"github.com/ReCasaOS/recasaos-relay/internal/policy"
 	"github.com/ReCasaOS/recasaos-relay/internal/server"
@@ -51,6 +53,27 @@ func envPositive(key string, def int) (int, error) {
 	return n, nil
 }
 
+// journalLimits reads LOG_KEEP (at most 7 days) and LOG_MAX_SIZE (bytes, default 256 MiB).
+func journalLimits() (keep time.Duration, size int64, err error) {
+	if keep, err = time.ParseDuration(getenv("LOG_KEEP", "168h")); err != nil || keep <= 0 || keep > 168*time.Hour {
+		return 0, 0, fmt.Errorf("LOG_KEEP: want a duration above 0 and at most 168h, got %q", os.Getenv("LOG_KEEP"))
+	}
+	if size, err = strconv.ParseInt(getenv("LOG_MAX_SIZE", "268435456"), 10, 64); err != nil || size <= 0 {
+		return 0, 0, fmt.Errorf("LOG_MAX_SIZE: want a positive number of bytes, got %q", os.Getenv("LOG_MAX_SIZE"))
+	}
+	return keep, size, nil
+}
+
+// closeJournal flushes the journal, but a hanging disk must not hold the shutdown for more than 5 s.
+func closeJournal(jw *journal.Writer) {
+	done := make(chan struct{})
+	go func() { jw.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+	}
+}
+
 func main() {
 	if err := run(); err != nil {
 		log.Fatal(err)
@@ -61,6 +84,18 @@ func run() error {
 	cfg, err := server.ConfigFromEnv()
 	if err != nil {
 		return err
+	}
+	var jw *journal.Writer // nil without LOG_DIR: every journal call is then a no-op
+	if dir := getenv("LOG_DIR", "/data/logs"); dir != "" {
+		keep, size, err := journalLimits()
+		if err != nil {
+			return err
+		}
+		if jw, err = journal.Open(dir, "enrolment", keep, size, time.Now); err != nil {
+			return err
+		}
+		log.SetOutput(io.MultiWriter(os.Stderr, jw.Log()))
+		defer closeJournal(jw)
 	}
 	apiKey := os.Getenv("HEADSCALE_API_KEY")
 	if apiKey == "" {
@@ -99,13 +134,13 @@ func run() error {
 	// Relay-side protection of shared apps, only with sharing: the filter routes `share` polls exist
 	// only then, and without them nothing would use the feeds or DB-IP. Its retention runs either
 	// way (nil pointers below: the handlers and the page treat them as absent).
-	prot := newProtection(st, storePath, cfg.ShareDomain != "", cfg.FilterMaxEntries, cfg.CommunityMinFleetAge)
+	prot := newProtection(st, storePath, cfg.ShareDomain != "", cfg.FilterMaxEntries, cfg.CommunityMinFleetAge, jw)
 	srvDeps := server.Deps{Store: st, Headscale: hs, PolicyHook: pol.Hook, Remover: remover,
-		Protect: prot.compiler, Community: prot.engine}
+		Protect: prot.compiler, Community: prot.engine, Journal: jw}
 	// The operator page, under /admin, only when ADMIN_TOKEN is set (404 otherwise).
 	var adminH http.Handler
 	if tok := os.Getenv("ADMIN_TOKEN"); tok != "" {
-		deps := admin.Deps{Store: st, Headscale: hs, Remover: remover}
+		deps := admin.Deps{Store: st, Headscale: hs, Remover: remover, Journal: jw}
 		if mtr != nil { // never put a nil *Meter in the interface
 			deps.Meter = mtr
 		}

@@ -22,6 +22,7 @@ import (
 	"github.com/ReCasaOS/recasaos-relay/internal/feeds"
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/geo"
+	"github.com/ReCasaOS/recasaos-relay/internal/journal"
 	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
 	"github.com/ReCasaOS/recasaos-relay/internal/meter"
 	"github.com/ReCasaOS/recasaos-relay/internal/protect"
@@ -108,6 +109,8 @@ type Deps struct {
 	Feeds   *feeds.Fetcher
 	Geo     *geo.DB
 	Protect *protect.Compiler
+	// Journal receives the operator's protection actions; nil: none are written.
+	Journal *journal.Writer
 }
 
 type handler struct {

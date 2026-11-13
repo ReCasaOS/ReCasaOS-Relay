@@ -1,11 +1,13 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"regexp"
 	"time"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/community"
+	"github.com/ReCasaOS/recasaos-relay/internal/journal"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
 )
 
@@ -56,6 +58,8 @@ func (h *shareHandler) putProtection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.invalidate()
+	h.deps.Journal.Write(journal.Entry{Src: "relay", Event: "protection",
+		Msg: fmt.Sprintf("%s relay_filter=%t share_bans=%t", ref.NodeID, p.RelayFilter, p.ShareBans)})
 	bans, err := h.deps.Store.ActiveBans(ctx, now)
 	if err != nil {
 		internalError(w, "active bans", err)
@@ -107,7 +111,11 @@ func (h *shareHandler) postBans(w http.ResponseWriter, r *http.Request) {
 	if h.deps.Community != nil {
 		ctx, cancel := opCtx(r)
 		defer cancel()
-		if err := h.deps.Community.Accept(ctx, ref, items); err != nil {
+		n, err := h.deps.Community.Accept(ctx, ref, items)
+		if n > 0 {
+			h.deps.Journal.Write(journal.Entry{Src: "relay", Event: "reports", Msg: ref.NodeID, Count: int64(n)})
+		}
+		if err != nil {
 			internalError(w, "accept bans", err)
 			return
 		}
