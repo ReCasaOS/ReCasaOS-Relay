@@ -232,7 +232,8 @@ func (w *Writer) report(err error) {
 }
 
 // sweep moves to today's file, deletes this writer's files older than keep
-// or dated in the future, then the oldest while the total exceeds maxSize.
+// or dated more than keep in the future, then the oldest while the total
+// exceeds maxSize.
 // Today's file is never deleted; alone above the cap it starts over.
 func (w *Writer) sweep() {
 	w.sweepDue = false
@@ -243,6 +244,10 @@ func (w *Writer) sweep() {
 	}
 	names, _ := filepath.Glob(filepath.Join(w.dir, w.svc+"-*.jsonl"))
 	cut := w.now().Add(-w.keep)
+	todayT, _ := time.Parse(dayLayout, today)
+	// A clock before 2026 is unsynced (no RTC, before NTP): it must not call
+	// every retained file "future" and delete it.
+	trustFuture := today >= "2026-01-01"
 	type file struct {
 		name string
 		size int64
@@ -255,7 +260,8 @@ func (w *Writer) sweep() {
 		if err != nil || (w.f != nil && n == w.f.Name()) {
 			continue // not ours, or the open file
 		}
-		if d.Add(24*time.Hour).Before(cut) || day > today {
+		farFuture := trustFuture && d.After(todayT.Add(w.keep))
+		if d.Add(24*time.Hour).Before(cut) || farFuture {
 			os.Remove(n)
 			continue
 		}

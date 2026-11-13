@@ -194,29 +194,50 @@ func TestIdleWriterDoesNotKeepOldFile(t *testing.T) {
 
 func TestFutureDatedFileDeleted(t *testing.T) {
 	dir := t.TempDir()
-	mkfile(t, dir, "share-2026-11-20.jsonl", 10)
+	mkfile(t, dir, "share-2026-11-22.jsonl", 10) // 9 days ahead, keep is 7: deleted
+	mkfile(t, dir, "share-2026-11-16.jsonl", 10) // 3 days ahead: kept, ages out normally later
 	w := open(t, dir, "share", 168*time.Hour, 1<<30, newClock(noon))
 	w.Close()
-	if exists(dir, "share-2026-11-20.jsonl") {
-		t.Fatal("future-dated file kept")
+	if exists(dir, "share-2026-11-22.jsonl") {
+		t.Error("file dated more than keep ahead kept")
+	}
+	if !exists(dir, "share-2026-11-16.jsonl") {
+		t.Error("file 3 days ahead deleted")
 	}
 
-	// A clock that jumped forward then came back does not pin the future file.
+	// A clock that jumped forward by more than keep, then came back, does not
+	// pin the future file.
 	fastSweep(t)
 	dir = t.TempDir()
 	c := newClock(noon)
 	w = open(t, dir, "share", 168*time.Hour, 1<<30, c)
-	c.set(noon.Add(7 * 24 * time.Hour))
+	c.set(noon.Add(9 * 24 * time.Hour))
 	w.Write(Entry{Src: "share"})
 	deadline := time.Now().Add(5 * time.Second)
-	for !exists(dir, "share-2026-11-20.jsonl") {
+	for !exists(dir, "share-2026-11-22.jsonl") {
 		if time.Now().After(deadline) {
 			t.Fatal("jumped line not written")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	c.set(noon)
-	waitGone(t, dir, "share-2026-11-20.jsonl")
+	waitGone(t, dir, "share-2026-11-22.jsonl")
+}
+
+func TestStaleClockKeepsFiles(t *testing.T) {
+	dir := t.TempDir()
+	names := []string{"share-2026-11-05.jsonl", "share-2026-11-13.jsonl", "share-2026-11-20.jsonl"}
+	for _, n := range names {
+		mkfile(t, dir, n, 10)
+	}
+	w := open(t, dir, "share", 168*time.Hour, 1<<30, newClock(time.Unix(0, 0))) // no RTC, before NTP
+	w.Write(Entry{Src: "log", Msg: "booted"})
+	w.Close()
+	for _, n := range names {
+		if !exists(dir, n) {
+			t.Errorf("%s deleted with the clock at 1970", n)
+		}
+	}
 }
 
 func TestSizeCapSweepsWithoutWaitingForTick(t *testing.T) {
