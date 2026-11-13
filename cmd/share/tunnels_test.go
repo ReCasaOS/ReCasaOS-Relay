@@ -32,6 +32,8 @@ type fakeEnrolment struct {
 
 	filterVersion string // /internal/share/filter: body with ETag "<version>"; 304 on a match
 	filterBody    string
+	filterDelay   time.Duration
+	notModified   int // 304 answers served
 	filterStatus  int // when set, answered instead (500: enrolment down)
 }
 
@@ -48,8 +50,10 @@ func (f *fakeEnrolment) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "down", f.filterStatus)
 			return
 		}
+		time.Sleep(f.filterDelay)
 		etag := `"` + f.filterVersion + `"`
 		if r.Header.Get("If-None-Match") == etag {
+			f.notModified++
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}

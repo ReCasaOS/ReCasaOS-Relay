@@ -20,8 +20,10 @@ import (
 var enrolmentClient = &http.Client{Timeout: 5 * time.Second}
 
 // do runs req, dropping the URL from transport errors: the resolve URL holds the box key.
-func do(req *http.Request) (*http.Response, error) {
-	resp, err := enrolmentClient.Do(req)
+func do(req *http.Request) (*http.Response, error) { return doWith(enrolmentClient, req) }
+
+func doWith(c *http.Client, req *http.Request) (*http.Response, error) {
+	resp, err := c.Do(req)
 	var ue *url.Error
 	if errors.As(err, &ue) {
 		err = ue.Err

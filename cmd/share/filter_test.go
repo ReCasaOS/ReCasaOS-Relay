@@ -7,6 +7,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net"
+	"net/http"
 	"net/netip"
 	"runtime"
 	"testing"
@@ -249,6 +250,11 @@ func TestKeepsSnapshotWhenEnrolmentDown(t *testing.T) {
 	}
 	h.poll(context.Background(), url) // 304
 	f.mu.Lock()
+	if f.notModified != 1 {
+		t.Fatalf("304 answers = %d, want 1 (the second poll must send If-None-Match)", f.notModified)
+	}
+	f.mu.Unlock()
+	f.mu.Lock()
 	f.filterStatus = 500
 	f.mu.Unlock()
 	h.poll(context.Background(), url)
@@ -257,6 +263,29 @@ func TestKeepsSnapshotWhenEnrolmentDown(t *testing.T) {
 		t.Fatal("snapshot dropped after failures")
 	} else if r, _ := cur.decide(a, "x"); r != "manual" {
 		t.Fatalf("after failures decide = %q, want the snapshot kept", r)
+	}
+}
+
+func TestFilterPollHasItsOwnTimeout(t *testing.T) {
+	if filterClient.Timeout < 60*time.Second {
+		t.Fatalf("filterClient timeout %v, want >= 60s", filterClient.Timeout)
+	}
+	f, url, _, _ := rig(t)
+	f.mu.Lock()
+	f.filterVersion, f.filterBody, f.filterDelay = "v1", `{"version":"v1"}`, 300*time.Millisecond
+	f.mu.Unlock()
+	old := filterClient
+	defer func() { filterClient = old }()
+	filterClient = &http.Client{Timeout: 50 * time.Millisecond}
+	h := &filterHolder{}
+	h.poll(context.Background(), url)
+	if h.get() != nil {
+		t.Fatal("slow answer past the filter client's timeout was accepted")
+	}
+	filterClient = &http.Client{Timeout: 5 * time.Second}
+	h.poll(context.Background(), url)
+	if h.get() == nil {
+		t.Fatal("slow answer within the filter client's timeout was not taken")
 	}
 }
 

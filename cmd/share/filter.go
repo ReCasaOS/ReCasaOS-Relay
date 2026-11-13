@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 var (
@@ -23,8 +24,12 @@ var (
 
 func errStatus(code int) error { return fmt.Errorf("enrolment answered %d", code) }
 
+// filterClient has its own, longer timeout: enrolment may build the snapshot inside the request, and the
+// timeout counts the body read too.
+var filterClient = &http.Client{Timeout: 60 * time.Second}
+
 // maxSnapshot bounds the body of GET /internal/share/filter (1 000 000 entries is a few tens of MiB).
-const maxSnapshot = 256 << 20
+const maxSnapshot = 64 << 20
 
 type nameFilter struct {
 	Filter    bool `json:"filter"`
@@ -287,7 +292,7 @@ func (h *filterHolder) fetch(ctx context.Context, enrolmentURL string) (*filter,
 	if cur := h.get(); cur != nil && cur.version != "" {
 		req.Header.Set("If-None-Match", `"`+cur.version+`"`)
 	}
-	resp, err := do(req)
+	resp, err := doWith(filterClient, req)
 	if err != nil {
 		return nil, err
 	}
