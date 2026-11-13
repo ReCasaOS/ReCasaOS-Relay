@@ -12,6 +12,7 @@ import (
 
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
+	"github.com/ReCasaOS/recasaos-relay/internal/protect"
 	"github.com/ReCasaOS/recasaos-relay/internal/ratelimit"
 	"github.com/ReCasaOS/recasaos-relay/internal/sharename"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
@@ -65,6 +66,9 @@ type Deps struct {
 	// Admin, when not nil, is served under /admin/ (and /admin redirects to it).
 	Admin http.Handler
 	Now   func() time.Time // default time.Now
+	// Protect compiles the filter snapshot of GET /internal/share/filter; nil: both protection
+	// routes (filter and events) are absent.
+	Protect *protect.Compiler
 }
 
 // New returns the service's HTTP handler.
@@ -113,6 +117,10 @@ func New(cfg Config, deps Deps) http.Handler {
 			in := &internalHandler{deps: deps, beats: beats}
 			mux.Handle("GET /internal/share/boxes/{key}", internalOnly(cfg.TrustedProxyHeader, in.boxByKey))
 			mux.Handle("POST /internal/share/usage", internalOnly(cfg.TrustedProxyHeader, in.usage))
+			if deps.Protect != nil {
+				mux.Handle("GET /internal/share/filter", internalOnly(cfg.TrustedProxyHeader, in.filter))
+				mux.Handle("POST /internal/share/events", internalOnly(cfg.TrustedProxyHeader, in.events))
+			}
 		}
 		login := &loginHandler{cfg: cfg, deps: deps,
 			limiter:   ratelimit.New(cfg.LoginRatePerHour, deps.Now),
