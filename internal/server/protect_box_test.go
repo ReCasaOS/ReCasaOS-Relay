@@ -182,18 +182,29 @@ func TestNameChangeInvalidatesSnapshot(t *testing.T) {
 // The protection routes have their own per-IP budget: a box sending bans all through an attack
 // must not use up the one of the name and ACME routes, nor the other way round.
 func TestProtectRoutesHaveTheirOwnLimiter(t *testing.T) {
-	e := &shareEnv{delEnv: setupDelDeps(t, func(c *Config) {
-		c.ShareDomain = "share.example"
-		c.TrustedProxyHeader = "X-Client-IP"
-		c.AuthRatePerHour, c.ProtectRatePerHour = 3, 3
-	}, func(d *Deps) {
-		d.Community = &community.Engine{Store: d.Store, Now: d.Now}
-	})}
-	b := e.linked(t, "box-a")
+	newEnv := func() (*shareEnv, box) {
+		e := &shareEnv{delEnv: setupDelDeps(t, func(c *Config) {
+			c.ShareDomain = "share.example"
+			c.TrustedProxyHeader = "X-Client-IP"
+			c.AuthRatePerHour, c.ProtectRatePerHour = 3, 3
+		}, func(d *Deps) {
+			d.Community = &community.Engine{Store: d.Store, Now: d.Now}
+		})}
+		return e, e.linked(t, "box-a")
+	}
+	e, b := newEnv()
 	wantStatus(t, e.as(b, "PUT", "/v1/share/protection", `{"relay_filter":true}`), 200, "")
 	wantStatus(t, e.as(b, "POST", "/v1/share/bans", `{"bans":[]}`), 204, "")
 	wantStatus(t, e.as(b, "GET", "/v1/share/refusals", ""), 200, "")
 	wantStatus(t, e.as(b, "GET", "/v1/share/refusals", ""), 429, "")
 	wantStatus(t, e.as(b, "PUT", "/v1/share/name", `{"name":"abc"}`), 201, "")
 	wantStatus(t, e.as(b, "GET", "/v1/share", ""), 200, "")
+
+	e, b = newEnv() // the other way round: name routes used up, protection routes still answer
+	wantStatus(t, e.as(b, "PUT", "/v1/share/name", `{"name":"abc"}`), 201, "")
+	wantStatus(t, e.as(b, "GET", "/v1/share", ""), 200, "")
+	wantStatus(t, e.as(b, "GET", "/v1/share", ""), 200, "")
+	wantStatus(t, e.as(b, "GET", "/v1/share", ""), 429, "")
+	wantStatus(t, e.as(b, "PUT", "/v1/share/protection", `{"relay_filter":true}`), 200, "")
+	wantStatus(t, e.as(b, "GET", "/v1/share/refusals", ""), 200, "")
 }

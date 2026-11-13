@@ -134,6 +134,8 @@ func (f *Fetcher) download(ctx context.Context, fd store.Feed, all []store.Feed)
 		client = *f.Client
 	}
 	client.CheckRedirect = func(r *http.Request, via []*http.Request) error {
+		// The previous URL may hold a key; a list download needs no Referer.
+		r.Header.Del("Referer")
 		if r.URL.Host != via[0].URL.Host { // the key is for the list's own host, port included
 			r.Header.Del("Authorization")
 			if fd.AuthName != "" && fd.AuthName != "Authorization-Basic" {

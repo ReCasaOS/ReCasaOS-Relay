@@ -262,14 +262,14 @@ func TestRedirectsStayHTTPSAndKeepAuthOnHost(t *testing.T) {
 
 	target = other.URL
 	for _, f := range []store.Feed{
-		{Name: "key", URL: src.URL, AuthName: "Key", AuthValue: "SECRET"},
-		{Name: "basic", URL: src.URL, AuthName: "Authorization-Basic", AuthValue: "user:SECRET"},
+		{Name: "key", URL: src.URL + "/list?key=SECRET", AuthName: "Key", AuthValue: "SECRET"},
+		{Name: "basic", URL: src.URL + "/list?key=SECRET", AuthName: "Authorization-Basic", AuthValue: "user:SECRET"},
 	} {
 		got = nil
 		if err := e.f.Refresh(context.Background(), e.add(t, f)); err != nil {
 			t.Fatalf("%s: %v", f.Name, err)
 		}
-		if got == nil || got.Get("Key") != "" || got.Get("Authorization") != "" {
+		if got == nil || got.Get("Key") != "" || got.Get("Authorization") != "" || got.Get("Referer") != "" {
 			t.Fatalf("%s: the other host got %v", f.Name, got)
 		}
 	}
