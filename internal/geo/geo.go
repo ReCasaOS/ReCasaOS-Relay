@@ -1,0 +1,245 @@
+// Package geo answers country and AS questions from the DB-IP Lite files and keeps them fresh.
+package geo
+
+import (
+	"compress/gzip"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/netip"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/oschwald/maxminddb-golang/v2"
+)
+
+const (
+	countryFile = "dbip-country-lite.mmdb"
+	asnFile     = "dbip-asn-lite.mmdb"
+	defaultBase = "https://download.db-ip.com/free/"
+	maxGz       = 200 << 20
+	okEvery     = 24 * time.Hour
+	retryEvery  = time.Hour
+)
+
+// DB holds the two files in Dir. Zero Client, Now and BaseURL mean the defaults.
+type DB struct {
+	Dir     string
+	Client  *http.Client
+	Now     func() time.Time
+	BaseURL string
+
+	mu      sync.RWMutex // lookups hold it shared; a swapped-out reader is closed under the write lock
+	country *maxminddb.Reader
+	asn     *maxminddb.Reader
+	loaded  bool
+
+	checked time.Time // Tick-only state: one caller at a time
+	failed  bool
+}
+
+func (d *DB) now() time.Time {
+	if d.Now != nil {
+		return d.Now()
+	}
+	return time.Now()
+}
+
+func (d *DB) path(name string) string { return filepath.Join(d.Dir, name) }
+
+// reopen swaps in readers for whatever files can be opened now.
+func (d *DB) reopen() {
+	c, _ := maxminddb.Open(d.path(countryFile))
+	a, _ := maxminddb.Open(d.path(asnFile))
+	d.mu.Lock()
+	old := []*maxminddb.Reader{d.country, d.asn}
+	d.country, d.asn, d.loaded = c, a, true
+	for _, r := range old {
+		if r != nil {
+			r.Close()
+		}
+	}
+	d.mu.Unlock()
+}
+
+// month is the "YYYY-MM" a file was written in, "" when it is missing.
+func (d *DB) month(name string) string {
+	fi, err := os.Stat(d.path(name))
+	if err != nil {
+		return ""
+	}
+	return fi.ModTime().UTC().Format("2006-01")
+}
+
+// Version is the file month, "" unless both files exist; with two different months, the older.
+func (d *DB) Version() string {
+	c, a := d.month(countryFile), d.month(asnFile)
+	if c == "" || a == "" {
+		return ""
+	}
+	return min(c, a)
+}
+
+// Tick opens the files on first use, then at most once a day (an hour after a failure) fetches
+// the current month's files when they are missing or older. A failure keeps the old files.
+func (d *DB) Tick(ctx context.Context) error {
+	d.mu.RLock()
+	loaded := d.loaded
+	d.mu.RUnlock()
+	if !loaded {
+		d.reopen()
+	}
+	now := d.now()
+	wait := okEvery
+	if d.failed {
+		wait = retryEvery
+	}
+	if !d.checked.IsZero() && now.Sub(d.checked) < wait {
+		return nil
+	}
+	d.checked, d.failed = now, false
+	month := now.UTC().Format("2006-01")
+	var errs []error
+	updated := false
+	for _, f := range []struct{ file, kind string }{{countryFile, "country"}, {asnFile, "asn"}} {
+		if d.month(f.file) >= month {
+			continue
+		}
+		if err := d.fetch(ctx, f.file, fmt.Sprintf("dbip-%s-lite-%s.mmdb.gz", f.kind, month)); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", f.kind, err))
+			continue
+		}
+		updated = true
+		log.Printf("geo: updated %s database to %s", f.kind, month)
+	}
+	if updated {
+		d.reopen()
+	}
+	d.failed = len(errs) > 0
+	return errors.Join(errs...)
+}
+
+func (d *DB) fetch(ctx context.Context, file, remote string) error {
+	base := d.BaseURL
+	if base == "" {
+		base = defaultBase
+	}
+	cl := d.Client
+	if cl == nil {
+		cl = &http.Client{Timeout: 5 * time.Minute}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+remote, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := cl.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	zr, err := gzip.NewReader(io.LimitReader(resp.Body, maxGz))
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(d.Dir, file+".tmp*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	_, err = io.Copy(tmp, zr)
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	r, err := maxminddb.Open(tmp.Name())
+	if err != nil {
+		return err
+	}
+	r.Close()
+	return os.Rename(tmp.Name(), d.path(file))
+}
+
+type countryRecord struct {
+	Country struct {
+		ISO string `maxminddb:"iso_code"`
+	} `maxminddb:"country"`
+}
+
+type asnRecord struct {
+	N   uint   `maxminddb:"autonomous_system_number"`
+	Org string `maxminddb:"autonomous_system_organization"`
+}
+
+// Country is the ISO country of a, "" when unknown.
+func (d *DB) Country(a netip.Addr) string {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	var rec countryRecord
+	if d.country == nil || d.country.Lookup(a.Unmap()).Decode(&rec) != nil {
+		return ""
+	}
+	return rec.Country.ISO
+}
+
+// ASN is the AS number and organisation of a, zero values when unknown.
+func (d *DB) ASN(a netip.Addr) (uint, string) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	var rec asnRecord
+	if d.asn == nil || d.asn.Lookup(a.Unmap()).Decode(&rec) != nil {
+		return 0, ""
+	}
+	return rec.N, rec.Org
+}
+
+// CountryPrefixes lists every network of country cc; nil without the file.
+func (d *DB) CountryPrefixes(cc string) []netip.Prefix {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.country == nil {
+		return nil
+	}
+	var out []netip.Prefix
+	for res := range d.country.Networks() {
+		var rec countryRecord
+		if res.Decode(&rec) == nil && rec.Country.ISO == cc {
+			out = append(out, unmap(res.Prefix()))
+		}
+	}
+	return out
+}
+
+// ASNPrefixes lists every network of AS asn; nil without the file.
+func (d *DB) ASNPrefixes(asn uint) []netip.Prefix {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.asn == nil {
+		return nil
+	}
+	var out []netip.Prefix
+	for res := range d.asn.Networks() {
+		var rec asnRecord
+		if res.Decode(&rec) == nil && rec.N == asn {
+			out = append(out, unmap(res.Prefix()))
+		}
+	}
+	return out
+}
+
+// unmap turns an IPv4 network stored in the IPv6 tree (::ffff:a.b.c.d/96+n) into an IPv4 prefix.
+func unmap(p netip.Prefix) netip.Prefix {
+	if a := p.Addr(); a.Is4In6() && p.Bits() >= 96 {
+		return netip.PrefixFrom(a.Unmap(), p.Bits()-96)
+	}
+	return p
+}
