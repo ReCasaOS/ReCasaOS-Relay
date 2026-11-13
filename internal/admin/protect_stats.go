@@ -106,29 +106,29 @@ func (h *handler) protectStats(ctx context.Context, now time.Time) (map[string]a
 		}
 		return "off"
 	}
+	// One query for the day; the empty name is what no box owns (the per-address cap fires before the name is known).
+	todays, err := st.RefusalsSince(ctx, day)
+	if err != nil {
+		return nil, err
+	}
 	names := make([]nameView, len(rows))
+	idx := map[string]int{}
+	for i, row := range rows {
+		p, set := prot[row.Name]
+		idx[row.Name] = i
+		names[i] = nameView{NameRow: row, Today: make([]int64, len(refusalReasons)),
+			Filter: onOff(set, p.RelayFilter), Bans: onOff(set, p.ShareBans), IsSuspended: slices.Contains(suspended, row.Name)}
+	}
 	byKey, byName := map[string]int64{}, map[string]int64{}
-	// The empty name is what no box owns: the per-address cap fires before the name is known.
-	for i := -1; i < len(rows); i++ {
-		n := ""
-		if i >= 0 {
-			n = rows[i].Name
-			p, set := prot[n]
-			names[i] = nameView{NameRow: rows[i], Today: make([]int64, len(refusalReasons)),
-				Filter: onOff(set, p.RelayFilter), Bans: onOff(set, p.ShareBans), IsSuspended: slices.Contains(suspended, n)}
-		}
-		rs, err := st.RefusalsOf(ctx, n, day, 100000)
-		if err != nil {
-			return nil, err
-		}
-		for _, r := range rs {
-			if c, ok := col[r.Reason]; ok && i >= 0 {
+	for _, r := range todays {
+		if i, ok := idx[r.Name]; ok {
+			if c, ok := col[r.Reason]; ok {
 				names[i].Today[c] += r.Count
 			}
-			if r.Reason == "cap" {
-				byKey[r.Key] += r.Count
-				byName[n] += r.Count
-			}
+		}
+		if r.Reason == "cap" && (r.Name == "" || hasName(idx, r.Name)) {
+			byKey[r.Key] += r.Count
+			byName[r.Name] += r.Count
 		}
 	}
 	return map[string]any{
@@ -137,6 +137,8 @@ func (h *handler) protectStats(ctx context.Context, now time.Time) (map[string]a
 		"Names": names, "CapKeys": top(byKey, topKeys), "CapNames": top(byName, len(byName)),
 	}, nil
 }
+
+func hasName(idx map[string]int, n string) bool { _, ok := idx[n]; return ok }
 
 // top returns the n largest counts, ties by key.
 func top(m map[string]int64, n int) []countRow {

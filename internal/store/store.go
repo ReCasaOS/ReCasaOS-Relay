@@ -113,6 +113,8 @@ type Store interface {
 	// AddRefusals adds counts on (hour, name, key, reason, source).
 	AddRefusals(ctx context.Context, rs []Refusal) error
 	RefusalsOf(ctx context.Context, name string, since time.Time, limit int) ([]Refusal, error)
+	// RefusalsSince groups by name, key, reason and source (Hour is zero).
+	RefusalsSince(ctx context.Context, since time.Time) ([]Refusal, error)
 	// RefusalTotals groups by hour, reason and source; Name and Key are empty.
 	RefusalTotals(ctx context.Context, since time.Time) ([]Refusal, error)
 	ActiveBans(ctx context.Context, now time.Time) ([]CommunityBan, error)

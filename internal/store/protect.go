@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS share_refusals (
 	count INTEGER NOT NULL,
 	PRIMARY KEY (hour, name, key, reason, source)
 );
+CREATE INDEX IF NOT EXISTS share_refusals_name ON share_refusals(name, hour);
 CREATE TABLE IF NOT EXISTS community_bans (
 	key TEXT PRIMARY KEY, kind TEXT NOT NULL, strike INTEGER NOT NULL, since INTEGER NOT NULL,
 	until INTEGER NOT NULL, reasons TEXT NOT NULL, fleets INTEGER NOT NULL
@@ -289,6 +290,12 @@ func (s *sqlStore) RefusalsOf(ctx context.Context, name string, since time.Time,
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT hour, name, key, reason, source, count FROM share_refusals WHERE name = ? AND hour >= ? ORDER BY hour DESC, key, reason, source LIMIT ?`,
 		name, tz(since), limit)
+	return s.scanRefusals(rows, err)
+}
+
+func (s *sqlStore) RefusalsSince(ctx context.Context, since time.Time) ([]Refusal, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT 0, name, key, reason, source, SUM(count) FROM share_refusals WHERE hour >= ? GROUP BY name, key, reason, source ORDER BY name, key, reason, source`, tz(since))
 	return s.scanRefusals(rows, err)
 }
 

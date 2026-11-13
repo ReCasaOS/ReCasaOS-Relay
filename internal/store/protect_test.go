@@ -112,6 +112,23 @@ func TestRefusalsAddUp(t *testing.T) {
 	}
 }
 
+func TestRefusalsSince(t *testing.T) {
+	ctx := context.Background()
+	s := openTmp(t)
+	if err := s.AddRefusals(ctx, []Refusal{
+		{Hour: pt0, Name: "a", Key: "k1", Reason: "cap", Source: "ip", Count: 2},
+		{Hour: pt0.Add(time.Hour), Name: "a", Key: "k1", Reason: "cap", Source: "ip", Count: 3},
+		{Hour: pt0.Add(-time.Hour), Name: "a", Key: "k1", Reason: "cap", Source: "ip", Count: 50},
+		{Hour: pt0, Name: "", Key: "k2", Reason: "cap", Source: "ip", Count: 4},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.RefusalsSince(ctx, pt0)
+	if err != nil || len(got) != 2 || got[0].Name != "" || got[0].Count != 4 || got[1].Name != "a" || got[1].Count != 5 || !got[1].Hour.IsZero() {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+}
+
 func TestStrikesSurviveEnd(t *testing.T) {
 	ctx := context.Background()
 	s := openTmp(t)
