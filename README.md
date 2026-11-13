@@ -94,6 +94,7 @@ Fleet creation is limited per client IP (per /64 for IPv6, and in addition per /
 | `SHARE_PUBLIC_IP6` | empty | IPv6 address for `AAAA` answers; empty: none |
 | `SHARE_PSL_TXT` | empty | value of the `_psl.<SHARE_DOMAIN>` TXT record (Public Suffix List ownership proof), at most 255 bytes; empty: no such record |
 | `LISTEN_DNS` | `:53` | UDP and TCP listen address of the DNS zone (only with `SHARE_DOMAIN`) |
+| `PROTECT_RATE_PER_HOUR` | `600` | protection requests of the boxes (`PUT /v1/share/protection`, `POST /v1/share/bans`, `GET /v1/share/refusals`) per hour per client IP, counted before the signature check, on a budget of their own (not `AUTH_RATE_PER_HOUR`'s) |
 | `FILTER_MAX_ENTRIES` | `1000000` | entries of all enabled block lists together (protection of shared apps, only with `SHARE_DOMAIN`); a list that would take the total past it is refused whole and its last good copy stays. See `docs/self-hosting.md`, "Protection of shared apps" |
 | `COMMUNITY_MIN_FLEET_AGE` | `168h` | how old a fleet must be before its boxes' ban reports count toward the community list. For tests only: keep the default on a public relay |
 | `CONNS_PER_IP`, `CONNS_PER_IP_PER_BOX` | `256`, `64` | the connection caps `share` enforces (below), read here only to show them on `/admin`: give both processes the same values (`compose.yaml` does) |

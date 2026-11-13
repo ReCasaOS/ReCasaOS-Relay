@@ -422,10 +422,11 @@ In `.env`, next to the ones of section 4:
 | `SHARE_PSL_TXT` | empty | `enrolment` | value of `_psl.<SHARE_DOMAIN>` TXT (Public Suffix List ownership proof), at most 255 bytes; empty: no such record |
 | `ENROLMENT_URL` | `http://enrolment:8081` | `share` | name lookups and usage posts, compose network only |
 | `LISTEN_DNS` | `:53` | `enrolment` | DNS listen address inside the container |
+| `PROTECT_RATE_PER_HOUR` | `600` | `enrolment` | protection requests of the boxes (`PUT /v1/share/protection`, `POST /v1/share/bans`, `GET /v1/share/refusals`) per hour per client IP, counted before the signature check, on a budget of their own: they never use up `AUTH_RATE_PER_HOUR`; `429` with `Retry-After` beyond |
 | `FILTER_MAX_ENTRIES` | `1000000` | `enrolment` | entries of all enabled block lists together ("Protection of shared apps" below); a list that would take the total past it is refused whole and its last good copy stays |
 | `COMMUNITY_MIN_FLEET_AGE` | `168h` (7 days) | `enrolment` | how old a fleet must be before its boxes' ban reports count. **For tests only**: keep the default on a relay open to the public |
 
-The rows from `PEEK_TIMEOUT` on are the processes' own defaults (`compose.yaml` passes `LISTEN_TLS`, `LISTEN_HTTP`, `LISTEN_TUNNEL`, `FRONT_TLS`, `FRONT_HTTP`, `ENROLMENT_URL`, `PEEK_TIMEOUT`, `FRONT_PROXY_PROTOCOL`, `TUNNEL_RATE_PER_HOUR`, `CONNS_PER_IP` and `CONNS_PER_IP_PER_BOX` to `share`; neither cap counts loopback, private or link-local sources, which is what Docker's userland proxy and boxes on the relay's own LAN arrive from, and `SHARE_PSL_TXT`, `FILTER_MAX_ENTRIES`, `COMMUNITY_MIN_FLEET_AGE`, `CONNS_PER_IP` and `CONNS_PER_IP_PER_BOX` to `enrolment`, as shown there); none needs changing except `SHARE_PSL_TXT` once you have a PSL request.
+The rows from `PEEK_TIMEOUT` on are the processes' own defaults (`compose.yaml` passes `LISTEN_TLS`, `LISTEN_HTTP`, `LISTEN_TUNNEL`, `FRONT_TLS`, `FRONT_HTTP`, `ENROLMENT_URL`, `PEEK_TIMEOUT`, `FRONT_PROXY_PROTOCOL`, `TUNNEL_RATE_PER_HOUR`, `CONNS_PER_IP` and `CONNS_PER_IP_PER_BOX` to `share`; neither cap counts loopback, private or link-local sources, which is what Docker's userland proxy and boxes on the relay's own LAN arrive from, and `SHARE_PSL_TXT`, `PROTECT_RATE_PER_HOUR`, `FILTER_MAX_ENTRIES`, `COMMUNITY_MIN_FLEET_AGE`, `CONNS_PER_IP` and `CONNS_PER_IP_PER_BOX` to `enrolment`, as shown there); none needs changing except `SHARE_PSL_TXT` once you have a PSL request.
 
 ### Compose override
 

@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ReCasaOS/recasaos-relay/internal/community"
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
-	"github.com/ReCasaOS/recasaos-relay/internal/community"
 	"github.com/ReCasaOS/recasaos-relay/internal/protect"
 	"github.com/ReCasaOS/recasaos-relay/internal/ratelimit"
 	"github.com/ReCasaOS/recasaos-relay/internal/sharename"
@@ -51,6 +51,7 @@ type Config struct {
 
 	FilterMaxEntries     int           // entries of all enabled feeds together; a feed past it is refused whole
 	CommunityMinFleetAge time.Duration // age a fleet needs for its ban reports to count (lowered only by tests)
+	ProtectRatePerHour   int           // protection routes of the boxes (protection, bans, refusals) per hour, per IP, counted before the signature is checked
 }
 
 // prefix48Factor: an IPv6 /48 may create this many times CREATE_RATE_PER_HOUR fleets per hour in
@@ -119,9 +120,13 @@ func New(cfg Config, deps Deps) http.Handler {
 		mux.HandleFunc("GET /v1/share", cfg.shareEnabled(sh.status))
 		mux.HandleFunc("PUT /v1/share/acme", cfg.shareEnabled(sh.putACME))
 		mux.HandleFunc("DELETE /v1/share/acme", cfg.shareEnabled(sh.deleteACME))
-		mux.HandleFunc("PUT /v1/share/protection", cfg.shareEnabled(sh.putProtection))
-		mux.HandleFunc("POST /v1/share/bans", cfg.shareEnabled(sh.postBans))
-		mux.HandleFunc("GET /v1/share/refusals", cfg.shareEnabled(sh.getRefusals))
+		// The protection routes count on their own budget: bans sent all through an attack must not
+		// use up the one of the name and ACME routes.
+		ph := *sh
+		ph.authLimiter = ratelimit.New(cfg.ProtectRatePerHour, deps.Now).OpenWhenFull()
+		mux.HandleFunc("PUT /v1/share/protection", cfg.shareEnabled(ph.putProtection))
+		mux.HandleFunc("POST /v1/share/bans", cfg.shareEnabled(ph.postBans))
+		mux.HandleFunc("GET /v1/share/refusals", cfg.shareEnabled(ph.getRefusals))
 		if cfg.ShareDomain != "" { // like the /v1/share routes, absent (404) while sharing is off
 			in := &internalHandler{deps: deps, beats: beats}
 			mux.Handle("GET /internal/share/boxes/{key}", internalOnly(cfg.TrustedProxyHeader, in.boxByKey))
@@ -217,6 +222,9 @@ func ConfigFromEnv() (Config, error) {
 		return c, err
 	}
 	if c.CommunityMinFleetAge, err = envDuration("COMMUNITY_MIN_FLEET_AGE", 7*24*time.Hour); err != nil {
+		return c, err
+	}
+	if c.ProtectRatePerHour, err = envInt("PROTECT_RATE_PER_HOUR", 600); err != nil {
 		return c, err
 	}
 	return c, nil

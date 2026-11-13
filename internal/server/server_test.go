@@ -43,7 +43,7 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 		LoginServer:    "https://relay.example",
 		DeviceCodeTTL:  10 * time.Minute, MaxPendingDeviceCodes: 5, LoginRatePerHour: 20,
 		ShareACMETTL: 10 * time.Minute, ShareACMERatePerHour: 20,
-		FilterMaxEntries: 1_000_000, CommunityMinFleetAge: 168 * time.Hour,
+		FilterMaxEntries: 1_000_000, CommunityMinFleetAge: 168 * time.Hour, ProtectRatePerHour: 600,
 	}
 	if got != want {
 		t.Fatalf("defaults = %+v, want %+v", got, want)
@@ -70,6 +70,7 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 	t.Setenv("SHARE_ACME_RATE_PER_HOUR", "3")
 	t.Setenv("FILTER_MAX_ENTRIES", "500")
 	t.Setenv("COMMUNITY_MIN_FLEET_AGE", "1m")
+	t.Setenv("PROTECT_RATE_PER_HOUR", "11")
 	got, err := ConfigFromEnv()
 	if err != nil {
 		t.Fatal(err)
@@ -79,7 +80,7 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 		MaxFleetsPerOrigin: 6, MaxFleetsPerPrefix48: 7, MaxDevicesPerFleet: 8,
 		DeviceCodeTTL: 10 * time.Minute, MaxPendingDeviceCodes: 5, LoginRatePerHour: 20,
 		ShareDomain: "share.example", ShareACMETTL: time.Minute, ShareACMERatePerHour: 3,
-		FilterMaxEntries: 500, CommunityMinFleetAge: time.Minute}
+		FilterMaxEntries: 500, CommunityMinFleetAge: time.Minute, ProtectRatePerHour: 11}
 	if got != want {
 		t.Fatalf("overrides = %+v, want %+v", got, want)
 	}
@@ -87,14 +88,15 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 
 func TestConfigFromEnvInvalid(t *testing.T) {
 	for k, v := range map[string]string{
-		"NODES_PER_FLEET":    "abc",
-		"KEY_RATE_PER_HOUR":  "0",
-		"AUTH_RATE_PER_HOUR": "-5",
-		"JOIN_KEY_TTL":       "soon",
-		"IDLE_AFTER":         "-1h",
-		"GC_INTERVAL":        "0s",
-		"MAX_FLEETS":         "0",
-		"MAX_PENDING_KEYS":   "-1",
+		"NODES_PER_FLEET":       "abc",
+		"KEY_RATE_PER_HOUR":     "0",
+		"AUTH_RATE_PER_HOUR":    "-5",
+		"JOIN_KEY_TTL":          "soon",
+		"IDLE_AFTER":            "-1h",
+		"GC_INTERVAL":           "0s",
+		"MAX_FLEETS":            "0",
+		"MAX_PENDING_KEYS":      "-1",
+		"PROTECT_RATE_PER_HOUR": "0",
 	} {
 		t.Run(k, func(t *testing.T) {
 			t.Setenv("LOGIN_SERVER", "https://relay.example") // valid: the error must come from k

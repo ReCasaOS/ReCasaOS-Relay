@@ -42,6 +42,7 @@ func setupDelDeps(t *testing.T, mutate func(*Config), deps func(*Deps)) delEnv {
 		c.NodesPerFleet = 3
 		c.KeyRatePerHour = 1000
 		c.AuthRatePerHour = 1000
+		c.ProtectRatePerHour = 1000
 		c.JoinKeyTTL = time.Hour
 		if mutate != nil {
 			mutate(c)
