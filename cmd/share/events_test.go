@@ -164,7 +164,7 @@ func TestCapRefusalCounted(t *testing.T) {
 	hold := make(chan struct{})
 	var wg sync.WaitGroup
 	e := newEvents()
-	accept(&listOf{conns: []net.Conn{fromAddr{c1, visitor}, fromAddr{c2, visitor}}}, &wg, newConnCap(1, "test"), e,
+	accept(&listOf{conns: []net.Conn{fromAddr{c1, visitor}, fromAddr{c2, visitor}}}, &wg, newConnCap(1, "test"), e, nil,
 		func(net.Conn) { <-hold })
 	close(hold)
 	wg.Wait()
@@ -185,7 +185,7 @@ func TestVisitorSeenOnceStreamIsOpen(t *testing.T) {
 	go func() {
 		defer close(done)
 		defer c1.Close()
-		toTunnel(reg, perBox, nil, e, "alpha", fromAddr{c1, visitor}, c1)
+		toTunnel(reg, perBox, nil, e, nil, "", "alpha", fromAddr{c1, visitor}, c1)
 	}()
 	in, err := box.Accept()
 	if err != nil {
@@ -193,7 +193,7 @@ func TestVisitorSeenOnceStreamIsOpen(t *testing.T) {
 	}
 	v2, c2 := tcpPair(t) // same address, past the per-box cap
 	defer v2.Close()
-	toTunnel(reg, perBox, nil, e, "alpha", fromAddr{c2, visitor}, c2)
+	toTunnel(reg, perBox, nil, e, nil, "", "alpha", fromAddr{c2, visitor}, c2)
 	c2.Close()
 	in.Close()
 	v1.Close()

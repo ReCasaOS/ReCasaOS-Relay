@@ -23,6 +23,9 @@ type Config struct {
 	ConnsPerIP                          int  // open connections per client IP (IPv6: per /64), on 80 and 443 together
 	ConnsPerIPPerBox                    int  // open visitor streams per client IP into one box's tunnel
 	FrontProxyProtocol                  bool // send a PROXY v2 header to FrontTLS/FrontHTTP
+	LogDir                              string        // journal directory; empty: no journal
+	LogKeep                             time.Duration // how long journal files are kept, at most 7 days
+	LogMaxSize                          int64         // journal size cap, bytes
 }
 
 func getenv(key, def string) string {
@@ -43,6 +46,7 @@ func ConfigFromEnv() (Config, error) {
 		EnrolmentURL: getenv("ENROLMENT_URL", "http://enrolment:8081"),
 		RelayHost:    strings.ToLower(strings.TrimSpace(os.Getenv("RELAY_HOST"))),
 		ShareDomain:  strings.ToLower(strings.TrimSpace(os.Getenv("SHARE_DOMAIN"))),
+		LogDir:       getenv("LOG_DIR", "/logs"),
 	}
 	if c.RelayHost == "" || c.ShareDomain == "" {
 		return Config{}, errors.New("RELAY_HOST and SHARE_DOMAIN are required")
@@ -76,6 +80,12 @@ func ConfigFromEnv() (Config, error) {
 	}
 	if c.FrontProxyProtocol, err = strconv.ParseBool(getenv("FRONT_PROXY_PROTOCOL", "true")); err != nil {
 		return Config{}, fmt.Errorf("FRONT_PROXY_PROTOCOL: want true or false, got %q", os.Getenv("FRONT_PROXY_PROTOCOL"))
+	}
+	if c.LogKeep, err = time.ParseDuration(getenv("LOG_KEEP", "168h")); err != nil || c.LogKeep <= 0 || c.LogKeep > 168*time.Hour {
+		return Config{}, fmt.Errorf("LOG_KEEP: want a duration above 0 and at most 168h, got %q", os.Getenv("LOG_KEEP"))
+	}
+	if c.LogMaxSize, err = strconv.ParseInt(getenv("LOG_MAX_SIZE", "1073741824"), 10, 64); err != nil || c.LogMaxSize <= 0 {
+		return Config{}, fmt.Errorf("LOG_MAX_SIZE: want a positive number of bytes, got %q", os.Getenv("LOG_MAX_SIZE"))
 	}
 	return c, nil
 }

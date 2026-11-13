@@ -10,8 +10,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync/atomic"
 	"time"
 
+	"github.com/ReCasaOS/recasaos-relay/internal/journal"
 	"github.com/ReCasaOS/recasaos-relay/internal/proxyproto"
 	"github.com/ReCasaOS/recasaos-relay/internal/sni"
 	"github.com/ReCasaOS/recasaos-relay/internal/tunnel"
@@ -67,7 +69,8 @@ func resolver(enrolmentURL string) tunnel.Resolver {
 // unless fh's filter refuses c's address for that box, or c's address already holds perBox's max
 // streams of that box: one address alone must not fill the tunnel's tunnel.MaxStreams and lock every
 // other visitor out. A name no tunnel serves closes silently, before the filter: nothing is recorded.
-func toTunnel(reg *tunnel.Registry, perBox *connCap, fh *filterHolder, ev *events, box string, c, replay net.Conn) {
+func toTunnel(reg *tunnel.Registry, perBox *connCap, fh *filterHolder, ev *events, jw *journal.Writer, host, box string, c, replay net.Conn) {
+	start := time.Now()
 	t, ok := reg.Get(box)
 	if !ok {
 		return
@@ -78,6 +81,7 @@ func toTunnel(reg *tunnel.Registry, perBox *connCap, fh *filterHolder, ev *event
 		if a, ok := remoteAddr(c); ok {
 			if reason, source := f.decide(a, box); reason != "" {
 				ev.refused(box, eventKey(a), reason, source)
+				logCut(jw, c, host, reason, source)
 				return
 			}
 		}
@@ -88,6 +92,7 @@ func toTunnel(reg *tunnel.Registry, perBox *connCap, fh *filterHolder, ev *event
 	}
 	if !perBox.acquire(k) {
 		ev.refused(box, connKey(c), "cap", "ip-box")
+		logCut(jw, c, host, "cap", "ip-box")
 		return
 	}
 	defer perBox.release(k)
@@ -108,7 +113,26 @@ func toTunnel(reg *tunnel.Registry, perBox *connCap, fh *filterHolder, ev *event
 	// Idle for idleTimeout either way: close both ends, or the stream would stay held forever.
 	idle := time.AfterFunc(idleTimeout, func() { c.Close(); stream.SetDeadline(time.Now()) })
 	defer idle.Stop()
-	sni.Forward(&idleConn{Conn: replay, t: idle}, stream) // the stream counts the bytes into t
+	logLine(jw, c, host, "pass")
+	vc := &idleConn{Conn: replay, t: idle}
+	sni.Forward(vc, stream) // the stream counts the bytes into t
+	jw.Write(journal.Entry{Src: "share", IP: peerIP(c), Host: host, Act: "close", Ms: time.Since(start).Milliseconds(), In: vc.in.Load(), Out: vc.out.Load()})
+}
+
+// peerIP is the visitor's plain address (not the /64 key); private ones too: it is the operator's own log.
+func peerIP(c net.Conn) string {
+	if a, ok := remoteAddr(c); ok {
+		return a.String()
+	}
+	return ""
+}
+
+func logLine(jw *journal.Writer, c net.Conn, host, act string) {
+	jw.Write(journal.Entry{Src: "share", IP: peerIP(c), Host: host, Act: act})
+}
+
+func logCut(jw *journal.Writer, c net.Conn, host, reason, source string) {
+	jw.Write(journal.Entry{Src: "share", IP: peerIP(c), Host: host, Act: "cut", Reason: reason, Source: source})
 }
 
 // idleTimeout closes a visitor connection that moved no byte in either direction for that long.
@@ -117,17 +141,20 @@ var idleTimeout = 5 * time.Minute
 // idleConn pushes its timer back on every read and write: it carries both directions of the visitor.
 type idleConn struct {
 	net.Conn
-	t *time.Timer
+	t       *time.Timer
+	in, out atomic.Int64 // bytes read from / written to the visitor; the two copy goroutines each own one
 }
 
 func (c *idleConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
+	c.in.Add(int64(n))
 	c.t.Reset(idleTimeout)
 	return n, err
 }
 
 func (c *idleConn) Write(p []byte) (int, error) {
 	n, err := c.Conn.Write(p)
+	c.out.Add(int64(n))
 	c.t.Reset(idleTimeout)
 	return n, err
 }

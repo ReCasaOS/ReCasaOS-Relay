@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/ReCasaOS/recasaos-relay/internal/journal"
 	"github.com/ReCasaOS/recasaos-relay/internal/proxyproto"
 	"github.com/ReCasaOS/recasaos-relay/internal/ratelimit"
 	"github.com/ReCasaOS/recasaos-relay/internal/sni"
@@ -34,6 +36,14 @@ func run() error {
 	cfg, err := ConfigFromEnv()
 	if err != nil {
 		return err
+	}
+	var jw *journal.Writer // nil without LOG_DIR: every journal call is then a no-op
+	if cfg.LogDir != "" {
+		if jw, err = journal.Open(cfg.LogDir, "share", cfg.LogKeep, cfg.LogMaxSize, time.Now); err != nil {
+			return err
+		}
+		log.SetOutput(io.MultiWriter(os.Stderr, jw.Log()))
+		defer closeJournal(jw)
 	}
 	lt, err := net.Listen("tcp", cfg.ListenTLS)
 	if err != nil {
@@ -94,11 +104,11 @@ func run() error {
 	acceptors.Add(2)
 	go func() {
 		defer acceptors.Done()
-		accept(lt, &inflight, perIP, ev, func(c net.Conn) { handleTLS(cfg, reg, perBox, fh, ev, c) })
+		accept(lt, &inflight, perIP, ev, jw, func(c net.Conn) { handleTLS(cfg, reg, perBox, fh, ev, jw, c) })
 	}()
 	go func() {
 		defer acceptors.Done()
-		accept(lh, &inflight, perIP, ev, func(c net.Conn) { toFront(c, cfg.FrontHTTP, cfg.FrontProxyProtocol) })
+		accept(lh, &inflight, perIP, ev, jw, func(c net.Conn) { toFront(c, cfg.FrontHTTP, cfg.FrontProxyProtocol) })
 	}()
 	acceptors.Wait()
 
@@ -117,9 +127,19 @@ func run() error {
 	}
 }
 
+// closeJournal flushes the journal, but a hanging disk must not hold the shutdown for more than 5 s.
+func closeJournal(jw *journal.Writer) {
+	done := make(chan struct{})
+	go func() { jw.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+	}
+}
+
 // accept serves l until it is closed. A connection from an address that already holds perIP's max is
 // closed at once, before any byte is read.
-func accept(l net.Listener, wg *sync.WaitGroup, perIP *connCap, ev *events, handle func(net.Conn)) {
+func accept(l net.Listener, wg *sync.WaitGroup, perIP *connCap, ev *events, jw *journal.Writer, handle func(net.Conn)) {
 	var delay time.Duration
 	for {
 		c, err := l.Accept()
@@ -141,6 +161,7 @@ func accept(l net.Listener, wg *sync.WaitGroup, perIP *connCap, ev *events, hand
 		k := ipKey(c.RemoteAddr())
 		if !perIP.acquire(k) {
 			ev.refused("", connKey(c), "cap", "ip")
+			logCut(jw, c, "", "cap", "ip")
 			c.Close()
 			continue
 		}
@@ -149,7 +170,7 @@ func accept(l net.Listener, wg *sync.WaitGroup, perIP *connCap, ev *events, hand
 	}
 }
 
-func handleTLS(cfg Config, reg *tunnel.Registry, perBox *connCap, fh *filterHolder, ev *events, c net.Conn) {
+func handleTLS(cfg Config, reg *tunnel.Registry, perBox *connCap, fh *filterHolder, ev *events, jw *journal.Writer, c net.Conn) {
 	name, replay, err := sni.PeekServerName(c, cfg.PeekTimeout)
 	if err != nil && !errors.Is(err, sni.ErrNotTLS) {
 		return
@@ -159,7 +180,7 @@ func handleTLS(cfg Config, reg *tunnel.Registry, perBox *connCap, fh *filterHold
 	case front: // non-TLS bytes (err == ErrNotTLS) go to front as well
 		toFront(replay, cfg.FrontTLS, cfg.FrontProxyProtocol)
 	case box != "":
-		toTunnel(reg, perBox, fh, ev, box, c, replay)
+		toTunnel(reg, perBox, fh, ev, jw, name, box, c, replay)
 	}
 }
 
