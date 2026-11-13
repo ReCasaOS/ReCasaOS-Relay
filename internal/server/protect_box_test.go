@@ -90,8 +90,7 @@ func TestBansRejectsBadItems(t *testing.T) {
 		if i == len(bad)-1 {
 			body = it
 		}
-		wantStatus(t, e.as(b, "PUT", "/v1/share/protection", `{"relay_filter":true,"share_bans":false}`), 200, "") // resync: no new line
-	wantStatus(t, e.as(b, "POST", "/v1/share/bans", body), 400, "")
+		wantStatus(t, e.as(b, "POST", "/v1/share/bans", body), 400, "")
 	}
 	many := strings.Repeat(item("203.0.113.7", "scan", "jellyfin", since)+",", 200) + item("203.0.113.7", "scan", "jellyfin", since)
 	wantStatus(t, e.as(b, "POST", "/v1/share/bans", `{"bans":[`+many+`]}`), 400, "")
@@ -217,12 +216,14 @@ func TestJournalProtectionPut(t *testing.T) {
 		func(d *Deps) { d.Community = &community.Engine{Store: d.Store, Now: d.Now}; d.Journal = jw })}
 	b := e.linked(t, "box-a")
 	wantStatus(t, e.as(b, "PUT", "/v1/share/protection", `{"relay_filter":true,"share_bans":false}`), 200, "")
+	wantStatus(t, e.as(b, "PUT", "/v1/share/protection", `{"relay_filter":true,"share_bans":false}`), 200, "") // resync: no new line
+	wantStatus(t, e.as(b, "PUT", "/v1/share/protection", `{"relay_filter":true,"share_bans":true}`), 200, "")
 	wantStatus(t, e.as(b, "POST", "/v1/share/bans", `{"bans":[]}`), 204, "")
 	var n int
 	for _, l := range read() {
 		if l.Event == "protection" {
 			n++
-			if l.Src != "relay" || l.Msg != b.node+" relay_filter=true share_bans=false" {
+			if want := b.node + " relay_filter=true share_bans=" + map[int]string{1: "false", 2: "true"}[n]; l.Src != "relay" || l.Msg != want {
 				t.Fatalf("%+v", l)
 			}
 		}
@@ -230,7 +231,7 @@ func TestJournalProtectionPut(t *testing.T) {
 			t.Fatalf("a post that accepts nothing writes no line: %+v", l)
 		}
 	}
-	if n != 1 {
+	if n != 2 {
 		t.Fatalf("protection lines: %d", n)
 	}
 }
