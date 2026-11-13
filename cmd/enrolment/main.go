@@ -66,7 +66,8 @@ func run() error {
 	if apiKey == "" {
 		return errors.New("HEADSCALE_API_KEY is required (docker compose exec headscale headscale apikeys create)")
 	}
-	st, err := store.Open(getenv("STORE_PATH", "/data/relay.db"))
+	storePath := getenv("STORE_PATH", "/data/relay.db")
+	st, err := store.Open(storePath)
 	if err != nil {
 		return err
 	}
@@ -95,12 +96,23 @@ func run() error {
 	} else {
 		log.Printf("traffic metering is off: DERPER_DEBUG_KEY is not set")
 	}
+	// Relay-side protection of shared apps, only with sharing: the filter routes `share` polls exist
+	// only then, and without them nothing would use the feeds or DB-IP.
+	var prot *protection
+	srvDeps := server.Deps{Store: st, Headscale: hs, PolicyHook: pol.Hook, Remover: remover}
+	if cfg.ShareDomain != "" {
+		prot = newProtection(st, storePath, cfg.FilterMaxEntries, cfg.CommunityMinFleetAge)
+		srvDeps.Protect, srvDeps.Community = prot.compiler, prot.engine
+	}
 	// The operator page, under /admin, only when ADMIN_TOKEN is set (404 otherwise).
 	var adminH http.Handler
 	if tok := os.Getenv("ADMIN_TOKEN"); tok != "" {
 		deps := admin.Deps{Store: st, Headscale: hs, Remover: remover}
 		if mtr != nil { // never put a nil *Meter in the interface
 			deps.Meter = mtr
+		}
+		if prot != nil {
+			deps.Feeds, deps.Geo, deps.Protect = prot.feeds, prot.geo, prot.compiler
 		}
 		adminH, err = admin.New(admin.Config{Token: tok, NodesPerFleet: cfg.NodesPerFleet, MaxFleets: cfg.MaxFleets,
 			ClientHeader: cfg.TrustedProxyHeader, MonthlyReference: reference, Version: version,
@@ -109,9 +121,10 @@ func run() error {
 			return err
 		}
 	}
+	srvDeps.Admin = adminH
 	srv := &http.Server{
 		Addr:              getenv("LISTEN_ADDR", ":8081"),
-		Handler:           server.New(cfg, server.Deps{Store: st, Headscale: hs, PolicyHook: pol.Hook, Remover: remover, Admin: adminH}),
+		Handler:           server.New(cfg, srvDeps),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      45 * time.Second, // a create-fleet call may wait on Headscale (20 s) and its rollback
@@ -150,6 +163,7 @@ func run() error {
 	janitorStarted, janitorDone := false, make(chan struct{})
 	meterStarted, meterDone := false, make(chan struct{})
 	zoneStarted, zoneDone := false, make(chan struct{})
+	protectStarted, protectDone := false, make(chan struct{})
 	var zoneErr error // written by the zone goroutine, read after zoneDone is closed
 	waitJanitor := func() {
 		if zone != nil {
@@ -157,6 +171,9 @@ func run() error {
 		}
 		if janitorStarted {
 			<-janitorDone
+		}
+		if protectStarted {
+			<-protectDone
 		}
 		if mtr != nil && meterStarted {
 			<-meterDone
@@ -171,6 +188,13 @@ func run() error {
 				defer close(janitorDone)
 				gc.Run(ctx, gc.Deps{Remover: remover, IdleAfter: cfg.IdleAfter, JoinKeyTTL: cfg.JoinKeyTTL}, cfg.GCEvery)
 			}()
+			if prot != nil {
+				protectStarted = true
+				go func() {
+					defer close(protectDone)
+					prot.run(ctx, time.Minute)
+				}()
+			}
 			if mtr != nil {
 				meterStarted = true
 				go func() {

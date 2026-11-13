@@ -40,22 +40,25 @@ func (f *Fetcher) now() time.Time {
 	return time.Now()
 }
 
-// Tick downloads every enabled feed whose last_try + every_s has passed. A failure also moves
-// last_try, so a broken feed is not retried every minute.
-func (f *Fetcher) Tick(ctx context.Context) {
+// Tick downloads every enabled feed whose last_try + every_s has passed and reports whether a
+// copy was replaced. A failure also moves last_try, so a broken feed is not retried every minute.
+func (f *Fetcher) Tick(ctx context.Context) (replaced bool) {
 	feeds, err := f.Store.Feeds(ctx)
 	if err != nil {
 		log.Printf("feeds: list: %v", err)
-		return
+		return false
 	}
 	for _, fd := range feeds {
 		if ctx.Err() != nil {
-			return
+			return replaced
 		}
 		if fd.Enabled && !f.now().Before(fd.LastTry.Add(time.Duration(fd.EverySec)*time.Second)) {
-			f.fetch(ctx, fd, feeds) // error already recorded in last_error
+			if ok, _ := f.fetch(ctx, fd, feeds); ok { // error already recorded in last_error
+				replaced = true
+			}
 		}
 	}
+	return replaced
 }
 
 // Refresh downloads feed id now.
@@ -66,7 +69,8 @@ func (f *Fetcher) Refresh(ctx context.Context, id int64) error {
 	}
 	for _, fd := range feeds {
 		if fd.ID == id {
-			return f.fetch(ctx, fd, feeds)
+			_, err := f.fetch(ctx, fd, feeds)
+			return err
 		}
 	}
 	return store.ErrNotFound
@@ -94,9 +98,12 @@ func (f *Fetcher) path(id int64) string {
 	return filepath.Join(f.Dir, strconv.FormatInt(id, 10)+".txt")
 }
 
-func (f *Fetcher) fetch(ctx context.Context, fd store.Feed, all []store.Feed) error {
+// fetch downloads fd and records the attempt; replaced is true once the new copy is in place,
+// even if recording the result then fails.
+func (f *Fetcher) fetch(ctx context.Context, fd store.Feed, all []store.Feed) (replaced bool, err error) {
 	at := f.now()
 	n, err := f.download(ctx, fd, all)
+	replaced = err == nil
 	msg := ""
 	if err != nil {
 		msg = err.Error()
@@ -104,7 +111,7 @@ func (f *Fetcher) fetch(ctx context.Context, fd store.Feed, all []store.Feed) er
 	if rerr := f.Store.FeedResult(ctx, fd.ID, at, n, msg); rerr != nil && err == nil {
 		err = rerr
 	}
-	return err
+	return replaced, err
 }
 
 func (f *Fetcher) download(ctx context.Context, fd store.Feed, all []store.Feed) (int, error) {

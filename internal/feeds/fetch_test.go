@@ -133,6 +133,29 @@ func TestFeedNotDueIsSkipped(t *testing.T) {
 	}
 }
 
+// Tick reports whether a copy was replaced: the snapshot is rebuilt only then.
+func TestTickReportsReplacedCopy(t *testing.T) {
+	code := 200
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(code)
+		w.Write([]byte("1.1.1.1\n"))
+	}))
+	defer srv.Close()
+	e := newEnv(t)
+	e.add(t, store.Feed{URL: srv.URL, EverySec: 3600})
+	if !e.f.Tick(context.Background()) {
+		t.Fatal("first download: no change reported")
+	}
+	if e.f.Tick(context.Background()) {
+		t.Fatal("not due, yet changed")
+	}
+	code = 500
+	e.now = e.now.Add(time.Hour)
+	if e.f.Tick(context.Background()) {
+		t.Fatal("failed download reported a change")
+	}
+}
+
 func TestFailureSetsLastTry(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }))
 	defer srv.Close()

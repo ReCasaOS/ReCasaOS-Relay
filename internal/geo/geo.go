@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -54,8 +55,8 @@ func (d *DB) now() time.Time {
 
 func (d *DB) path(name string) string { return filepath.Join(d.Dir, name) }
 
-// reopen swaps in readers for whatever files can be opened now.
-func (d *DB) reopen() {
+// reopen swaps in readers for whatever files can be opened now and reports whether it opened any.
+func (d *DB) reopen() bool {
 	c, _ := maxminddb.Open(d.path(countryFile))
 	a, _ := maxminddb.Open(d.path(asnFile))
 	d.mu.Lock()
@@ -74,6 +75,7 @@ func (d *DB) reopen() {
 		}
 		d.asn = a
 	}
+	return c != nil || a != nil
 }
 
 // month is the "YYYY-MM" a file was written in, "" when it is missing.
@@ -85,8 +87,15 @@ func (d *DB) month(name string) string {
 	return fi.ModTime().UTC().Format("2006-01")
 }
 
-// Version is the file month, "" unless both files exist; with two different months, the older.
+// Version is the file month, "" until the files are open and unless both exist; with two
+// different months, the older. An expansion cached before the first open is so never reused.
 func (d *DB) Version() string {
+	d.mu.RLock()
+	loaded := d.loaded
+	d.mu.RUnlock()
+	if !loaded {
+		return ""
+	}
 	c, a := d.month(countryFile), d.month(asnFile)
 	if c == "" || a == "" {
 		return ""
@@ -96,12 +105,13 @@ func (d *DB) Version() string {
 
 // Tick opens the files on first use, then at most once a day (an hour after a failure) fetches
 // the current month's files when they are missing or older. A failure keeps the old files.
-func (d *DB) Tick(ctx context.Context) error {
+// changed is true when the files in use changed: opened for the first time or replaced.
+func (d *DB) Tick(ctx context.Context) (changed bool, err error) {
 	d.mu.RLock()
 	loaded := d.loaded
 	d.mu.RUnlock()
 	if !loaded {
-		d.reopen()
+		changed = d.reopen()
 	}
 	now := d.now()
 	wait := okEvery
@@ -109,7 +119,7 @@ func (d *DB) Tick(ctx context.Context) error {
 		wait = retryEvery
 	}
 	if !d.checked.IsZero() && now.Sub(d.checked) < wait {
-		return nil
+		return changed, nil
 	}
 	d.checked, d.failed = now, false
 	month := now.UTC().Format("2006-01")
@@ -130,7 +140,7 @@ func (d *DB) Tick(ctx context.Context) error {
 		d.reopen()
 	}
 	d.failed = len(errs) > 0
-	return errors.Join(errs...)
+	return changed || updated, errors.Join(errs...)
 }
 
 func (d *DB) fetch(ctx context.Context, file, remote string) error {
@@ -147,6 +157,9 @@ func (d *DB) fetch(ctx context.Context, file, remote string) error {
 		return err
 	}
 	resp, err := cl.Do(req)
+	if ue := (*url.Error)(nil); errors.As(err, &ue) { // its message carries the URL: log only the cause
+		err = ue.Err
+	}
 	if err != nil {
 		return err
 	}

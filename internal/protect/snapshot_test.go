@@ -43,6 +43,14 @@ func mmdb(t *testing.T, typ string, nets map[string]mmdbtype.Map) []byte {
 
 func fixture(t *testing.T) (*Compiler, store.Store) {
 	t.Helper()
+	c, st := coldFixture(t)
+	c.Geo.Tick(context.Background()) // opens the files; they are from this month, nothing is fetched
+	return c, st
+}
+
+// coldFixture is fixture with the DB-IP files on disk but not opened yet (a relay just started).
+func coldFixture(t *testing.T) (*Compiler, store.Store) {
+	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "r.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -59,7 +67,6 @@ func fixture(t *testing.T) (*Compiler, store.Store) {
 		"203.0.113.0/24": {"autonomous_system_number": mmdbtype.Uint32(64500), "autonomous_system_organization": mmdbtype.String("N")},
 	}), 0o644)
 	g := &geo.DB{Dir: dir, BaseURL: "http://127.0.0.1:1/"}
-	g.Tick(context.Background()) // opens the files; they are from this month, nothing is fetched
 	f := &feeds.Fetcher{Store: st, Dir: t.TempDir()}
 	return &Compiler{Store: st, Feeds: f, Geo: g, Now: func() time.Time { return t0 }}, st
 }
@@ -144,9 +151,55 @@ func TestCurrentCachesUntilInvalidateOrAge(t *testing.T) {
 		t.Fatal("Invalidate did not rebuild")
 	}
 	st.AddAllow(ctx, store.AllowEntry{Prefix: "172.16.0.0/12", Added: t0})
-	now = now.Add(31 * time.Second)
+	now = now.Add(31 * time.Second) // the poll interval of share: no rebuild without a change
+	if _, v, _ := c.Current(ctx); v != v2 {
+		t.Fatal("rebuilt at 31 s without Invalidate")
+	}
+	now = now.Add(5 * time.Minute)
 	if _, v, _ := c.Current(ctx); v == v2 {
-		t.Fatal("old snapshot kept")
+		t.Fatal("old snapshot kept past maxAge")
+	}
+}
+
+// A ban that ends leaves the snapshot at its end, without Invalidate and before maxAge: manual
+// bans and community bans alike.
+func TestCurrentRebuildsWhenABanEnds(t *testing.T) {
+	ctx := context.Background()
+	c, st := fixture(t)
+	now := t0
+	c.Now = func() time.Time { return now }
+	st.AddManual(ctx, store.ManualBan{Kind: "address", Value: "198.51.100.200", Since: t0, Until: t0.Add(2 * time.Minute)})
+	st.AddManual(ctx, store.ManualBan{Kind: "address", Value: "198.51.100.201", Since: t0})
+	st.OpenBan(ctx, store.CommunityBan{Key: "203.0.113.7/32", Kind: "address", Since: t0, Until: t0.Add(3 * time.Minute), Reasons: "scan", Fleets: 2}, nil)
+	has := func(s string) bool { b, _, _ := c.Current(ctx); return bytes.Contains(b, []byte(s)) }
+	if !has("198.51.100.200/32") || !has("198.51.100.201/32") || !has("203.0.113.7/32") {
+		t.Fatal("bans missing at start")
+	}
+	now = t0.Add(2 * time.Minute)
+	if has("198.51.100.200/32") || !has("198.51.100.201/32") || !has("203.0.113.7/32") {
+		t.Fatal("ended manual ban kept")
+	}
+	now = t0.Add(3 * time.Minute)
+	if has("203.0.113.7/32") || !has("198.51.100.201/32") {
+		t.Fatal("ended community ban kept")
+	}
+}
+
+// share polls within seconds of a start, before the first protection tick has opened the DB-IP
+// files: a country ban built then must fill in once the files are open and the cache invalidated.
+func TestCountryBanFillsInAfterGeoOpens(t *testing.T) {
+	ctx := context.Background()
+	c, st := coldFixture(t)
+	st.AddManual(ctx, store.ManualBan{Kind: "country", Value: "XX", Since: t0})
+	if b, _, err := c.Current(ctx); err != nil || bytes.Contains(b, []byte("203.0.113.0/24")) {
+		t.Fatalf("%s %v", b, err)
+	}
+	if changed, err := c.Geo.Tick(ctx); err != nil || !changed {
+		t.Fatalf("first open: changed %v, %v", changed, err)
+	}
+	c.Invalidate()
+	if b, _, _ := c.Current(ctx); !bytes.Contains(b, []byte("203.0.113.0/24")) {
+		t.Fatalf("country prefixes missing after the files opened: %s", b)
 	}
 }
 

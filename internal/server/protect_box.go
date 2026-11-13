@@ -55,9 +55,7 @@ func (h *shareHandler) putProtection(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "set protection", err)
 		return
 	}
-	if h.deps.Protect != nil {
-		h.deps.Protect.Invalidate()
-	}
+	h.invalidate()
 	bans, err := h.deps.Store.ActiveBans(ctx, now)
 	if err != nil {
 		internalError(w, "active bans", err)

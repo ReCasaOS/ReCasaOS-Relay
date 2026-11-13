@@ -177,17 +177,18 @@ func rangeOf(p netip.Prefix) netip.Prefix {
 	return netip.PrefixFrom(p.Addr(), bits).Masked()
 }
 
-// Tick ends the expired bans, then opens the address and range bans that are due. Only evidence
+// Tick ends the expired bans, then opens the address and range bans that are due, and reports
+// whether it opened any (an ended ban has already left ActiveBans at its end time). Only evidence
 // newer than the end of a key's previous ban counts, so a ban that ends or is lifted is not
 // reopened (and escalated) on the reports or bans that opened it. Running it twice is a no-op.
-func (e *Engine) Tick(ctx context.Context) error {
+func (e *Engine) Tick(ctx context.Context) (opened bool, err error) {
 	now := e.now()
 	if err := e.Store.EndExpired(ctx, now); err != nil {
-		return err
+		return false, err
 	}
 	reports, err := e.Store.ReportsSince(ctx, now.Add(-window))
 	if err != nil {
-		return err
+		return false, err
 	}
 	byKey := map[string][]store.Report{}
 	for _, r := range reports {
@@ -195,7 +196,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 	}
 	active, err := e.activeKeys(ctx, now)
 	if err != nil {
-		return err
+		return false, err
 	}
 	for _, key := range slices.Sorted(maps.Keys(byKey)) {
 		p, err := netip.ParsePrefix(key)
@@ -204,7 +205,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 		}
 		_, lastEnd, err := e.Store.Strikes(ctx, key)
 		if err != nil {
-			return err
+			return opened, err
 		}
 		var ev evidence
 		for _, r := range byKey[key] {
@@ -216,16 +217,18 @@ func (e *Engine) Tick(ctx context.Context) error {
 			continue
 		}
 		if err := e.open(ctx, key, "address", now, ev); err != nil {
-			return err
+			return opened, err
 		}
+		opened = true
 	}
-	return e.tickRanges(ctx, now, byKey)
+	ranges, err := e.tickRanges(ctx, now, byKey)
+	return opened || ranges, err
 }
 
-func (e *Engine) tickRanges(ctx context.Context, now time.Time, byKey map[string][]store.Report) error {
+func (e *Engine) tickRanges(ctx context.Context, now time.Time, byKey map[string][]store.Report) (opened bool, err error) {
 	bans, err := e.Store.ActiveBans(ctx, now)
 	if err != nil {
-		return err
+		return false, err
 	}
 	members := map[netip.Prefix][]store.CommunityBan{}
 	active := map[string]bool{}
@@ -243,7 +246,7 @@ func (e *Engine) tickRanges(ctx context.Context, now time.Time, byKey map[string
 		}
 		_, lastEnd, err := e.Store.Strikes(ctx, key)
 		if err != nil {
-			return err
+			return opened, err
 		}
 		// shortcut: openers are the fleets of the last 24 h reports on member keys; a member
 		// opened earlier (a 7-day ban) adds its reasons but no fleet.
@@ -263,10 +266,11 @@ func (e *Engine) tickRanges(ctx context.Context, now time.Time, byKey map[string
 			continue
 		}
 		if err := e.open(ctx, key, "range", now, ev); err != nil {
-			return err
+			return opened, err
 		}
+		opened = true
 	}
-	return nil
+	return opened, nil
 }
 
 func (e *Engine) activeKeys(ctx context.Context, now time.Time) (map[string]bool, error) {

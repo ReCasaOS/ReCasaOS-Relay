@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -140,7 +141,7 @@ func TestDownloadReplacesOldMonth(t *testing.T) {
 	defer srv.Close()
 	now := time.Date(2026, 12, 3, 10, 0, 0, 0, time.UTC)
 	d := &DB{Dir: t.TempDir(), BaseURL: srv.URL + "/", Now: func() time.Time { return now }}
-	if err := d.Tick(t.Context()); err != nil {
+	if _, err := d.Tick(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if d.Country(netip.MustParseAddr("203.0.113.1")) != "XX" {
@@ -166,7 +167,7 @@ func TestFailedDownloadRetriesAfterAnHour(t *testing.T) {
 	defer srv.Close()
 	now := time.Date(2026, 12, 3, 10, 0, 0, 0, time.UTC)
 	d := &DB{Dir: t.TempDir(), BaseURL: srv.URL + "/", Now: func() time.Time { return now }}
-	if d.Tick(t.Context()) == nil {
+	if _, err := d.Tick(t.Context()); err == nil {
 		t.Fatal("500 accepted")
 	}
 	h := hits.Load()
@@ -189,7 +190,7 @@ func TestDownloadKeepsOldOnBadGzip(t *testing.T) {
 	defer srv.Close()
 	now := time.Now().AddDate(0, 2, 0)
 	d.BaseURL, d.Now = srv.URL+"/", func() time.Time { return now }
-	if err := d.Tick(t.Context()); err == nil {
+	if _, err := d.Tick(t.Context()); err == nil {
 		t.Fatal("bad gzip accepted")
 	}
 	if got := d.CountryPrefixes("XX"); !slices.Equal(got, old) {
@@ -203,7 +204,7 @@ func TestDownloadKeepsOldOnBadGzip(t *testing.T) {
 	defer srv2.Close()
 	d.BaseURL = srv2.URL + "/"
 	now = now.Add(2 * time.Hour)
-	if err := d.Tick(t.Context()); err == nil {
+	if _, err := d.Tick(t.Context()); err == nil {
 		t.Fatal("non-mmdb accepted")
 	}
 	if got := d.CountryPrefixes("XX"); !slices.Equal(got, old) {
@@ -215,7 +216,7 @@ func TestDownloadCapsDecompressedSize(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(gz(countryDB(t))) }))
 	defer srv.Close()
 	d := &DB{Dir: t.TempDir(), BaseURL: srv.URL + "/", MaxRaw: 100}
-	if d.Tick(t.Context()) == nil {
+	if _, err := d.Tick(t.Context()); err == nil {
 		t.Fatal("oversized file accepted")
 	}
 	if m, _ := filepath.Glob(filepath.Join(d.Dir, "*")); len(m) != 0 {
@@ -241,5 +242,44 @@ func TestReopenKeepsGoodReaderOnBadFile(t *testing.T) {
 	d.reopen()
 	if d.Country(netip.MustParseAddr("203.0.113.1")) != "XX" {
 		t.Fatal("good reader replaced")
+	}
+}
+
+// Tick says when the files in use changed: on the first open and on a download, not otherwise.
+func TestTickReportsChange(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, countryFile), countryDB(t), 0o644)
+	os.WriteFile(filepath.Join(dir, asnFile), asnDB(t), 0o644)
+	d := &DB{Dir: dir, BaseURL: "http://127.0.0.1:1/"}
+	if d.Version() != "" {
+		t.Fatalf("version before the files are open: %q", d.Version())
+	}
+	if changed, err := d.Tick(t.Context()); err != nil || !changed {
+		t.Fatalf("first open: %v %v", changed, err)
+	}
+	if d.Version() == "" {
+		t.Fatal("no version once open")
+	}
+	if changed, _ := d.Tick(t.Context()); changed {
+		t.Fatal("second tick changed")
+	}
+	later := time.Now().Add(25 * time.Hour) // the daily check: files still current (or the fetch fails)
+	d.Now = func() time.Time { return later }
+	if changed, _ := d.Tick(t.Context()); changed {
+		t.Fatal("daily check changed nothing, yet reported a change")
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "country") {
+			w.Write(gz(countryDB(t)))
+		} else {
+			w.Write(gz(asnDB(t)))
+		}
+	}))
+	defer srv.Close()
+	now := time.Now().AddDate(0, 2, 0)
+	d2 := &DB{Dir: t.TempDir(), BaseURL: srv.URL + "/", Now: func() time.Time { return now }}
+	if changed, err := d2.Tick(t.Context()); err != nil || !changed {
+		t.Fatalf("download: %v %v", changed, err)
 	}
 }

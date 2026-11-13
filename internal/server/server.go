@@ -48,6 +48,9 @@ type Config struct {
 	ShareDomain          string        // public sharing: boxes get <name>.<ShareDomain>; empty disables every share route (503)
 	ShareACMETTL         time.Duration // validity of an _acme-challenge TXT value
 	ShareACMERatePerHour int           // ACME TXT writes per hour, per box
+
+	FilterMaxEntries     int           // entries of all enabled feeds together; a feed past it is refused whole
+	CommunityMinFleetAge time.Duration // age a fleet needs for its ban reports to count (lowered only by tests)
 }
 
 // prefix48Factor: an IPv6 /48 may create this many times CREATE_RATE_PER_HOUR fleets per hour in
@@ -208,6 +211,12 @@ func ConfigFromEnv() (Config, error) {
 		return c, err
 	}
 	if c.ShareACMERatePerHour, err = envInt("SHARE_ACME_RATE_PER_HOUR", 20); err != nil {
+		return c, err
+	}
+	if c.FilterMaxEntries, err = envInt("FILTER_MAX_ENTRIES", 1_000_000); err != nil {
+		return c, err
+	}
+	if c.CommunityMinFleetAge, err = envDuration("COMMUNITY_MIN_FLEET_AGE", 7*24*time.Hour); err != nil {
 		return c, err
 	}
 	return c, nil

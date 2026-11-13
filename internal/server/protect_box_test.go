@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/community"
+	"github.com/ReCasaOS/recasaos-relay/internal/protect"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
 )
 
@@ -152,5 +153,28 @@ func TestContributedMonth(t *testing.T) {
 	decode(t, rec.Body, &got)
 	if got["contributed_month"] != float64(1) {
 		t.Fatalf("got %v", got)
+	}
+}
+
+// Claiming or releasing a name changes the snapshot's names: share sees it at its next poll.
+func TestNameChangeInvalidatesSnapshot(t *testing.T) {
+	var comp *protect.Compiler
+	e := &shareEnv{delEnv: setupDelDeps(t, func(c *Config) { c.ShareDomain = "share.example" }, func(d *Deps) {
+		comp = &protect.Compiler{Store: d.Store, Now: d.Now}
+		d.Protect = comp
+	})}
+	ctx := context.Background()
+	b := e.linked(t, "box-a")
+	wantStatus(t, e.as(b, "PUT", "/v1/share/protection", `{"relay_filter":true,"share_bans":false}`), 200, "")
+	if body, _, err := comp.Current(ctx); err != nil || strings.Contains(string(body), "mybox") {
+		t.Fatalf("%s %v", body, err)
+	}
+	wantStatus(t, e.as(b, "PUT", "/v1/share/name", `{"name":"mybox"}`), 201, "")
+	if body, _, _ := comp.Current(ctx); !strings.Contains(string(body), `"mybox":{"filter":true`) {
+		t.Fatalf("claimed name missing: %s", body)
+	}
+	wantStatus(t, e.as(b, "DELETE", "/v1/share/name", ""), 204, "")
+	if body, _, _ := comp.Current(ctx); strings.Contains(string(body), "mybox") {
+		t.Fatalf("released name kept: %s", body)
 	}
 }

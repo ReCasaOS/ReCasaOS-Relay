@@ -19,8 +19,9 @@ import (
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
 )
 
-// maxAge: Current rebuilds a snapshot older than this even without Invalidate (bans expire, feeds refresh).
-const maxAge = 30 * time.Second
+// maxAge: Current rebuilds a snapshot older than this even without Invalidate, a backstop for a
+// change nobody signalled; the protection loop invalidates after a tick that changed something.
+const maxAge = 5 * time.Minute
 
 type Manual struct {
 	Address []string `json:"address"`
@@ -60,6 +61,7 @@ type Compiler struct {
 	body    []byte
 	version string
 	builtAt time.Time
+	endsAt  time.Time // earliest end of a ban in the cache; zero: none ends
 	dirty   bool
 	expand  map[string][]string // geo expansions, valid for expandVer
 
@@ -81,18 +83,20 @@ func (c *Compiler) Invalidate() {
 	c.mu.Unlock()
 }
 
-// Current returns the cached snapshot, rebuilt after Invalidate or when older than 30 s.
+// Current returns the cached snapshot, rebuilt after Invalidate, once a ban in it has ended, or
+// when older than maxAge.
 func (c *Compiler) Current(ctx context.Context) ([]byte, string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.body != nil && !c.dirty && c.now().Sub(c.builtAt) < maxAge {
+	now := c.now()
+	if c.body != nil && !c.dirty && now.Sub(c.builtAt) < maxAge && (c.endsAt.IsZero() || now.Before(c.endsAt)) {
 		return c.body, c.version, nil
 	}
-	body, version, err := c.build(ctx)
+	body, version, endsAt, err := c.build(ctx)
 	if err != nil {
 		return nil, "", err
 	}
-	c.body, c.version, c.builtAt, c.dirty = body, version, c.now(), false
+	c.body, c.version, c.builtAt, c.endsAt, c.dirty = body, version, now, endsAt, false
 	return body, version, nil
 }
 
@@ -100,7 +104,8 @@ func (c *Compiler) Current(ctx context.Context) ([]byte, string, error) {
 func (c *Compiler) Build(ctx context.Context) ([]byte, string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.build(ctx)
+	body, version, _, err := c.build(ctx)
+	return body, version, err
 }
 
 // Allowed reports whether an allow-list prefix covers p, from the last build (the store before any).
@@ -179,23 +184,30 @@ func (c *Compiler) geoPrefixes(kind, value string) []netip.Prefix {
 	return ps
 }
 
-func (c *Compiler) build(ctx context.Context) ([]byte, string, error) {
+// build compiles a snapshot and returns the earliest end of the bans it holds (zero: none ends).
+func (c *Compiler) build(ctx context.Context) (body []byte, version string, endsAt time.Time, err error) {
 	now := c.now()
 	s := Snapshot{External: map[string][]string{}, Names: map[string]NameFilter{}}
+	ends := func(t time.Time) {
+		if !t.IsZero() && (endsAt.IsZero() || t.Before(endsAt)) {
+			endsAt = t
+		}
+	}
 
 	allow, err := c.Store.AllowList(ctx)
 	if err != nil {
-		return nil, "", err
+		return nil, "", time.Time{}, err
 	}
 	al := parseAll(allowStrings(allow))
 	s.Allow = strs(al)
 
 	manual, err := c.Store.ManualBans(ctx, now)
 	if err != nil {
-		return nil, "", err
+		return nil, "", time.Time{}, err
 	}
 	var addr, rng, asn, country []netip.Prefix
 	for _, m := range manual {
+		ends(m.Until)
 		switch m.Kind {
 		case "address", "range":
 			if p, ok := norm(m.Value); ok {
@@ -215,7 +227,7 @@ func (c *Compiler) build(ctx context.Context) ([]byte, string, error) {
 
 	fs, err := c.Store.Feeds(ctx)
 	if err != nil {
-		return nil, "", err
+		return nil, "", time.Time{}, err
 	}
 	for _, f := range fs {
 		if !f.Enabled || c.Feeds == nil {
@@ -228,10 +240,11 @@ func (c *Compiler) build(ctx context.Context) ([]byte, string, error) {
 
 	bans, err := c.Store.ActiveBans(ctx, now)
 	if err != nil {
-		return nil, "", err
+		return nil, "", time.Time{}, err
 	}
 	var ca, cr []netip.Prefix
 	for _, b := range bans {
+		ends(b.Until)
 		if p, ok := norm(b.Key); ok {
 			if b.Kind == "range" {
 				cr = append(cr, p)
@@ -244,7 +257,7 @@ func (c *Compiler) build(ctx context.Context) ([]byte, string, error) {
 
 	names, err := c.Store.ProtectedNames(ctx)
 	if err != nil {
-		return nil, "", err
+		return nil, "", time.Time{}, err
 	}
 	for n, p := range names {
 		s.Names[n] = NameFilter{Filter: p.RelayFilter, Community: p.RelayFilter && p.ShareBans}
@@ -252,21 +265,20 @@ func (c *Compiler) build(ctx context.Context) ([]byte, string, error) {
 
 	susp, err := c.Store.SuspendedNames(ctx)
 	if err != nil {
-		return nil, "", err
+		return nil, "", time.Time{}, err
 	}
 	s.Suspended = append([]string{}, susp...)
 	slices.Sort(s.Suspended)
 
 	raw, err := json.Marshal(s) // Version still empty
 	if err != nil {
-		return nil, "", err
+		return nil, "", time.Time{}, err
 	}
 	sum := sha256.Sum256(raw)
 	s.Version = hex.EncodeToString(sum[:])
-	body, err := json.Marshal(s)
-	if err != nil {
-		return nil, "", err
+	if body, err = json.Marshal(s); err != nil {
+		return nil, "", time.Time{}, err
 	}
 	c.allow.Store(&al)
-	return body, s.Version, nil
+	return body, s.Version, endsAt, nil
 }

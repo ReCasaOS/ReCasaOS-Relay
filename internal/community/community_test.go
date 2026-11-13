@@ -62,7 +62,12 @@ func (v *env) report(ref store.BoxRef, key, reason string, seen bool) {
 	v.must(v.e.Accept(ctx, ref, []Item{{Key: key, Reason: reason, App: "jellyfin", Since: v.now}}))
 }
 
-func (v *env) tick() { v.t.Helper(); v.must(v.e.Tick(context.Background())) }
+func (v *env) tick() bool {
+	v.t.Helper()
+	opened, err := v.e.Tick(context.Background())
+	v.must(err)
+	return opened
+}
 
 func (v *env) bans() map[string]store.CommunityBan {
 	v.t.Helper()
@@ -99,6 +104,23 @@ func TestTwoFleetsOpenADayBan(t *testing.T) {
 	}
 	if n, err := v.st.ContributedSince(context.Background(), "A", t0.Add(-time.Hour)); err != nil || n != 1 {
 		t.Fatalf("contributed A = %d, %v", n, err)
+	}
+}
+
+// Tick reports when it opened a ban (an ended one leaves the snapshot by its own end time).
+func TestTickReportsOpenedBan(t *testing.T) {
+	v := newEnv(t)
+	a, b := two(v)
+	if v.tick() {
+		t.Fatal("nothing reported, yet opened")
+	}
+	v.report(a, ip, "waf", true)
+	v.report(b, ip, "scan", true)
+	if !v.tick() {
+		t.Fatal("ban opened, not reported")
+	}
+	if v.tick() {
+		t.Fatal("second tick reported a change")
 	}
 }
 

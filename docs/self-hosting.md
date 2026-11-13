@@ -414,14 +414,16 @@ In `.env`, next to the ones of section 4:
 | `SHARE_ACME_RATE_PER_HOUR` | `20` | `enrolment` | ACME TXT writes per hour per box |
 | `PEEK_TIMEOUT` | `5s` | `share` | how long a new connection has to send its TLS hello / HTTP request line |
 | `TUNNEL_RATE_PER_HOUR` | `60` | `share` | tunnel dials (`/v1/share/tunnel`) per hour per client IP (`X-Client-IP`, set by `front`), counted before the signature check; `429` with `Retry-After` beyond |
-| `CONNS_PER_IP` | `256` | `share` | open connections per client IP (IPv6: per /64) on 80 and 443 together, boxes' own control and DERP connections included (about 3 per box, 2 per phone: one carrier-NAT address fills it near 85 boxes); past it a new connection is closed before any byte is read |
-| `CONNS_PER_IP_PER_BOX` | `64` | `share` | visitor connections one client IP may hold into one box's tunnel (256 at most per tunnel), so one address cannot lock the other visitors out; four addresses still can, this is no defence against many; past it the connection is closed |
+| `CONNS_PER_IP` | `256` | both | open connections per client IP (IPv6: per /64) on 80 and 443 together, boxes' own control and DERP connections included (about 3 per box, 2 per phone: one carrier-NAT address fills it near 85 boxes); past it a new connection is closed before any byte is read |
+| `CONNS_PER_IP_PER_BOX` | `64` | both | visitor connections one client IP may hold into one box's tunnel (256 at most per tunnel), so one address cannot lock the other visitors out; four addresses still can, this is no defence against many; past it the connection is closed. `share` enforces both caps; `enrolment` only shows them on `/admin`, so one value in `.env` serves both |
 | `LISTEN_TLS`, `LISTEN_HTTP`, `LISTEN_TUNNEL` | `:443`, `:80`, `:8082` | `share` | listen addresses inside the container |
 | `FRONT_TLS`, `FRONT_HTTP` | `front:443`, `front:80` | `share` | where non-box traffic goes |
 | `FRONT_PROXY_PROTOCOL` | `true` | `share` | send a PROXY v2 header (the visitor's address) to `FRONT_TLS` and `FRONT_HTTP`; see "Client address" |
 | `SHARE_PSL_TXT` | empty | `enrolment` | value of `_psl.<SHARE_DOMAIN>` TXT (Public Suffix List ownership proof), at most 255 bytes; empty: no such record |
 | `ENROLMENT_URL` | `http://enrolment:8081` | `share` | name lookups and usage posts, compose network only |
 | `LISTEN_DNS` | `:53` | `enrolment` | DNS listen address inside the container |
+| `FILTER_MAX_ENTRIES` | `1000000` | `enrolment` | entries of all enabled block lists together ("Protection of shared apps" below); a list that would take the total past it is refused whole and its last good copy stays |
+| `COMMUNITY_MIN_FLEET_AGE` | `168h` (7 days) | `enrolment` | how old a fleet must be before its boxes' ban reports count. **For tests only**: keep the default on a relay open to the public |
 
 The rows from `PEEK_TIMEOUT` on are the processes' own defaults (`compose.yaml` passes `LISTEN_TLS`, `LISTEN_HTTP`, `LISTEN_TUNNEL`, `FRONT_TLS`, `FRONT_HTTP`, `ENROLMENT_URL`, `PEEK_TIMEOUT`, `FRONT_PROXY_PROTOCOL`, `TUNNEL_RATE_PER_HOUR`, `CONNS_PER_IP` and `CONNS_PER_IP_PER_BOX` to `share`; neither cap counts loopback, private or link-local sources, which is what Docker's userland proxy and boxes on the relay's own LAN arrive from, and `SHARE_PSL_TXT` to `enrolment`, as shown there); none needs changing except `SHARE_PSL_TXT` once you have a PSL request.
 
@@ -553,3 +555,56 @@ Between the two commands, take the `listener_wrappers` blocks out of the global 
 ### Operating it
 
 On `/admin` (section 11): **Shared names** lists every claimed name with a Revoke button, and **Forbidden names** is your own deny list on top of the built-in reserved words (`www relay admin api mail ns ns1 box tunnel recasaos casaos localhost`). Revoking a name frees it from its box and forbids it; the box's tunnel closes within a minute. Details: README, "Public sharing". A box whose node no longer exists in Headscale (for instance after `tailscale logout`) loses its box key at the next janitor pass and its name goes to quarantine. The quarantine lasts 125 days (fixed: Let's Encrypt reuses a DNS-01 authorization for up to 30 days, so a former holder could still get a 90-day certificate for the name that long after); the box that released a name may take it back meanwhile, nobody else may. Removing a box from `/admin` drops its box key at once. Unbanning a name (Forbidden names, Remove) also lifts its quarantine: it undoes a misclicked Revoke.
+
+### Protection of shared apps
+
+`enrolment` can cut known bad addresses before they reach a box. It only ever uses what the relay sees of a visitor: its address and the name it asks for. Filtering applies **only to connections for a share name** (`<label>.<box>.<SHARE_DOMAIN>` on 443), checked once the name is read; connections to the relay's own name (enrolment, Headscale, `/admin`) and to port 80 are never filtered, so no ban can cut a box off from its own relay. A refused connection is closed without an answer: the certificate is on the box, the relay cannot show a page. The connection caps (`CONNS_PER_IP`, `CONNS_PER_IP_PER_BOX`) apply as before.
+
+It runs only with sharing on (`SHARE_DOMAIN` set). **A fresh relay filters nothing**: every list is added disabled, and the community list and the manual bans start empty. Everything is managed on `/admin` (section 11), page **Protection**.
+
+| Source | Applies to |
+|---|---|
+| Relay allow list (addresses and ranges, each with a note) | everyone: never cut, whatever the other sources say |
+| Manual bans (address, range, AS number, country; for a set time or until removed) | every share name, whatever the box's settings |
+| Suspended name | every connection for that name (the name stays with its box; resume it on `/admin`) |
+| External block lists | boxes whose owner kept **relay filtering** on |
+| Community list | boxes with relay filtering on **that also share their own bans** |
+
+Each box has two settings, pushed by its ReCasaOS core and signed with its box key: **relay filtering** (on by default on an up-to-date box) and **share my bans** (off until the owner accepts it on the dashboard, never pre-ticked). A box whose core predates them has neither, and only the allow list, the caps and the manual bans apply to it. The community list is give and take: it protects only the boxes that feed it.
+
+`share` fetches the compiled filter from `enrolment` every 30 seconds (the body only when it changed). A `share` that starts before it ever got one lets connections through rather than cutting every shared app, and says so once in its log.
+
+**External block lists.** Add one from a preset or by hand: name, `https` URL, optional authentication header for keyed lists, text or CSV (with the address column), refresh interval (one hour or more), maximum entries (default 100 000). A failed download keeps the last good copy and `/admin` shows the error. A list over its own maximum, or over `FILTER_MAX_ENTRIES` with the other enabled lists, is refused whole, never cut short. Entries broader than a /8 (IPv4) or /19 (IPv6) are skipped. Copies are kept in `/data/feeds/` and never handed to boxes. You choose the lists and follow their terms:
+
+| Preset | Refresh | Terms and notes |
+|---|---|---|
+| FireHOL level 1 | 1 h | an aggregate (DShield, Feodo, full bogons, Spamhaus DROP): each source's own license applies |
+| Spamhaus DROP | 24 h | Spamhaus asks for at most one download a day; free for non-commercial use |
+| blocklist.de (all) | 1 h | regenerated every 30 minutes |
+| Emerging Threats compromised | 24 h | |
+| Tor exit nodes | 1 h | blocking it cuts every Tor visitor, including people who only want privacy |
+| AbuseIPDB (subscription) | 1 h | needs your API key; `confidenceMinimum=90` needs a paid plan; check your plan's daily download limit |
+| AbuseIPDB (free) | 6 h | needs your API key; the free plan returns at most 10 000 addresses, all at 100 % confidence, and allows 5 downloads a day, hence 4 a day here |
+| CrowdSec blocklist | 1 h | a "raw IP list" integration of the CrowdSec console: replace `<integration id>` in the URL and enter its user and password (shown once in the console) |
+
+Keys are kept in `relay.db` and shown masked on `/admin`.
+
+**Community list.** A box that shares its bans sends, for each ban its own Gateway started, the address (an IPv4 address or an IPv6 /64), the reason (`waf`, `scan`, `rate`, `code`), the app and the start time, nothing else. An address enters the list when boxes of **two different fleets** report it within 24 hours. It is banned for 24 hours; for 7 days if it comes back within 30 days of the end of its previous ban; **for good** the third time, until you lift it. When 5 addresses of one /24 (IPv4) or /48 (IPv6) are banned at once, the whole range is banned, with its own count and the same steps. When 10 banned ranges belong to one network (AS), `/admin` flags it with a button to ban it; networks and countries are never banned automatically. The allow list always wins, and private, loopback, link-local and carrier-grade NAT (100.64.0.0/10) addresses are never kept.
+
+Anyone can create a fleet on a public relay, so a report counts only when all of these hold; otherwise it is dropped without telling the box:
+
+- the address really reached **that box through this relay**, from 24 hours before the ban started;
+- the box's fleet is **at least 7 days old** and holds at least one share name;
+- the box has share my bans on.
+
+A fleet's reports count once per address, and reports during a running ban neither extend nor raise it.
+
+**Personal data.** Visitor addresses are personal data: say so where you tell your users what your relay keeps. The relay keeps:
+
+- each accepted connection (address and box) for **24 hours**, only to check reports as above;
+- the raw reports for **30 days**, deleted at once for a box that turns share my bans off;
+- refusal counts (hour, name, address, reason, source) for 7 days, shown on `/admin` and to the box that owns the name, never to another box;
+- community bans until they end, then deleted (an address's count of past bans is kept 30 days after its last ban ends);
+- **permanent bans** until you lift them, listed apart on `/admin` with their date and reasons. Home addresses change hands: review that list from time to time.
+
+**Countries and networks.** Country and AS bans, and the networks shown on `/admin`, use DB-IP Lite (country and ASN), which `enrolment` downloads into `/data/geo/`, checks daily and replaces when the month changes. Until the files are there, country and AS bans match nothing and `/admin` says so. [IP Geolocation by DB-IP](https://db-ip.com), under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/): keep that attribution wherever you show its data. `/data/geo/` and `/data/feeds/` are downloaded again if lost; a backup of `/data` (section 7) carries them anyway.

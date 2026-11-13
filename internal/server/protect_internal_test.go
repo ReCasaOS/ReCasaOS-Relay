@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -43,6 +44,43 @@ func TestFilterRoute304(t *testing.T) {
 	}
 	wantStatus(t, e.call("GET", "/internal/share/filter", "", map[string]string{"If-None-Match": etag}), 304, "")
 	wantStatus(t, e.call("GET", "/internal/share/filter", "", map[string]string{"If-None-Match": `"old"`}), 200, "")
+}
+
+// countingStore counts the snapshot builds (each one reads the allow list once).
+type countingStore struct {
+	store.Store
+	builds atomic.Int32
+}
+
+func (s *countingStore) AllowList(ctx context.Context) ([]store.AllowEntry, error) {
+	s.builds.Add(1)
+	return s.Store.AllowList(ctx)
+}
+
+// A poll whose ETag matches a clean cache is answered 304 without a build; after Invalidate it
+// rebuilds, and the same content still answers 304.
+func TestFilterRoute304DoesNotRebuild(t *testing.T) {
+	var cs *countingStore
+	var comp *protect.Compiler
+	e := setup(t, func(c *Config, d *Deps) {
+		c.ShareDomain = "share.example"
+		cs = &countingStore{Store: d.Store}
+		comp = &protect.Compiler{Store: cs, Now: d.Now}
+		d.Protect = comp
+	})
+	etag := e.call("GET", "/internal/share/filter", "", nil).Header().Get("ETag")
+	if cs.builds.Load() != 1 {
+		t.Fatalf("builds %d", cs.builds.Load())
+	}
+	wantStatus(t, e.call("GET", "/internal/share/filter", "", map[string]string{"If-None-Match": etag}), 304, "")
+	if cs.builds.Load() != 1 {
+		t.Fatalf("304 rebuilt: builds %d", cs.builds.Load())
+	}
+	comp.Invalidate()
+	wantStatus(t, e.call("GET", "/internal/share/filter", "", map[string]string{"If-None-Match": etag}), 304, "")
+	if cs.builds.Load() != 2 {
+		t.Fatalf("dirty cache not rebuilt: builds %d", cs.builds.Load())
+	}
 }
 
 func TestFilterRouteRefusesProxiedRequest(t *testing.T) {

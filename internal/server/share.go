@@ -189,7 +189,15 @@ func (h *shareHandler) putName(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		internalError(w, "claim name", err)
 	default:
+		h.invalidate()
 		writeJSON(w, http.StatusCreated, h.shareBody(body.Name))
+	}
+}
+
+// invalidate rebuilds the filter snapshot at share's next poll: the names in it changed.
+func (h *shareHandler) invalidate() {
+	if h.deps.Protect != nil {
+		h.deps.Protect.Invalidate()
 	}
 }
 
@@ -205,6 +213,7 @@ func (h *shareHandler) deleteName(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "release name", err)
 		return
 	}
+	h.invalidate()
 	w.WriteHeader(http.StatusNoContent)
 }
 
