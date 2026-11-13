@@ -28,6 +28,14 @@ type Config struct {
 	LogMaxSize                          int64         // journal size cap, bytes
 }
 
+// lookupenv is def only when key is unset: set empty, it stays empty (an off switch).
+func lookupenv(key, def string) string {
+	if v, ok := os.LookupEnv(key); ok {
+		return v
+	}
+	return def
+}
+
 func getenv(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -46,7 +54,7 @@ func ConfigFromEnv() (Config, error) {
 		EnrolmentURL: getenv("ENROLMENT_URL", "http://enrolment:8081"),
 		RelayHost:    strings.ToLower(strings.TrimSpace(os.Getenv("RELAY_HOST"))),
 		ShareDomain:  strings.ToLower(strings.TrimSpace(os.Getenv("SHARE_DOMAIN"))),
-		LogDir:       getenv("LOG_DIR", "/logs"),
+		LogDir:       lookupenv("LOG_DIR", "/logs"),
 	}
 	if c.RelayHost == "" || c.ShareDomain == "" {
 		return Config{}, errors.New("RELAY_HOST and SHARE_DOMAIN are required")

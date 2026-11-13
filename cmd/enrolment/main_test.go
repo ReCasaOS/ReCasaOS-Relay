@@ -30,6 +30,16 @@ func TestNeverServesWithoutPolicy(t *testing.T) {
 	}
 }
 
+func TestLookupenvKeepsEmpty(t *testing.T) {
+	t.Setenv("RELAY_TEST_SWITCH", "")
+	if got := lookupenv("RELAY_TEST_SWITCH", "on"); got != "" {
+		t.Fatalf("set empty: %q, want empty (off)", got)
+	}
+	if got := lookupenv("RELAY_TEST_UNSET_SWITCH", "on"); got != "on" {
+		t.Fatalf("unset: %q, want the default", got)
+	}
+}
+
 func TestParseBytes(t *testing.T) {
 	for in, want := range map[string]int64{
 		"": 0, "  ": 0, "1500": 1500, "100G": 100e9, "2T": 2e12, "1.5G": 1.5e9,

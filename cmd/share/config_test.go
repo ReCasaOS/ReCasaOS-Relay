@@ -34,6 +34,10 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 		}
 		t.Setenv(k, "")
 	}
+	t.Setenv("LOG_DIR", "") // set empty: no journal
+	if c, err := ConfigFromEnv(); err != nil || c.LogDir != "" {
+		t.Fatalf("LOG_DIR empty: LogDir=%q, %v", c.LogDir, err)
+	}
 	t.Setenv("SHARE_DOMAIN", "")
 	if _, err := ConfigFromEnv(); err == nil {
 		t.Fatal("SHARE_DOMAIN should be required")

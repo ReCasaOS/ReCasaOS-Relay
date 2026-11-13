@@ -33,6 +33,14 @@ import (
 // version is set at build time (-ldflags "-X main.version=v1.2.3"); the admin page shows it.
 var version = "dev"
 
+// lookupenv is def only when key is unset: set empty, it stays empty (an off switch).
+func lookupenv(key, def string) string {
+	if v, ok := os.LookupEnv(key); ok {
+		return v
+	}
+	return def
+}
+
 func getenv(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -96,8 +104,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	var jw *journal.Writer // nil without LOG_DIR: every journal call is then a no-op
-	if dir := getenv("LOG_DIR", "/data/logs"); dir != "" {
+	var jw *journal.Writer // nil with LOG_DIR set empty: every journal call is then a no-op
+	if dir := lookupenv("LOG_DIR", "/data/logs"); dir != "" {
 		keep, size, err := journalLimits()
 		if err != nil {
 			return err
@@ -107,11 +115,7 @@ func run() error {
 			defer closeJournal(jw)
 		}
 		// front's access log (the Caddyfile's `(journal)`) in front-*.jsonl next to ours; set empty: off.
-		addr, set := os.LookupEnv("LOG_INGEST_ADDR")
-		if !set {
-			addr = ":8083"
-		}
-		if addr != "" {
+		if addr := lookupenv("LOG_INGEST_ADDR", ":8083"); addr != "" {
 			if fw := openJournal(dir, "front", keep, size); fw != nil {
 				defer closeJournal(fw)
 				if l, err := net.Listen("tcp", addr); err != nil {

@@ -14,10 +14,6 @@ const (
 	maxIngestLine  = 64 << 10 // longer lines are dropped
 )
 
-// ingestIdle closes a connection that sent nothing for this long, so a peer gone without a FIN does not
-// hold a slot for ever; Caddy dials again on its next line.
-var ingestIdle = time.Hour
-
 // serveIngest takes front's access log (Caddy's `output net`, one JSON line per request) on l and writes
 // each line to jw as a front entry, so the journal's daily files and LOG_KEEP apply to it. It returns when
 // l is closed. Only the compose network reaches l: the port is never published nor routed by front.
@@ -44,12 +40,12 @@ func serveIngest(l net.Listener, jw *journal.Writer) {
 	}
 }
 
-// ingest reads one connection; unparsable and over-long lines are dropped, Write never blocks.
+// ingest reads one connection; unparsable and over-long lines are dropped, Write never blocks. No idle
+// deadline: front may stay quiet for hours, and the listener's TCP keepalive (Go's default) ends a dead peer.
 func ingest(c net.Conn, jw *journal.Writer) {
 	defer c.Close()
 	r := bufio.NewReaderSize(c, maxIngestLine)
 	for {
-		c.SetReadDeadline(time.Now().Add(ingestIdle))
 		line, err := r.ReadSlice('\n')
 		for errors.Is(err, bufio.ErrBufferFull) { // too long: skip to its end
 			_, err = r.ReadSlice('\n')
