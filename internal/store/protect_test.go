@@ -234,6 +234,30 @@ func TestDeleteBoxCascades(t *testing.T) {
 	}
 }
 
+// A feed id is never given again: the fetcher's copy <id>.txt of a deleted feed must not serve a new one.
+func TestFeedIDsNotReused(t *testing.T) {
+	ctx := context.Background()
+	s := openTmp(t)
+	var ids []int64
+	for _, n := range []string{"a", "b"} {
+		id, err := s.AddFeed(ctx, Feed{Name: n, URL: "https://x", Format: "text", EverySec: 3600, MaxEntries: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	if err := s.DeleteFeed(ctx, ids[1]); err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.AddFeed(ctx, Feed{Name: "c", URL: "https://x", Format: "text", EverySec: 3600, MaxEntries: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id <= ids[1] {
+		t.Fatalf("new feed got id %d after deleting %d", id, ids[1])
+	}
+}
+
 func TestListsAndFeeds(t *testing.T) {
 	ctx := context.Background()
 	s := openTmp(t)

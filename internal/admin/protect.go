@@ -56,13 +56,13 @@ func viewFeed(f store.Feed) feedView {
 	return v
 }
 
-// mask shows the last 4 characters of a key at most.
+// mask shows the last 4 characters of a key at most, none of a key under 8.
 func mask(s string) string {
 	r := []rune(s)
 	switch {
 	case len(r) == 0:
 		return ""
-	case len(r) <= 4:
+	case len(r) < 8:
 		return "••••"
 	}
 	return "••••" + string(r[len(r)-4:])
@@ -212,8 +212,12 @@ func (h *handler) addPreset(w http.ResponseWriter, r *http.Request) {
 		id, err := h.deps.Store.AddFeed(ctx, store.Feed{Name: p.Name, URL: p.URL, AuthName: p.AuthName, Format: p.Format,
 			Column: p.Column, EverySec: p.EverySec, MaxEntries: 100000, Note: p.Note, Preset: p.Key})
 		switch {
-		case errors.Is(err, store.ErrExists): // a second click
-			h.done(w, r, "#feeds")
+		case errors.Is(err, store.ErrExists):
+			if h.presetAdded(ctx, p) { // a second click
+				h.done(w, r, "#feeds")
+				return
+			}
+			http.Error(w, "a list named "+p.Name+" already exists; rename it first", http.StatusBadRequest)
 		case err != nil:
 			h.storeError(w, "add preset", err)
 		case p.NeedsKey:
@@ -224,6 +228,20 @@ func (h *handler) addPreset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.NotFound(w, r)
+}
+
+// presetAdded: the feed holding p's name is p itself, not a list of the operator's.
+func (h *handler) presetAdded(ctx context.Context, p feeds.Preset) bool {
+	fs, err := h.deps.Store.Feeds(ctx)
+	if err != nil {
+		return false
+	}
+	for _, f := range fs {
+		if f.Name == p.Name {
+			return f.Preset == p.Key
+		}
+	}
+	return false
 }
 
 // feed finds the feed of the path's {id}; ok false means the reply is written.
@@ -309,6 +327,11 @@ func (h *handler) feedAction(w http.ResponseWriter, r *http.Request) {
 			h.storeError(w, "delete feed", err)
 			return
 		}
+		if h.deps.Feeds != nil {
+			if err := h.deps.Feeds.Forget(f.ID); err != nil { // the row is gone, so the copy is never loaded again
+				log.Printf("admin: feed %d: remove copy: %v", f.ID, err)
+			}
+		}
 		h.done(w, r, "#feeds")
 	}
 }
@@ -332,6 +355,11 @@ func prefix(s string) (netip.Prefix, bool) {
 	return p.Masked(), p.IsValid()
 }
 
+// broadEnough: like the feeds, nothing broader than /8 (IPv4) or /19 (IPv6).
+func broadEnough(p netip.Prefix) bool {
+	return p.Bits() >= map[bool]int{true: 8, false: 19}[p.Addr().Is4()]
+}
+
 // manualValue checks a ban's value and returns it as stored, or "" when it is wrong.
 func manualValue(kind, v string) string {
 	switch kind {
@@ -340,8 +368,7 @@ func manualValue(kind, v string) string {
 			return p.String()
 		}
 	case "range":
-		// Like the feeds: nothing broader than /8 (IPv4) or /19 (IPv6).
-		if p, ok := prefix(v); ok && p.Bits() >= map[bool]int{true: 8, false: 19}[p.Addr().Is4()] {
+		if p, ok := prefix(v); ok && broadEnough(p) {
 			return p.String()
 		}
 	case "asn":
@@ -384,9 +411,10 @@ func (h *handler) addManual(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) addAllow(w http.ResponseWriter, r *http.Request) {
+	// An allow-all would silently turn every filter off.
 	p, ok := prefix(strings.TrimSpace(r.PostFormValue("value")))
-	if !ok {
-		http.Error(w, "value: an address or a range", http.StatusBadRequest)
+	if !ok || !broadEnough(p) {
+		http.Error(w, "value: an address or a range (/8 or narrower for IPv4, /19 for IPv6)", http.StatusBadRequest)
 		return
 	}
 	e := store.AllowEntry{Prefix: p.String(), Added: h.deps.Now()}

@@ -193,3 +193,23 @@ func TestErrorsDoNotLeakAuthOrURL(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestForgetRemovesCopy(t *testing.T) {
+	e := newEnv(t)
+	if err := e.f.Forget(7); err != nil {
+		t.Fatalf("missing copy: %v", err)
+	}
+	if err := os.MkdirAll(e.f.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(e.f.Dir, "7.txt")
+	if err := os.WriteFile(p, []byte("192.0.2.0/24\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.f.Forget(7); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Fatalf("copy still there: %v", err)
+	}
+}

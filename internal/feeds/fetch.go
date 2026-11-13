@@ -82,6 +82,14 @@ func (f *Fetcher) Load(id int64) ([]netip.Prefix, error) {
 	return Parse(file, "text", 0, 0)
 }
 
+// Forget removes the copy of feed id; a missing copy is no error.
+func (f *Fetcher) Forget(id int64) error {
+	if err := os.Remove(f.path(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 func (f *Fetcher) path(id int64) string {
 	return filepath.Join(f.Dir, strconv.FormatInt(id, 10)+".txt")
 }

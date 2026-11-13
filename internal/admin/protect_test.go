@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -208,8 +210,10 @@ func TestManualBanValidation(t *testing.T) {
 
 func TestAllowList(t *testing.T) {
 	e := setup(t)
-	if w := e.do("POST", "/admin/protection/allow", token, form(e, "value", "garbage")); w.Code != 400 {
-		t.Errorf("garbage: %d", w.Code)
+	for _, bad := range []string{"garbage", "10.0.0.0/7", "0.0.0.0/0", "::/0", "2001:db8::/18"} {
+		if w := e.do("POST", "/admin/protection/allow", token, form(e, "value", bad)); w.Code != 400 {
+			t.Errorf("%s: %d", bad, w.Code)
+		}
 	}
 	if w := e.do("POST", "/admin/protection/allow", token, form(e, "value", "203.0.113.9/24", "note", "office")); w.Code != 303 || w.Header().Get("Location") != "/admin/protection#allow" {
 		t.Fatalf("add: %d", w.Code)
@@ -263,5 +267,45 @@ func TestFeedRefresh(t *testing.T) {
 	}
 	if !strings.Contains(e.do("GET", "/admin/protection", token, nil).Body.String(), "HTTP 500") {
 		t.Error("the refresh error is not shown")
+	}
+}
+
+func TestMask(t *testing.T) {
+	for in, want := range map[string]string{"": "", "abc": "••••", "1234567": "••••", "12345678": "••••5678", "secret-key-1234": "••••1234"} {
+		if got := mask(in); got != want {
+			t.Errorf("mask(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestPresetNameTaken(t *testing.T) {
+	e := setup(t)
+	e.do("POST", "/admin/protection/feeds", token, form(e, "name", "Spamhaus DROP", "url", "https://lists.example.net/a.txt", "format", "text", "every_s", "3600"))
+	if w := e.do("POST", "/admin/protection/feeds/presets/spamhaus-drop", token, form(e)); w.Code != 400 {
+		t.Errorf("preset over a custom list's name: %d", w.Code)
+	}
+	e.do("POST", "/admin/protection/feeds/presets/tor-exits", token, form(e))
+	if w := e.do("POST", "/admin/protection/feeds/presets/tor-exits", token, form(e)); w.Code != 303 {
+		t.Errorf("second click on a preset: %d", w.Code)
+	}
+}
+
+func TestDeleteFeedRemovesCopy(t *testing.T) {
+	e := setup(t)
+	dir := t.TempDir()
+	e = e.withDeps(t, func(d *Deps) { d.Feeds = &feeds.Fetcher{Store: e.st, Dir: dir} })
+	id, err := e.st.AddFeed(context.Background(), store.Feed{Name: "x", URL: "https://lists.example.net/a.txt", Format: "text", EverySec: 3600, MaxEntries: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyPath := filepath.Join(dir, strconv.FormatInt(id, 10)+".txt")
+	if err := os.WriteFile(copyPath, []byte("192.0.2.0/24"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if w := e.do("POST", "/admin/protection/feeds/"+strconv.FormatInt(id, 10)+"/delete", token, form(e)); w.Code != 303 {
+		t.Fatalf("delete: %d", w.Code)
+	}
+	if _, err := os.Stat(copyPath); !os.IsNotExist(err) {
+		t.Errorf("copy left after delete: %v", err)
 	}
 }
