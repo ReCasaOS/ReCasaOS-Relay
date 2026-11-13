@@ -651,7 +651,7 @@ A fleet's reports count once per address, and reports during a running ban neith
 **Personal data.** Visitor addresses are personal data: say so where you tell your users what your relay keeps. The relay keeps the following, and deletes it on time even after sharing is turned off:
 
 - each accepted connection (address and box) for **24 hours**, only to check reports as above;
-- **in the journal (section 15), every visitor connection, passed or cut (address, name asked for, decision, duration and bytes), for 7 days** (`LOG_KEEP`, at most 7 days): longer than the 24 hours above. `share` deletes these lines on time while it runs; once sharing is turned off, delete its files yourself (section 15);
+- **in the journal (section 15), every passed visitor connection (address, name asked for, decision, duration and bytes), and refused ones summarised per address (address, name, reason, count), for 7 days** (`LOG_KEEP`, at most 7 days): longer than the 24 hours above. `share` deletes these lines on time while it runs; once sharing is turned off, delete its files yourself (section 15);
 - the raw reports for **30 days**, deleted at once for a box that turns share my bans off;
 - refusal counts (hour, name, address, reason, source) for 7 days, shown on `/admin` and to the box that owns the name, never to another box;
 - community bans until they end, then deleted (an address's count of past bans is kept 30 days after its last ban ends);
@@ -673,7 +673,7 @@ The relay keeps a journal of what passes through it, like an access log and an e
 | `relay` | `enrolment`, `/data/logs/enrolment-YYYY-MM-DD.jsonl` | relay event: a block list updated or failing, DB-IP updated, a community ban opened, ban reports received from a box (how many were kept), a box's protection settings changed, a change made on the Protection page |
 | `log` | `share` and `enrolment`, each in its own files | message the service also prints on its output (`docker compose logs`), errors included |
 
-Connections refused by the per-address cap are summarised: one line per address every 10 seconds, with a count.
+Refused connections are summarised: one line per address and reason every 10 seconds, with a count.
 
 Files are per writer and per UTC day. Each line has `time` (UTC, milliseconds) and `src`, and only the fields of its kind: `svc` (`share`, `enrolment`, `front`), `ip`, `host`, `act` (`pass`, `cut`, `close`), `reason`, `source`, `ms`, `in` and `out` (bytes from and to the client), `method`, `path`, `status`, `event`, `msg`, `count`.
 

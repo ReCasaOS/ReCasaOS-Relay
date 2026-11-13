@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -81,7 +82,7 @@ func toTunnel(reg *tunnel.Registry, perBox *connCap, fh *filterHolder, ev *event
 		if a, ok := remoteAddr(c); ok {
 			if reason, source := f.decide(a, box); reason != "" {
 				ev.refused(box, eventKey(a), reason, source)
-				logCut(jw, c, host, reason, source)
+				fh.cuts.log(jw, cmp.Or(eventKey(a), a.String()), a.String(), host, reason, source, time.Now())
 				return
 			}
 		}
@@ -92,7 +93,7 @@ func toTunnel(reg *tunnel.Registry, perBox *connCap, fh *filterHolder, ev *event
 	}
 	if !perBox.acquire(k) {
 		ev.refused(box, connKey(c), "cap", "ip-box")
-		perBox.logRefused(jw, k, c, host, "ip-box", time.Now())
+		perBox.cuts.log(jw, k, peerIP(c), host, "cap", "ip-box", time.Now())
 		return
 	}
 	defer perBox.release(k)
@@ -129,10 +130,6 @@ func peerIP(c net.Conn) string {
 
 func logLine(jw *journal.Writer, c net.Conn, host, act string) {
 	jw.Write(journal.Entry{Src: "share", IP: peerIP(c), Host: host, Act: act})
-}
-
-func logCut(jw *journal.Writer, c net.Conn, host, reason, source string) {
-	jw.Write(journal.Entry{Src: "share", IP: peerIP(c), Host: host, Act: "cut", Reason: reason, Source: source})
 }
 
 // idleTimeout closes a visitor connection that moved no byte in either direction for that long.

@@ -169,18 +169,18 @@ func TestJournalCapRefusalsSummarised(t *testing.T) {
 	t0 := time.Unix(1_800_000_000, 0)
 	at := func(s int) time.Time { return t0.Add(time.Duration(s) * time.Second) }
 	for i := 0; i < 5; i++ {
-		cc.logRefused(w, "203.0.113.9", a, "", "ip", at(i))
+		cc.cuts.log(w, "203.0.113.9", peerIP(a), "", "cap", "ip", at(i))
 	}
-	cc.flushCuts(w, at(9))  // window not over: nothing
-	cc.flushCuts(w, at(10)) // count 4
-	cc.flushCuts(w, at(20)) // quiet window: the slot is freed
-	cc.logRefused(w, "203.0.113.9", a, "", "ip", at(21))
-	cc.logRefused(w, "198.51.100.1", b, "", "ip", at(22)) // past the bound: aggregate
-	cc.logRefused(w, "198.51.100.1", b, "", "ip", at(23))
-	if n := len(cc.cuts); n > maxCutKeys+1 {
+	cc.cuts.flush(w, at(9))  // window not over: nothing
+	cc.cuts.flush(w, at(10)) // count 4
+	cc.cuts.flush(w, at(20)) // quiet window: the slot is freed
+	cc.cuts.log(w, "203.0.113.9", peerIP(a), "", "cap", "ip", at(21))
+	cc.cuts.log(w, "198.51.100.1", peerIP(b), "", "cap", "ip", at(22)) // past the bound: aggregate
+	cc.cuts.log(w, "198.51.100.1", peerIP(b), "", "cap", "ip", at(23))
+	if n := len(cc.cuts.m); n > maxCutKeys+1 {
 		t.Fatalf("%d keys kept, bound %d (+1 aggregate)", n, maxCutKeys)
 	}
-	cc.flushCuts(w, at(32))
+	cc.cuts.flush(w, at(32))
 
 	got := lines()
 	want := []struct {
@@ -194,5 +194,37 @@ func TestJournalCapRefusalsSummarised(t *testing.T) {
 		if e.Act != "cut" || e.Reason != "cap" || e.Source != "ip" || e.IP != want[i].ip || e.Count != want[i].count {
 			t.Errorf("line %d = %+v, want ip %q count %d", i, e, want[i].ip, want[i].count)
 		}
+	}
+}
+
+// Filter cuts are summarised the same way, per key, reason and source: a blocked address hammering
+// gives one line at once, then one with the count; another reason of the same address stays apart.
+func TestJournalFilterCutsSummarised(t *testing.T) {
+	var s snapshot
+	s.Manual.Address = []string{"203.0.113.7/32"}
+	h := holderWith(snap(t, s))
+	_, _, reg, _ := rig(t)
+	w, lines := testJournal(t)
+	for i := 0; i < 3; i++ {
+		v, c := tcpPair(t)
+		toTunnel(reg, newConnCap(5, "t"), h, nil, w, "app.alpha.box.relay.test", "alpha", fromAddr{c, testVisitor}, c)
+		c.Close()
+		v.Close()
+	}
+	h.cuts.log(w, "203.0.113.7/32", "203.0.113.7", "app.alpha.box.relay.test", "feed", "x", time.Now())
+	h.cuts.flush(w, time.Now().Add(cutWindow))
+
+	got := lines()
+	if len(got) != 3 {
+		t.Fatalf("lines = %+v, want manual once, feed once, manual count 2", got)
+	}
+	for _, e := range got {
+		if e.Act != "cut" || e.IP != "203.0.113.7" || e.Host != "app.alpha.box.relay.test" {
+			t.Errorf("line %+v", e)
+		}
+	}
+	if got[0].Reason != "manual" || got[0].Count != 0 || got[1].Reason != "feed" || got[1].Count != 0 ||
+		got[2].Reason != "manual" || got[2].Source != "address" || got[2].Count != 2 {
+		t.Errorf("lines = %+v", got)
 	}
 }

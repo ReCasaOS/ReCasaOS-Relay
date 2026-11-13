@@ -104,8 +104,9 @@ func run() error {
 	perIP := newConnCap(cfg.ConnsPerIP, "per IP")
 	perBox := newConnCap(cfg.ConnsPerIPPerBox, "per IP and box")
 	go every(ctx, time.Second, func(context.Context) {
-		perIP.flushCuts(jw, time.Now())
-		perBox.flushCuts(jw, time.Now())
+		perIP.cuts.flush(jw, time.Now())
+		perBox.cuts.flush(jw, time.Now())
+		fh.cuts.flush(jw, time.Now())
 	})
 	var inflight, acceptors sync.WaitGroup
 	acceptors.Add(2)
@@ -127,8 +128,9 @@ func run() error {
 		log.Printf("shutdown: connections still open after 30s")
 	}
 	// Every count still pending, whatever its window, before closeJournal.
-	perIP.flushCuts(jw, time.Now().Add(cutWindow))
-	perBox.flushCuts(jw, time.Now().Add(cutWindow))
+	perIP.cuts.flush(jw, time.Now().Add(cutWindow))
+	perBox.cuts.flush(jw, time.Now().Add(cutWindow))
+	fh.cuts.flush(jw, time.Now().Add(cutWindow))
 	select {
 	case err := <-tunErr:
 		return err
@@ -171,7 +173,7 @@ func accept(l net.Listener, wg *sync.WaitGroup, perIP *connCap, ev *events, jw *
 		k := ipKey(c.RemoteAddr())
 		if !perIP.acquire(k) {
 			ev.refused("", connKey(c), "cap", "ip")
-			perIP.logRefused(jw, k, c, "", "ip", time.Now())
+			perIP.cuts.log(jw, k, peerIP(c), "", "cap", "ip", time.Now())
 			c.Close()
 			continue
 		}
