@@ -123,7 +123,7 @@ function say() {
 }
 var es = new EventSource('/admin/journal/stream' + location.search)
 es.onopen = function () { live.className = 'chip ok'; live.lastChild.textContent = 'live' }
-es.onerror = function () { live.className = 'chip warn'; live.lastChild.textContent = 'reconnecting' }
+es.onerror = function () { live.className = 'chip warn'; live.lastChild.textContent = es.readyState === 2 ? 'stopped: reload the page' : 'reconnecting' }
 es.onmessage = function (m) {
   var l
   try { l = JSON.parse(m.data) } catch (e) { return }

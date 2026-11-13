@@ -46,7 +46,7 @@ func caddyLineAt(ts time.Time, ip, method, uri string, status int) string {
 
 func page(t *testing.T, r *Reader, q Query, before time.Time, n int) ([]Entry, bool, bool) {
 	t.Helper()
-	es, more, partial, err := r.Page(context.Background(), q, before, n)
+	es, more, partial, _, err := r.Page(context.Background(), q, before, n)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +362,7 @@ func TestBusy(t *testing.T) {
 	pageSem <- struct{}{}
 	defer func() { <-pageSem }()
 	start := time.Now()
-	_, _, _, err := (&Reader{Dirs: []string{t.TempDir()}}).Page(context.Background(), Query{}, time.Time{}, 10)
+	_, _, _, _, err := (&Reader{Dirs: []string{t.TempDir()}}).Page(context.Background(), Query{}, time.Time{}, 10)
 	if !errors.Is(err, ErrBusy) || time.Since(start) < 900*time.Millisecond {
 		t.Fatalf("err=%v after %v", err, time.Since(start))
 	}
@@ -392,6 +392,63 @@ func TestPageFilteredBudgetFollowsTime(t *testing.T) {
 }
 
 // Entries sharing the last millisecond of a page stay on that page.
+// Continuing a stopped search from resume reaches every match, in two files,
+// with no gap; a stop before anything was read resumes from before itself.
+func TestPageResumeLosesNothing(t *testing.T) {
+	a, b := t.TempDir(), t.TempDir()
+	var la, lb, want []string
+	for i := 0; i < 4000; i++ {
+		e := Entry{Time: stampOf(at(i / 2)), Src: "share", Host: fmt.Sprintf("h%04d", i)} // two per millisecond
+		if i%3 == 0 {
+			e.Msg = "needle"
+			want = append(want, e.Host)
+		}
+		if i%2 == 0 {
+			la = append(la, jsonLine(e))
+		} else {
+			e.Src = "relay"
+			lb = append(lb, jsonLine(e))
+		}
+	}
+	appendLines(t, filepath.Join(a, "share-2026-11-13.jsonl"), la...)
+	appendLines(t, filepath.Join(b, "enrolment-2026-11-13.jsonl"), lb...)
+	// Each page spends about 80 KiB seeking (two files of 150 KiB) and reads the rest.
+	setChunk(t, 256)
+	r := &Reader{Dirs: []string{a, b}, MaxBytes: 120 << 10}
+	got := map[string]bool{}
+	before, stops := time.Time{}, 0
+	for pages := 0; ; pages++ {
+		if pages > 500 {
+			t.Fatal("the search does not move")
+		}
+		es, more, partial, resume, err := r.Page(context.Background(), Query{Text: "needle"}, before, 1000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range es {
+			got[e.Host] = true
+		}
+		if !more {
+			break
+		}
+		if !partial {
+			t.Fatal("more without a budget stop")
+		}
+		if stops++; !before.IsZero() && !resume.Before(before) {
+			t.Fatalf("resume %v does not move back from %v", resume, before)
+		}
+		before = resume
+	}
+	if stops < 3 || len(got) != len(want) {
+		t.Fatalf("%d stops, %d of %d matches", stops, len(got), len(want))
+	}
+	setChunk(t, 64) // the file is large for this chunk: Page seeks first, and stops there
+	_, _, partial, resume, _ := (&Reader{Dirs: []string{a}, MaxBytes: 1}).Page(context.Background(), Query{}, at(100), 10)
+	if !partial || !resume.Equal(at(100)) {
+		t.Fatalf("a stop in the seek: partial=%v resume=%v", partial, resume)
+	}
+}
+
 func TestPageKeepsSameMillisecondTogether(t *testing.T) {
 	a, b := t.TempDir(), t.TempDir()
 	appendLines(t, filepath.Join(a, "share-2026-11-13.jsonl"),

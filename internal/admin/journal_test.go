@@ -2,6 +2,7 @@ package admin
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -376,5 +377,124 @@ func TestJournalStreamRateLimit(t *testing.T) {
 	}
 	if inFirstSecond > 200 || dropped == 0 {
 		t.Fatalf("%d lines in the first second, %d dropped", inFirstSecond, dropped)
+	}
+}
+
+var searchOnHref = regexp.MustCompile(`<a href="([^"]*)">Search on</a>`)
+
+// A search stopped by the byte budget goes on from where it stopped: "Search on" reaches older matches.
+func TestJournalSearchOnMovesBack(t *testing.T) {
+	// 330 kB: Page seeks to within a read chunk (64 KiB) of where it stopped, so a budget of a few
+	// chunks moves on each time, as 64 MiB does on a real relay.
+	dir := t.TempDir()
+	appendLines(t, dir, "share-2026-11-04.jsonl", lines(3000)...)
+	e := setup(t).withJournal(t, &journal.Reader{Dirs: []string{dir}, MaxBytes: 150 << 10})
+	found := map[string]bool{}
+	path := "/admin/journal?q=h00" // h000…h009, the oldest ten
+	for pages := 0; ; pages++ {
+		if pages > 60 {
+			t.Fatalf("Search on does not reach the matches: %d found", len(found))
+		}
+		body := get(t, e, path)
+		for _, m := range regexp.MustCompile(`>(h00\d)\.box`).FindAllStringSubmatch(body, -1) {
+			found[m[1]] = true
+		}
+		if pages == 0 && !strings.Contains(body, "The search stopped before finding anything") {
+			t.Fatal("the first page found something, or did not say it stopped")
+		}
+		m := searchOnHref.FindStringSubmatch(body)
+		if m == nil {
+			break
+		}
+		next := "/admin/journal" + html.UnescapeString(m[1])
+		if next == path {
+			t.Fatalf("Search on repeats %s", path)
+		}
+		path = next
+	}
+	if len(found) != 10 {
+		t.Fatalf("found %d of the 10 matches", len(found))
+	}
+}
+
+func TestJournalBusy(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	holder := &journal.Reader{Dirs: []string{t.TempDir()}, Now: func() time.Time {
+		select {
+		case entered <- struct{}{}: // the first call, inside Page: it holds the one search slot
+			<-release
+		default:
+		}
+		return time.Now()
+	}}
+	held := make(chan struct{})
+	go func() { defer close(held); holder.Page(context.Background(), journal.Query{}, time.Time{}, 1) }()
+	<-entered
+	e := setup(t).withJournal(t, journalFixture(t))
+	w := e.do("GET", "/admin/journal", token, nil)
+	close(release)
+	<-held
+	if w.Code != 503 || !strings.Contains(w.Body.String(), "Another search is running, try again in a moment.") {
+		t.Fatalf("%d", w.Code)
+	}
+}
+
+func openStream(srv *httptest.Server) (*http.Response, error) {
+	req, _ := http.NewRequest("GET", srv.URL+"/admin/journal/stream", nil)
+	req.SetBasicAuth("admin", token)
+	return srv.Client().Do(req)
+}
+
+func TestJournalStreamCap(t *testing.T) {
+	e := setup(t).withJournal(t, &journal.Reader{Dirs: []string{t.TempDir()}})
+	srv := httptest.NewServer(e.h)
+	t.Cleanup(srv.Close)
+	var open []*http.Response
+	t.Cleanup(func() {
+		for _, r := range open {
+			r.Body.Close()
+		}
+	})
+	for i := 0; i < 4; i++ {
+		r, err := openStream(srv)
+		if err != nil || r.StatusCode != 200 {
+			t.Fatalf("stream %d: %v %v", i, err, r)
+		}
+		open = append(open, r)
+	}
+	if r, err := openStream(srv); err != nil || r.StatusCode != 503 {
+		t.Fatalf("a fifth stream: %v %v", err, r)
+	}
+	open[0].Body.Close() // its slot comes back once the server sees it gone
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		r, err := openStream(srv)
+		if err == nil && r.StatusCode == 200 {
+			open[0] = r
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the slot of a closed stream is not given back: %v %v", err, r)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// Shutdown waits for every handler: an open stream must end on it, not hold it.
+func TestJournalStreamEndsOnShutdown(t *testing.T) {
+	stop := make(chan struct{})
+	e := setup(t).withDeps(t, func(d *Deps) {
+		d.JournalReader, d.Shutdown = &journal.Reader{Dirs: []string{t.TempDir()}}, stop
+	})
+	srv := httptest.NewServer(e.h)
+	t.Cleanup(srv.Close)
+	srv.Config.RegisterOnShutdown(func() { close(stop) })
+	got := stream(t, srv, "")
+	<-got // the first comment: the handler runs
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := srv.Config.Shutdown(ctx); err != nil || time.Since(start) > 2*time.Second {
+		t.Fatalf("Shutdown: %v after %v", err, time.Since(start))
 	}
 }

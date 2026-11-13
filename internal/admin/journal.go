@@ -26,6 +26,9 @@ var journalPage = template.Must(template.Must(page.Clone()).New("journal").Parse
 
 const journalPageSize = 200
 
+// maxStreams bounds the live journals open at once: each polls the log folders.
+const maxStreams = 4
+
 // The stream sends at most streamMax lines per streamWindow; heartbeat is a test seam.
 var (
 	streamMax       = 200
@@ -156,10 +159,12 @@ func (h *handler) journal(w http.ResponseWriter, r *http.Request) {
 	if rd := h.deps.JournalReader; rd == nil {
 		data["Off"] = true
 	} else {
-		entries, more, partial, err := rd.Page(r.Context(), q, before, journalPageSize)
+		entries, more, partial, resume, err := rd.Page(r.Context(), q, before, journalPageSize)
 		switch {
 		case errors.Is(err, journal.ErrBusy):
 			status, data["Busy"] = http.StatusServiceUnavailable, true
+		case r.Context().Err() != nil:
+			return // the browser left mid-search
 		case err != nil:
 			log.Printf("admin: journal page: %v", err)
 			http.Error(w, "journal error", http.StatusInternalServerError)
@@ -171,12 +176,24 @@ func (h *handler) journal(w http.ResponseWriter, r *http.Request) {
 		}
 		data["Lines"] = lines
 		data["Live"] = err == nil && rg.Key == "1h" && before.IsZero()
-		// A partial page short of n may have split a same-millisecond group: no Older from it.
-		if more && len(entries) > 0 && (!partial || len(entries) >= journalPageSize) {
-			v.Set("before", entries[len(entries)-1].Time)
-			data["Older"] = "?" + v.Encode()
-		} else if partial {
-			data["SearchOn"] = "?" + r.URL.RawQuery
+		link := func(before string) string {
+			if v.Del("before"); before != "" {
+				v.Set("before", before)
+			}
+			return "?" + v.Encode()
+		}
+		resumeAt := "" // zero: the stop came before anything was read; search on from the same place
+		if !resume.IsZero() {
+			resumeAt = resume.UTC().Format("2006-01-02T15:04:05.000Z")
+		}
+		// After a budget stop the last group may be split: go on from the reader's resume point.
+		switch {
+		case more && !partial && len(entries) > 0:
+			data["Older"] = link(entries[len(entries)-1].Time)
+		case partial && len(entries) >= journalPageSize:
+			data["Older"] = link(resumeAt)
+		case partial:
+			data["SearchOn"] = link(resumeAt)
 			data["Empty"] = len(entries) == 0
 			data["Budget"] = strconv.FormatInt(cmp.Or(rd.MaxBytes, 64<<20)>>20, 10) + " MiB or " + cmp.Or(rd.MaxTime, 5*time.Second).String()
 		}
@@ -199,6 +216,13 @@ func (h *handler) journalStream(w http.ResponseWriter, r *http.Request) {
 	q, err := journalQuery(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	select {
+	case h.streams <- struct{}{}:
+		defer func() { <-h.streams }()
+	default:
+		http.Error(w, "too many live journals open: close one", http.StatusServiceUnavailable)
 		return
 	}
 	rc := http.NewResponseController(w)
@@ -226,6 +250,8 @@ func (h *handler) journalStream(w http.ResponseWriter, r *http.Request) {
 		var msg string
 		select {
 		case <-ctx.Done():
+			return
+		case <-h.deps.Shutdown:
 			return
 		case e := <-ch:
 			now := time.Now()

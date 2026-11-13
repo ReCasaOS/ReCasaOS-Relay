@@ -40,6 +40,15 @@ func TestLookupenvKeepsEmpty(t *testing.T) {
 	}
 }
 
+func TestReadDirs(t *testing.T) {
+	if got := readDirs(" /data/logs , ,/logs/share,"); strings.Join(got, "|") != "/data/logs|/logs/share" {
+		t.Fatalf("%q", got)
+	}
+	if readDirs(" ") != nil {
+		t.Fatal("blank is not off")
+	}
+}
+
 func TestParseBytes(t *testing.T) {
 	for in, want := range map[string]int64{
 		"": 0, "  ": 0, "1500": 1500, "100G": 100e9, "2T": 2e12, "1.5G": 1.5e9,

@@ -33,6 +33,17 @@ import (
 // version is set at build time (-ldflags "-X main.version=v1.2.3"); the admin page shows it.
 var version = "dev"
 
+// readDirs splits a comma-separated list of folders, without spaces or empty items.
+func readDirs(s string) []string {
+	var out []string
+	for _, d := range strings.Split(s, ",") {
+		if d = strings.TrimSpace(d); d != "" {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
 // lookupenv is def only when key is unset: set empty, it stays empty (an off switch).
 func lookupenv(key, def string) string {
 	if v, ok := os.LookupEnv(key); ok {
@@ -169,11 +180,12 @@ func run() error {
 		Protect: prot.compiler, Community: prot.engine, Journal: jw}
 	// The operator page, under /admin, only when ADMIN_TOKEN is set (404 otherwise).
 	var adminH http.Handler
+	stopStreams := make(chan struct{}) // closed by srv.Shutdown: the live journals must not hold it
 	if tok := os.Getenv("ADMIN_TOKEN"); tok != "" {
-		deps := admin.Deps{Store: st, Headscale: hs, Remover: remover, Journal: jw}
+		deps := admin.Deps{Store: st, Headscale: hs, Remover: remover, Journal: jw, Shutdown: stopStreams}
 		// Read by /admin/journal: ours and front's (ingested) in /data/logs, share's volume; set empty: off.
-		if dirs := lookupenv("LOG_READ_DIRS", "/data/logs,/logs/share"); dirs != "" {
-			deps.JournalReader = &journal.Reader{Dirs: strings.Split(dirs, ",")}
+		if dirs := readDirs(lookupenv("LOG_READ_DIRS", "/data/logs,/logs/share")); dirs != nil {
+			deps.JournalReader = &journal.Reader{Dirs: dirs}
 		}
 		if mtr != nil { // never put a nil *Meter in the interface
 			deps.Meter = mtr
@@ -196,6 +208,7 @@ func run() error {
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    16 << 10,
 	}
+	srv.RegisterOnShutdown(func() { close(stopStreams) })
 
 	// The delegated zone box.<SHARE_DOMAIN>, only when sharing is on; bound now so a bad address or a
 	// busy port stops the start instead of failing later.

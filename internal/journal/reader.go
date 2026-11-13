@@ -294,14 +294,16 @@ func (c *cursor) step(s *scan, f *filter, stop string) (bool, error) {
 // more than n so that entries sharing the last one's millisecond are not
 // split across pages. more tells whether older matching entries exist. When
 // the read budget runs out it returns what it found with partial (and more)
-// true.
-func (r *Reader) Page(ctx context.Context, q Query, before time.Time, n int) (entries []Entry, more, partial bool, err error) {
+// true, and resume: the before that continues the search where it stopped,
+// losing no entry (it may repeat some of one millisecond); zero when it
+// stopped before reading anything and before was zero.
+func (r *Reader) Page(ctx context.Context, q Query, before time.Time, n int) (entries []Entry, more, partial bool, resume time.Time, err error) {
 	select {
 	case pageSem <- struct{}{}:
 	case <-ctx.Done():
-		return nil, false, false, ctx.Err()
+		return nil, false, false, time.Time{}, ctx.Err()
 	case <-time.After(time.Second):
-		return nil, false, false, ErrBusy
+		return nil, false, false, time.Time{}, ErrBusy
 	}
 	defer func() { <-pageSem }()
 
@@ -324,14 +326,26 @@ func (r *Reader) Page(ctx context.Context, q Query, before time.Time, n int) (en
 	if !stop.IsZero() {
 		stopAt = stop.UTC().Format(timeLayout)
 	}
-	stopped := func(err error) ([]Entry, bool, bool, error) {
-		if err == errBudget {
-			return entries, true, true, nil
+	var live []*cursor
+	// stopped ends the page on err; at the budget, the search resumes just after the newest time some
+	// live cursor may still yield: everything newer was read.
+	stopped := func(err error) ([]Entry, bool, bool, time.Time, error) {
+		if err != errBudget {
+			return nil, false, false, time.Time{}, err
 		}
-		return nil, false, false, err
+		bound := ""
+		for _, c := range live {
+			bound = max(bound, c.bound())
+		}
+		resume := stop
+		if t, err := time.Parse(timeLayout, bound); err == nil { // "" and "~" (nothing read) keep stop
+			if t = t.Add(time.Millisecond); stop.IsZero() || t.Before(stop) {
+				resume = t
+			}
+		}
+		return entries, true, true, resume, nil
 	}
 
-	var live []*cursor
 	for _, fl := range r.files(q.From, stop) {
 		if !f.mayMatch(fl) {
 			continue
@@ -348,6 +362,7 @@ func (r *Reader) Page(ctx context.Context, q Query, before time.Time, n int) (en
 		c := &cursor{f: fh, caddy: fl.caddy, off: st.Size(), frontier: "~"} // "~" sorts after any time
 		if stopAt != "" {
 			if err := c.seek(s, stopAt); err != nil {
+				live = nil // the files not opened yet were not read at all
 				return stopped(err)
 			}
 		}
@@ -365,7 +380,7 @@ func (r *Reader) Page(ctx context.Context, q Query, before time.Time, n int) (en
 		c := live[i]
 		if c.head != nil {
 			if len(entries) >= n && c.head.Time != entries[len(entries)-1].Time {
-				return entries, true, false, nil
+				return entries, true, false, time.Time{}, nil
 			}
 			entries = append(entries, *c.head)
 			c.head = nil
@@ -379,7 +394,7 @@ func (r *Reader) Page(ctx context.Context, q Query, before time.Time, n int) (en
 			live = slices.Delete(live, i, i+1)
 		}
 	}
-	return entries, false, false, nil
+	return entries, false, false, time.Time{}, nil
 }
 
 // tail follows one file by identity, so a renamed (rolled) file keeps its

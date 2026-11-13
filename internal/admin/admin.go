@@ -113,6 +113,8 @@ type Deps struct {
 	Journal *journal.Writer
 	// JournalReader reads the journal for /admin/journal; nil: the page says it is off.
 	JournalReader *journal.Reader
+	// Shutdown, closed when the server shuts down, ends the live journals (they would hold Shutdown).
+	Shutdown <-chan struct{}
 }
 
 type handler struct {
@@ -122,6 +124,7 @@ type handler struct {
 	csrf      string
 	nodeFetch chan struct{} // bounds the Headscale calls of one page load
 	limiter   *ratelimit.Limiter
+	streams   chan struct{} // live journals open
 }
 
 // New returns the admin handler. The token must be at least MinTokenLen long.
@@ -135,7 +138,7 @@ func New(cfg Config, deps Deps) (http.Handler, error) {
 	sum := sha256.Sum256([]byte("csrf:" + cfg.Token))
 	h := &handler{cfg: cfg, deps: deps, tokenSum: sha256.Sum256([]byte(cfg.Token)),
 		csrf: hex.EncodeToString(sum[:]), nodeFetch: make(chan struct{}, 8),
-		limiter: ratelimit.New(requestsPerHour, deps.Now)}
+		limiter: ratelimit.New(requestsPerHour, deps.Now), streams: make(chan struct{}, maxStreams)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /admin/{$}", h.index)
 	mux.HandleFunc("POST /admin/fleets/{id}/delete", h.deleteFleet)
