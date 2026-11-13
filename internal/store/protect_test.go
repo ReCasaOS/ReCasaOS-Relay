@@ -296,3 +296,23 @@ func TestListsAndFeeds(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSeenKeepsNewest(t *testing.T) {
+	ctx := context.Background()
+	s := openTmp(t)
+	rec := func(at time.Time) {
+		t.Helper()
+		if err := s.RecordSeen(ctx, at, []Seen{{"1.1.1.1/32", "7"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec(pt0)
+	rec(pt0.Add(-time.Hour)) // out of order: must not move the time back
+	if ok, err := s.SeenBetween(ctx, "1.1.1.1/32", "7", pt0.Add(-30*time.Minute), pt0.Add(time.Minute)); err != nil || !ok {
+		t.Fatalf("newest lost: %v %v", ok, err)
+	}
+	rec(pt0.Add(2 * time.Hour))
+	if ok, err := s.SeenBetween(ctx, "1.1.1.1/32", "7", pt0.Add(time.Hour), pt0.Add(3*time.Hour)); err != nil || !ok {
+		t.Fatalf("later time not kept: %v %v", ok, err)
+	}
+}

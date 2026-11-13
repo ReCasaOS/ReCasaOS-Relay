@@ -220,7 +220,7 @@ func batch[T any](ctx context.Context, s *sqlStore, what, q string, items []T, a
 // RecordSeen keeps one row per (key, node): the latest accepted time.
 func (s *sqlStore) RecordSeen(ctx context.Context, at time.Time, seen []Seen) error {
 	return batch(ctx, s, "record seen",
-		`INSERT INTO share_seen (key, node_id, at) VALUES (?, ?, ?) ON CONFLICT(key, node_id) DO UPDATE SET at = excluded.at`,
+		`INSERT INTO share_seen (key, node_id, at) VALUES (?, ?, ?) ON CONFLICT(key, node_id) DO UPDATE SET at = MAX(at, excluded.at)`,
 		seen, func(v Seen) []any { return []any{v.Key, v.NodeID, ts(at)} })
 }
 
