@@ -195,8 +195,8 @@ func TestPageStopsAtBudget(t *testing.T) {
 	appendLines(t, filepath.Join(big, "share-2026-11-13.jsonl"), lines...)
 
 	t.Run("bytes", func(t *testing.T) {
-		r := &Reader{Dirs: []string{big}, MaxBytes: 256 << 10}
-		es, more, partial := page(t, r, Query{}, time.Time{}, 1_000_000)
+		r := &Reader{Dirs: []string{big}, MaxBytes: 64 << 10}
+		es, more, partial := page(t, r, Query{}, time.Time{}, 1000)
 		if !partial || !more || len(es) == 0 || len(es) >= 20000 || es[0].Time != stampOf(at(19999)) {
 			t.Fatalf("partial=%v more=%v len=%d first=%v", partial, more, len(es), es[0].Time)
 		}
@@ -209,7 +209,7 @@ func TestPageStopsAtBudget(t *testing.T) {
 	t.Run("time", func(t *testing.T) {
 		c := newClock(noon)
 		r := &Reader{Dirs: []string{big}, Now: func() time.Time { c.set(c.now().Add(time.Second)); return c.now() }}
-		_, more, partial := page(t, r, Query{}, time.Time{}, 1_000_000)
+		_, more, partial := page(t, r, Query{Text: "no such text"}, time.Time{}, 1000)
 		if !partial || !more {
 			t.Fatalf("partial=%v more=%v", partial, more)
 		}
@@ -362,5 +362,60 @@ func TestBusy(t *testing.T) {
 	_, _, _, err := (&Reader{Dirs: []string{t.TempDir()}}).Page(context.Background(), Query{}, time.Time{}, 10)
 	if !errors.Is(err, ErrBusy) || time.Since(start) < 900*time.Millisecond {
 		t.Fatalf("err=%v after %v", err, time.Since(start))
+	}
+}
+
+// A filtered page must not spend the budget on the first-listed file while a
+// newer match sits in another.
+func TestPageFilteredBudgetFollowsTime(t *testing.T) {
+	share, enrol, front := t.TempDir(), t.TempDir(), t.TempDir()
+	var lines []string
+	for i := 0; i < 20000; i++ {
+		lines = append(lines, jsonLine(Entry{Time: stampOf(at(i)), Src: "share", Act: "pass", IP: "203.0.113.7", Host: "nas.example.org"}))
+	}
+	appendLines(t, filepath.Join(share, "share-2026-11-13.jsonl"), lines...)
+	appendLines(t, filepath.Join(enrol, "enrolment-2026-11-13.jsonl"), jsonLine(Entry{Time: stampOf(at(20001)), Src: "log", Msg: "needle"}))
+	appendLines(t, filepath.Join(front, "front.log"), caddyLineAt(at(20002), "192.0.2.1", "GET", "/x", 200))
+	r := &Reader{Dirs: []string{share, enrol, front}, MaxBytes: 256 << 10}
+
+	es, _, partial := page(t, r, Query{Src: []string{"front"}}, at(30000), 10)
+	if partial || !slices.Equal(times(es), stamps(20002)) {
+		t.Fatalf("Src=front: partial=%v %v", partial, times(es))
+	}
+	es, _, _ = page(t, r, Query{Text: "needle"}, at(30000), 10)
+	if !slices.Equal(times(es), stamps(20001)) {
+		t.Fatalf("Text=needle: %v", times(es))
+	}
+}
+
+// Entries sharing the last millisecond of a page stay on that page.
+func TestPageKeepsSameMillisecondTogether(t *testing.T) {
+	a, b := t.TempDir(), t.TempDir()
+	appendLines(t, filepath.Join(a, "share-2026-11-13.jsonl"),
+		jsonLine(Entry{Time: stampOf(at(0)), Src: "share", Msg: "a0"}),
+		jsonLine(Entry{Time: stampOf(at(1)), Src: "share", Msg: "a1"}),
+		jsonLine(Entry{Time: stampOf(at(1)), Src: "share", Msg: "a2"}),
+		jsonLine(Entry{Time: stampOf(at(2)), Src: "share", Msg: "a3"}))
+	appendLines(t, filepath.Join(b, "enrolment-2026-11-13.jsonl"),
+		jsonLine(Entry{Time: stampOf(at(1)), Src: "relay", Msg: "b1"}),
+		jsonLine(Entry{Time: stampOf(at(1)), Src: "relay", Msg: "b2"}))
+	r := &Reader{Dirs: []string{a, b}}
+	var got []string
+	before := time.Time{}
+	for pages := 0; pages < 10; pages++ {
+		es, more, _ := page(t, r, Query{}, before, 2)
+		for _, e := range es {
+			got = append(got, e.Msg)
+		}
+		if !more {
+			break
+		}
+		before, _ = time.Parse(timeLayout, es[len(es)-1].Time)
+	}
+	if slices.Sort(got); !slices.Equal(got, []string{"a0", "a1", "a2", "a3", "b1", "b2"}) {
+		t.Fatalf("got %v", got)
+	}
+	if es, more, _ := page(t, r, Query{}, time.Time{}, 0); len(es) != 1 || !more {
+		t.Fatalf("n=0 is clamped to 1: %v more=%v", times(es), more)
 	}
 }

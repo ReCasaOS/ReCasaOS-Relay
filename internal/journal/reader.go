@@ -86,6 +86,20 @@ func (f *filter) match(e *Entry) bool {
 	return false
 }
 
+// mayMatch tells whether a file of this kind can hold entries of q.Src:
+// Caddy's files hold only front, ours never.
+func (f *filter) mayMatch(caddy bool) bool {
+	if len(f.q.Src) == 0 {
+		return true
+	}
+	for _, src := range f.q.Src {
+		if (src == "front") == caddy {
+			return true
+		}
+	}
+	return false
+}
+
 // parseLine reads one line of ours or of Caddy's; false for anything else,
 // such as a partial line left by a full disk.
 func parseLine(line []byte, caddy bool) (Entry, bool) {
@@ -169,7 +183,18 @@ type cursor struct {
 	caddy bool
 	off   int64  // file[:off] is not read yet
 	buf   []byte // file[off:end of the next line to return]
-	head  Entry  // the newest matching entry not yet taken
+	// frontier is the time of the last line read, matching or not: the
+	// lines still unread are not newer.
+	frontier string
+	head     *Entry // a matching entry not yet taken
+}
+
+// bound is the newest time this cursor may still yield.
+func (c *cursor) bound() string {
+	if c.head != nil {
+		return c.head.Time
+	}
+	return c.frontier
 }
 
 // prev returns the line before the last one returned, io.EOF at the start.
@@ -239,35 +264,36 @@ func (c *cursor) seek(s *scan, stop string) error {
 	return nil
 }
 
-// next loads the cursor's next matching entry before stop; false when the
-// file has no more.
-func (c *cursor) next(s *scan, f *filter, stop string) (bool, error) {
-	for {
-		line, err := c.prev(s)
-		if err == io.EOF {
-			return false, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		e, ok := parseLine(line, c.caddy)
-		if !ok || stop != "" && e.Time >= stop {
-			continue
-		}
-		if f.from != "" && e.Time < f.from {
-			return false, nil // older than the range from here on
-		}
-		if f.match(&e) {
-			c.head = e
-			return true, nil
-		}
+// step reads one line, keeping it as head when it matches; false when the
+// file has nothing more in range.
+func (c *cursor) step(s *scan, f *filter, stop string) (bool, error) {
+	line, err := c.prev(s)
+	if err == io.EOF {
+		return false, nil
 	}
+	if err != nil {
+		return false, err
+	}
+	e, ok := parseLine(line, c.caddy)
+	if !ok {
+		return true, nil
+	}
+	c.frontier = e.Time
+	if f.from != "" && e.Time < f.from {
+		return false, nil // older than the range from here on
+	}
+	if (stop == "" || e.Time < stop) && f.match(&e) {
+		c.head = &e
+	}
+	return true, nil
 }
 
-// Page returns at most n entries matching q older than before (zero: now),
-// newest first, merged by time across all files. more tells whether older
-// matching entries exist. When the read budget runs out it returns what it
-// found with partial (and more) true.
+// Page returns n entries (clamped to 1..1000) matching q older than before
+// (zero: now), newest first, merged by time across all files; it may return
+// more than n so that entries sharing the last one's millisecond are not
+// split across pages. more tells whether older matching entries exist. When
+// the read budget runs out it returns what it found with partial (and more)
+// true.
 func (r *Reader) Page(ctx context.Context, q Query, before time.Time, n int) (entries []Entry, more, partial bool, err error) {
 	select {
 	case pageSem <- struct{}{}:
@@ -284,6 +310,7 @@ func (r *Reader) Page(ctx context.Context, q Query, before time.Time, n int) (en
 	}
 	s := &scan{ctx: ctx, left: cmp.Or(r.MaxBytes, 64<<20), now: now}
 	s.deadline = now().Add(cmp.Or(r.MaxTime, 5*time.Second))
+	n = min(max(n, 1), 1000)
 	f := newFilter(q)
 	// Entries at or after stop are skipped; To is inclusive.
 	stop := before
@@ -305,6 +332,9 @@ func (r *Reader) Page(ctx context.Context, q Query, before time.Time, n int) (en
 
 	var live []*cursor
 	for _, fl := range r.files(q.From, stop) {
+		if !f.mayMatch(fl.caddy) {
+			continue
+		}
 		fh, err := os.Open(fl.name)
 		if err != nil {
 			continue // deleted since listed
@@ -314,33 +344,33 @@ func (r *Reader) Page(ctx context.Context, q Query, before time.Time, n int) (en
 		if err != nil {
 			continue
 		}
-		c := &cursor{f: fh, caddy: fl.caddy, off: st.Size()}
+		c := &cursor{f: fh, caddy: fl.caddy, off: st.Size(), frontier: "~"} // "~" sorts after any time
 		if stopAt != "" {
-			err = c.seek(s, stopAt)
+			if err := c.seek(s, stopAt); err != nil {
+				return stopped(err)
+			}
 		}
-		ok := false
-		if err == nil {
-			ok, err = c.next(s, &f, stopAt)
-		}
-		if err != nil {
-			return stopped(err)
-		}
-		if ok {
-			live = append(live, c)
-		}
+		live = append(live, c)
 	}
+	// Always move the cursor that may hold the newest entry, so the budget is
+	// spent across files by time, not on whichever file is listed first.
 	for len(live) > 0 {
-		if len(entries) >= n {
-			return entries, true, false, nil
-		}
 		i := 0
 		for j, c := range live {
-			if c.head.Time > live[i].head.Time {
+			if c.bound() > live[i].bound() {
 				i = j
 			}
 		}
-		entries = append(entries, live[i].head)
-		ok, err := live[i].next(s, &f, stopAt)
+		c := live[i]
+		if c.head != nil {
+			if len(entries) >= n && c.head.Time != entries[len(entries)-1].Time {
+				return entries, true, false, nil
+			}
+			entries = append(entries, *c.head)
+			c.head = nil
+			continue
+		}
+		ok, err := c.step(s, &f, stopAt)
 		if err != nil {
 			return stopped(err)
 		}
