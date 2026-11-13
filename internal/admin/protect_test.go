@@ -2,32 +2,38 @@ package admin
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ReCasaOS/recasaos-relay/internal/feeds"
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/protect"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
 )
 
-// withCompiler rebuilds e's handler with a snapshot compiler whose clock never moves, so only
-// Invalidate can make it rebuild.
-func (e env) withCompiler(t *testing.T) (env, *protect.Compiler) {
+// withDeps rebuilds e's handler with the protection collaborators set by set.
+func (e env) withDeps(t *testing.T, set func(*Deps)) env {
 	t.Helper()
-	c := &protect.Compiler{Store: e.st, Now: func() time.Time { return t0 }}
-	h, err := New(Config{Token: token, NodesPerFleet: 50, MaxFleets: 1000}, Deps{
-		Store: e.st, Headscale: e.hs, Now: func() time.Time { return t0 },
-		Remover: &fleets.Remover{Store: e.st, Headscale: e.hs, Locks: &fleets.Locks{}},
-		Protect: c,
-	})
+	d := Deps{Store: e.st, Headscale: e.hs, Now: func() time.Time { return t0 },
+		Remover: &fleets.Remover{Store: e.st, Headscale: e.hs, Locks: &fleets.Locks{}}}
+	set(&d)
+	h, err := New(Config{Token: token, NodesPerFleet: 50, MaxFleets: 1000}, d)
 	if err != nil {
 		t.Fatal(err)
 	}
 	e.h = h
-	return e, c
+	return e
+}
+
+// withCompiler adds a snapshot compiler whose clock never moves, so only Invalidate can make it rebuild.
+func (e env) withCompiler(t *testing.T) (env, *protect.Compiler) {
+	c := &protect.Compiler{Store: e.st, Now: func() time.Time { return t0 }}
+	return e.withDeps(t, func(d *Deps) { d.Protect = c }), c
 }
 
 func form(e env, kv ...string) url.Values {
@@ -234,5 +240,28 @@ func TestWritesNeedCSRF(t *testing.T) {
 	}
 	if fs := listFeeds(t, e); len(fs) != 1 || fs[0].Enabled {
 		t.Errorf("a write went through: %+v", fs)
+	}
+}
+
+func TestFeedRefresh(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "down", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	e := setup(t)
+	id, err := e.st.AddFeed(context.Background(), store.Feed{Name: "flaky", URL: srv.URL + "/list.txt", Format: "text", EverySec: 3600, MaxEntries: 100000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "/admin/protection/feeds/" + strconv.FormatInt(id, 10) + "/refresh"
+	if w := e.do("POST", path, token, form(e)); w.Code != 503 {
+		t.Errorf("refresh without a fetcher: %d", w.Code)
+	}
+	e = e.withDeps(t, func(d *Deps) { d.Feeds = &feeds.Fetcher{Store: e.st, Dir: t.TempDir(), Client: srv.Client()} })
+	if w := e.do("POST", path, token, form(e)); w.Code != 303 || w.Header().Get("Location") != "/admin/protection#feeds" {
+		t.Fatalf("refresh: %d", w.Code)
+	}
+	if !strings.Contains(e.do("GET", "/admin/protection", token, nil).Body.String(), "HTTP 500") {
+		t.Error("the refresh error is not shown")
 	}
 }
