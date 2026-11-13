@@ -85,6 +85,15 @@ services:
       DERPER_DEBUG_KEY: ${DERPER_DEBUG_KEY:-}
       # Monthly traffic budget shown on /admin, e.g. 100G, 100GB or 2t (K, M, G, T are decimal, any case). Unset: no reference.
       MONTHLY_TRAFFIC_REFERENCE: ${MONTHLY_TRAFFIC_REFERENCE:-}
+      # Protection requests of the boxes (protection, bans, refusals) per hour per client IP, apart from AUTH_RATE_PER_HOUR.
+      PROTECT_RATE_PER_HOUR: ${PROTECT_RATE_PER_HOUR:-600}
+      # Protection of shared apps (only with SHARE_DOMAIN): total entries of the enabled lists; a list past it is refused whole.
+      FILTER_MAX_ENTRIES: ${FILTER_MAX_ENTRIES:-1000000}
+      # Age a fleet needs before its ban reports count. For tests only: keep the default in production.
+      COMMUNITY_MIN_FLEET_AGE: ${COMMUNITY_MIN_FLEET_AGE:-168h}
+      # The caps `share` enforces, read here only to show them on /admin: keep them equal to share's below.
+      CONNS_PER_IP: ${CONNS_PER_IP:-256}
+      CONNS_PER_IP_PER_BOX: ${CONNS_PER_IP_PER_BOX:-64}
     volumes:
       - enrolment-data:/data
     # Reached only through `front` (Caddyfile): never publish this port, the rate limiter trusts X-Client-IP.

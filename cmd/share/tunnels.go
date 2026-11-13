@@ -20,8 +20,10 @@ import (
 var enrolmentClient = &http.Client{Timeout: 5 * time.Second}
 
 // do runs req, dropping the URL from transport errors: the resolve URL holds the box key.
-func do(req *http.Request) (*http.Response, error) {
-	resp, err := enrolmentClient.Do(req)
+func do(req *http.Request) (*http.Response, error) { return doWith(enrolmentClient, req) }
+
+func doWith(c *http.Client, req *http.Request) (*http.Response, error) {
+	resp, err := c.Do(req)
 	var ue *url.Error
 	if errors.As(err, &ue) {
 		err = ue.Err
@@ -62,18 +64,30 @@ func resolver(enrolmentURL string) tunnel.Resolver {
 }
 
 // toTunnel sends the visitor connection c (replay holds its peeked ClientHello) into box's tunnel,
-// unless c's address already holds perBox's max streams of that box: one address alone must not fill
-// the tunnel's tunnel.MaxStreams and lock every other visitor out.
-func toTunnel(reg *tunnel.Registry, perBox *connCap, box string, c, replay net.Conn) {
+// unless fh's filter refuses c's address for that box, or c's address already holds perBox's max
+// streams of that box: one address alone must not fill the tunnel's tunnel.MaxStreams and lock every
+// other visitor out. A name no tunnel serves closes silently, before the filter: nothing is recorded.
+func toTunnel(reg *tunnel.Registry, perBox *connCap, fh *filterHolder, ev *events, box string, c, replay net.Conn) {
 	t, ok := reg.Get(box)
 	if !ok {
 		return
+	}
+	// Only share names are filtered: the relay host (enrolment, Headscale, /admin) must stay
+	// reachable from any country. A refused visitor gets a plain close.
+	if f := fh.get(); f != nil {
+		if a, ok := remoteAddr(c); ok {
+			if reason, source := f.decide(a, box); reason != "" {
+				ev.refused(box, eventKey(a), reason, source)
+				return
+			}
+		}
 	}
 	k := ipKey(c.RemoteAddr())
 	if k != "" {
 		k += " -> " + box
 	}
 	if !perBox.acquire(k) {
+		ev.refused(box, connKey(c), "cap", "ip-box")
 		return
 	}
 	defer perBox.release(k)
@@ -85,6 +99,7 @@ func toTunnel(reg *tunnel.Registry, perBox *connCap, box string, c, replay net.C
 		return
 	}
 	defer stream.Close()
+	ev.seen(connKey(c), t.NodeID)
 	src, _ := c.RemoteAddr().(*net.TCPAddr)
 	dst, _ := c.LocalAddr().(*net.TCPAddr)
 	if src == nil || dst == nil || proxyproto.WriteV2(stream, src, dst) != nil {

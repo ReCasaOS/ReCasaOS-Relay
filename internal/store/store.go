@@ -98,6 +98,53 @@ type Store interface {
 	ApplyShareUsage(ctx context.Context, at time.Time, samples []UsageSample) error
 	ShareTotals(ctx context.Context, since time.Time) ([]UsageTotal, error)
 	ShareSeries(ctx context.Context, res Resolution, since time.Time) ([]UsagePoint, error)
+
+	// Protection (protect.go). Times are UnixNano; a zero time is stored as 0 = none/permanent.
+	GetProtection(ctx context.Context, nodeID string) (Protection, bool, error)
+	// SetProtection also deletes the node's reports when ShareBans is off.
+	SetProtection(ctx context.Context, nodeID string, p Protection) error
+	// ProtectedNames maps share name to the protection row of its box.
+	ProtectedNames(ctx context.Context) (map[string]Protection, error)
+	RecordSeen(ctx context.Context, at time.Time, seen []Seen) error
+	SeenBetween(ctx context.Context, key, nodeID string, from, to time.Time) (bool, error)
+	// AddReport ignores a repeat of (node, key, since).
+	AddReport(ctx context.Context, r Report, at time.Time) error
+	ReportsSince(ctx context.Context, t time.Time) ([]Report, error)
+	// AddRefusals adds counts on (hour, name, key, reason, source).
+	AddRefusals(ctx context.Context, rs []Refusal) error
+	RefusalsOf(ctx context.Context, name string, since time.Time, limit int) ([]Refusal, error)
+	// RefusalsSince groups by name, key, reason and source (Hour is zero).
+	RefusalsSince(ctx context.Context, since time.Time) ([]Refusal, error)
+	// RefusalTotals groups by hour, reason and source; Name and Key are empty.
+	RefusalTotals(ctx context.Context, since time.Time) ([]Refusal, error)
+	ActiveBans(ctx context.Context, now time.Time) ([]CommunityBan, error)
+	PermanentBans(ctx context.Context) ([]CommunityBan, error)
+	Strikes(ctx context.Context, key string) (n int, lastEnd time.Time, err error)
+	OpenBan(ctx context.Context, b CommunityBan, openers []string) error
+	// LiftBan ends the ban now and keeps its strikes.
+	LiftBan(ctx context.Context, key string, now time.Time) error
+	// EndExpired moves the end of ended bans into the strikes table and deletes them.
+	EndExpired(ctx context.Context, now time.Time) error
+	ContributedSince(ctx context.Context, fleetID string, t time.Time) (int, error)
+	AddAllow(ctx context.Context, e AllowEntry) (int64, error)
+	DeleteAllow(ctx context.Context, id int64) error
+	AllowList(ctx context.Context) ([]AllowEntry, error)
+	AddManual(ctx context.Context, m ManualBan) (int64, error)
+	DeleteManual(ctx context.Context, id int64) error
+	ManualBans(ctx context.Context, now time.Time) ([]ManualBan, error)
+	SuspendName(ctx context.Context, name string, at time.Time) error
+	ResumeName(ctx context.Context, name string) error
+	SuspendedNames(ctx context.Context) ([]string, error)
+	// AddFeed returns ErrExists on a duplicate name.
+	AddFeed(ctx context.Context, f Feed) (int64, error)
+	UpdateFeed(ctx context.Context, f Feed) error
+	DeleteFeed(ctx context.Context, id int64) error
+	Feeds(ctx context.Context) ([]Feed, error)
+	// FeedResult records an attempt; errText "" sets last_ok and count.
+	FeedResult(ctx context.Context, id int64, at time.Time, count int, errText string) error
+	// FleetEligible: created_at <= createdBefore and at least one share name.
+	FleetEligible(ctx context.Context, fleetID string, createdBefore time.Time) (bool, error)
+	PruneProtection(ctx context.Context, now time.Time) error
 	Close() error
 }
 
@@ -192,7 +239,7 @@ func Open(path string) (Store, error) {
 		return nil, fmt.Errorf("store: open: %w", err)
 	}
 	db.SetMaxOpenConns(1) // single writer; keeps SQLITE_BUSY out of the picture
-	if _, err := db.Exec(schema); err != nil {
+	if _, err := db.Exec(schema + protectSchema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("store: migrate: %w", err)
 	}

@@ -74,7 +74,7 @@ func TestAcceptRefusesPastPerIPCap(t *testing.T) {
 	defer p2.Close()
 	hold, handled := make(chan struct{}), make(chan net.Conn, 2)
 	var wg sync.WaitGroup
-	accept(&listOf{conns: []net.Conn{c1, c2}}, &wg, newConnCap(1, "test"), func(c net.Conn) { handled <- c; <-hold })
+	accept(&listOf{conns: []net.Conn{c1, c2}}, &wg, newConnCap(1, "test"), nil, func(c net.Conn) { handled <- c; <-hold })
 	p2.SetReadDeadline(time.Now().Add(time.Second))
 	if _, err := p2.Read(make([]byte, 1)); !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("second connection of the same client: %v, want it closed", err)
@@ -101,7 +101,7 @@ func TestVisitorPastPerBoxCapIsTurnedAway(t *testing.T) {
 	via := func(c net.Conn, done chan struct{}) {
 		defer close(done)
 		defer c.Close()
-		toTunnel(reg, perBox, "alpha", fromAddr{c, visitor}, c)
+		toTunnel(reg, perBox, nil, nil, "alpha", fromAddr{c, visitor}, c)
 	}
 
 	v1, c1 := tcpPair(t)

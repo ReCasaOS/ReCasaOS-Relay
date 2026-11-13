@@ -18,8 +18,8 @@ import (
 	"time"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/admin"
-	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/dnszone"
+	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/gc"
 	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
 	"github.com/ReCasaOS/recasaos-relay/internal/meter"
@@ -38,6 +38,19 @@ func getenv(key, def string) string {
 	return def
 }
 
+// envPositive reads a positive integer, def when unset.
+func envPositive(key string, def int) (int, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("%s: a positive integer", key)
+	}
+	return n, nil
+}
+
 func main() {
 	if err := run(); err != nil {
 		log.Fatal(err)
@@ -53,7 +66,8 @@ func run() error {
 	if apiKey == "" {
 		return errors.New("HEADSCALE_API_KEY is required (docker compose exec headscale headscale apikeys create)")
 	}
-	st, err := store.Open(getenv("STORE_PATH", "/data/relay.db"))
+	storePath := getenv("STORE_PATH", "/data/relay.db")
+	st, err := store.Open(storePath)
 	if err != nil {
 		return err
 	}
@@ -67,6 +81,14 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("MONTHLY_TRAFFIC_REFERENCE: %w", err)
 	}
+	connsPerIP, err := envPositive("CONNS_PER_IP", 256)
+	if err != nil {
+		return err
+	}
+	connsPerBox, err := envPositive("CONNS_PER_IP_PER_BOX", 64)
+	if err != nil {
+		return err
+	}
 	// Traffic metering needs the derper's debug key; without it nothing is metered (the key is never logged).
 	var mtr *meter.Meter
 	if key := os.Getenv("DERPER_DEBUG_KEY"); key != "" {
@@ -74,6 +96,12 @@ func run() error {
 	} else {
 		log.Printf("traffic metering is off: DERPER_DEBUG_KEY is not set")
 	}
+	// Relay-side protection of shared apps, only with sharing: the filter routes `share` polls exist
+	// only then, and without them nothing would use the feeds or DB-IP. Its retention runs either
+	// way (nil pointers below: the handlers and the page treat them as absent).
+	prot := newProtection(st, storePath, cfg.ShareDomain != "", cfg.FilterMaxEntries, cfg.CommunityMinFleetAge)
+	srvDeps := server.Deps{Store: st, Headscale: hs, PolicyHook: pol.Hook, Remover: remover,
+		Protect: prot.compiler, Community: prot.engine}
 	// The operator page, under /admin, only when ADMIN_TOKEN is set (404 otherwise).
 	var adminH http.Handler
 	if tok := os.Getenv("ADMIN_TOKEN"); tok != "" {
@@ -81,15 +109,18 @@ func run() error {
 		if mtr != nil { // never put a nil *Meter in the interface
 			deps.Meter = mtr
 		}
+		deps.Feeds, deps.Geo, deps.Protect = prot.feeds, prot.geo, prot.compiler
 		adminH, err = admin.New(admin.Config{Token: tok, NodesPerFleet: cfg.NodesPerFleet, MaxFleets: cfg.MaxFleets,
-			ClientHeader: cfg.TrustedProxyHeader, MonthlyReference: reference, Version: version}, deps)
+			ClientHeader: cfg.TrustedProxyHeader, MonthlyReference: reference, Version: version,
+			ConnsPerIP: connsPerIP, ConnsPerIPPerBox: connsPerBox}, deps)
 		if err != nil {
 			return err
 		}
 	}
+	srvDeps.Admin = adminH
 	srv := &http.Server{
 		Addr:              getenv("LISTEN_ADDR", ":8081"),
-		Handler:           server.New(cfg, server.Deps{Store: st, Headscale: hs, PolicyHook: pol.Hook, Remover: remover, Admin: adminH}),
+		Handler:           server.New(cfg, srvDeps),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      45 * time.Second, // a create-fleet call may wait on Headscale (20 s) and its rollback
@@ -128,6 +159,7 @@ func run() error {
 	janitorStarted, janitorDone := false, make(chan struct{})
 	meterStarted, meterDone := false, make(chan struct{})
 	zoneStarted, zoneDone := false, make(chan struct{})
+	protectStarted, protectDone := false, make(chan struct{})
 	var zoneErr error // written by the zone goroutine, read after zoneDone is closed
 	waitJanitor := func() {
 		if zone != nil {
@@ -135,6 +167,9 @@ func run() error {
 		}
 		if janitorStarted {
 			<-janitorDone
+		}
+		if protectStarted {
+			<-protectDone
 		}
 		if mtr != nil && meterStarted {
 			<-meterDone
@@ -148,6 +183,11 @@ func run() error {
 			go func() {
 				defer close(janitorDone)
 				gc.Run(ctx, gc.Deps{Remover: remover, IdleAfter: cfg.IdleAfter, JoinKeyTTL: cfg.JoinKeyTTL}, cfg.GCEvery)
+			}()
+			protectStarted = true
+			go func() {
+				defer close(protectDone)
+				prot.run(ctx, time.Minute)
 			}()
 			if mtr != nil {
 				meterStarted = true

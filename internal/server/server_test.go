@@ -21,7 +21,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestConfigFromEnvDefaults(t *testing.T) {
-	for _, k := range []string{"NODES_PER_FLEET", "CREATE_RATE_PER_HOUR", "KEY_RATE_PER_HOUR", "AUTH_RATE_PER_HOUR", "JOIN_KEY_TTL", "IDLE_AFTER", "GC_INTERVAL", "TRUSTED_PROXY_HEADER", "MAX_FLEETS", "MAX_FLEETS_PER_ORIGIN", "MAX_FLEETS_PER_PREFIX48", "MAX_DEVICES_PER_FLEET", "MAX_PENDING_KEYS", "DEVICE_CODE_TTL", "MAX_PENDING_DEVICE_CODES", "LOGIN_RATE_PER_HOUR", "SHARE_DOMAIN", "SHARE_ACME_TTL", "SHARE_ACME_RATE_PER_HOUR"} {
+	for _, k := range []string{"NODES_PER_FLEET", "CREATE_RATE_PER_HOUR", "KEY_RATE_PER_HOUR", "AUTH_RATE_PER_HOUR", "JOIN_KEY_TTL", "IDLE_AFTER", "GC_INTERVAL", "TRUSTED_PROXY_HEADER", "MAX_FLEETS", "MAX_FLEETS_PER_ORIGIN", "MAX_FLEETS_PER_PREFIX48", "MAX_DEVICES_PER_FLEET", "MAX_PENDING_KEYS", "DEVICE_CODE_TTL", "MAX_PENDING_DEVICE_CODES", "LOGIN_RATE_PER_HOUR", "SHARE_DOMAIN", "SHARE_ACME_TTL", "SHARE_ACME_RATE_PER_HOUR", "FILTER_MAX_ENTRIES", "COMMUNITY_MIN_FLEET_AGE"} {
 		t.Setenv(k, "")
 	}
 	t.Setenv("LOGIN_SERVER", "https://relay.example") // required, no default
@@ -43,6 +43,7 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 		LoginServer:    "https://relay.example",
 		DeviceCodeTTL:  10 * time.Minute, MaxPendingDeviceCodes: 5, LoginRatePerHour: 20,
 		ShareACMETTL: 10 * time.Minute, ShareACMERatePerHour: 20,
+		FilterMaxEntries: 1_000_000, CommunityMinFleetAge: 168 * time.Hour, ProtectRatePerHour: 600,
 	}
 	if got != want {
 		t.Fatalf("defaults = %+v, want %+v", got, want)
@@ -67,6 +68,9 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 	t.Setenv("SHARE_DOMAIN", "Share.Example")
 	t.Setenv("SHARE_ACME_TTL", "1m")
 	t.Setenv("SHARE_ACME_RATE_PER_HOUR", "3")
+	t.Setenv("FILTER_MAX_ENTRIES", "500")
+	t.Setenv("COMMUNITY_MIN_FLEET_AGE", "1m")
+	t.Setenv("PROTECT_RATE_PER_HOUR", "11")
 	got, err := ConfigFromEnv()
 	if err != nil {
 		t.Fatal(err)
@@ -75,7 +79,8 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 		IdleAfter: 48 * time.Hour, GCEvery: 90 * time.Second, LoginServer: "https://relay.example", TrustedProxyHeader: "X-Forwarded-For", MaxFleets: 3, MaxPendingKeys: 4,
 		MaxFleetsPerOrigin: 6, MaxFleetsPerPrefix48: 7, MaxDevicesPerFleet: 8,
 		DeviceCodeTTL: 10 * time.Minute, MaxPendingDeviceCodes: 5, LoginRatePerHour: 20,
-		ShareDomain: "share.example", ShareACMETTL: time.Minute, ShareACMERatePerHour: 3}
+		ShareDomain: "share.example", ShareACMETTL: time.Minute, ShareACMERatePerHour: 3,
+		FilterMaxEntries: 500, CommunityMinFleetAge: time.Minute, ProtectRatePerHour: 11}
 	if got != want {
 		t.Fatalf("overrides = %+v, want %+v", got, want)
 	}
@@ -83,14 +88,15 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 
 func TestConfigFromEnvInvalid(t *testing.T) {
 	for k, v := range map[string]string{
-		"NODES_PER_FLEET":    "abc",
-		"KEY_RATE_PER_HOUR":  "0",
-		"AUTH_RATE_PER_HOUR": "-5",
-		"JOIN_KEY_TTL":       "soon",
-		"IDLE_AFTER":         "-1h",
-		"GC_INTERVAL":        "0s",
-		"MAX_FLEETS":         "0",
-		"MAX_PENDING_KEYS":   "-1",
+		"NODES_PER_FLEET":       "abc",
+		"KEY_RATE_PER_HOUR":     "0",
+		"AUTH_RATE_PER_HOUR":    "-5",
+		"JOIN_KEY_TTL":          "soon",
+		"IDLE_AFTER":            "-1h",
+		"GC_INTERVAL":           "0s",
+		"MAX_FLEETS":            "0",
+		"MAX_PENDING_KEYS":      "-1",
+		"PROTECT_RATE_PER_HOUR": "0",
 	} {
 		t.Run(k, func(t *testing.T) {
 			t.Setenv("LOGIN_SERVER", "https://relay.example") // valid: the error must come from k
@@ -99,6 +105,34 @@ func TestConfigFromEnvInvalid(t *testing.T) {
 				t.Fatalf("%s=%q: want error", k, v)
 			}
 		})
+	}
+}
+
+// FILTER_MAX_ENTRIES caps the enabled feeds together (contract: default 1 000 000).
+func TestFilterMaxEntriesFromEnv(t *testing.T) {
+	t.Setenv("LOGIN_SERVER", "https://relay.example")
+	t.Setenv("FILTER_MAX_ENTRIES", "")
+	if c, err := ConfigFromEnv(); err != nil || c.FilterMaxEntries != 1_000_000 {
+		t.Fatalf("unset: %d, %v", c.FilterMaxEntries, err)
+	}
+	for _, v := range []string{"0", "-3", "many"} {
+		t.Setenv("FILTER_MAX_ENTRIES", v)
+		if _, err := ConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "FILTER_MAX_ENTRIES") {
+			t.Fatalf("FILTER_MAX_ENTRIES=%q: err = %v", v, err)
+		}
+	}
+}
+
+// COMMUNITY_MIN_FLEET_AGE exists for tests (e2e): the 7-day rule of the contract is the default.
+func TestCommunityMinFleetAgeFromEnv(t *testing.T) {
+	t.Setenv("LOGIN_SERVER", "https://relay.example")
+	t.Setenv("COMMUNITY_MIN_FLEET_AGE", "")
+	if c, err := ConfigFromEnv(); err != nil || c.CommunityMinFleetAge != 7*24*time.Hour {
+		t.Fatalf("unset: %v, %v", c.CommunityMinFleetAge, err)
+	}
+	t.Setenv("COMMUNITY_MIN_FLEET_AGE", "0s")
+	if _, err := ConfigFromEnv(); err == nil {
+		t.Fatal("0s accepted")
 	}
 }
 

@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Relay protection</title>
+<style>
+{{template "css"}}
+.card { margin-bottom:1rem; scroll-margin-top:1rem; }
+.card .bd { overflow-x:auto; }
+td.wrap, td[colspan] { white-space:normal; }
+td.wrap { min-width:14rem; }
+.fields { display:grid; grid-template-columns:repeat(auto-fit, minmax(12rem, 1fr)); gap:.625rem .75rem; padding:.625rem 1rem; }
+.fields label { display:flex; flex-direction:column; gap:.25rem; color:var(--mut); font-size:.75rem; font-weight:600; }
+.fields input, .fields select { height:2.25rem; padding:0 .75rem; border:1px solid var(--line); border-radius:.625rem; background:var(--bg); color:var(--fg); font:inherit; font-weight:400; }
+.fields .wide { grid-column:1 / -1; }
+.fields .act { display:flex; align-items:flex-end; }
+.fields .act button { height:2.25rem; border-radius:1.125rem; padding:0 .875rem; }
+.presets { display:grid; grid-template-columns:repeat(auto-fit, minmax(16rem, 1fr)); gap:.625rem; padding:.625rem 1rem; }
+.preset { display:flex; flex-direction:column; gap:.375rem; padding:.625rem .75rem; border:1px solid var(--line); border-radius:.75rem; }
+.preset .top { display:flex; align-items:center; gap:.5rem; } .preset .top b { flex:1; }
+.edit { border:0; border-radius:0; margin:0; background:transparent; }
+.edit summary { padding:0; display:inline-flex; color:var(--accent); font-size:.8rem; }
+.edit .fields { padding:.625rem 0 0; }
+</style>
+</head>
+<body>
+<div class="head">
+<span class="tile" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/></svg></span>
+<div class="t"><h1>Relay protection</h1><span class="mut xs">Who may reach the shared apps of this relay. Connections to the relay itself are never filtered.</span></div>
+<a class="chip" href="/admin/">Relay admin</a>
+</div>
+{{define "ban"}}{{with .B}}<tr><td class="n"><code>{{.Key}}</code></td><td class="mut">{{.Kind}}</td><td class="mut wrap">{{.Reasons}}</td><td class="r">{{.Fleets}}</td>
+<td class="mut">{{ago .Since $.Now}}</td><td class="mut">{{if .Until.IsZero}}permanent{{else}}{{until .Until $.Now}}{{end}}</td><td class="r">{{.Strike}}</td>
+<td class="r"><form method="post" action="/admin/protection/community/lift"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="key" value="{{.Key}}"><button>Lift</button></form>
+<form method="post" action="/admin/protection/community/allow"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="key" value="{{.Key}}"><button class="plain">Allow</button></form></td></tr>{{end}}{{end}}
+{{define "feedform"}}<input type="hidden" name="csrf" value="{{.CSRF}}">
+<div class="fields">
+<label>Name<input name="name" required maxlength="64" value="{{with .F}}{{.Name}}{{end}}"></label>
+<label class="wide">URL (https only){{if .F}}<input name="url" placeholder="{{.F.URLHint}}" aria-describedby="keep-url-{{.F.ID}}"><span id="keep-url-{{.F.ID}}" class="mut xs">Leave empty to keep the current address; only its host is shown, it may hold a key.</span>{{else}}<input name="url" required placeholder="https://" pattern="https://.+">{{end}}</label>
+<label>Format<select name="format"><option value="text"{{with .F}}{{if eq .Format "text"}} selected{{end}}{{end}}>text (first field of each line)</option><option value="csv"{{with .F}}{{if eq .Format "csv"}} selected{{end}}{{end}}>csv</option></select></label>
+<label>CSV column<input name="column" type="number" min="1" value="{{with .F}}{{if .Column}}{{.Column}}{{end}}{{end}}" placeholder="csv only"></label>
+<label>Every (seconds)<input name="every_s" type="number" min="3600" required value="{{with .F}}{{.EverySec}}{{else}}3600{{end}}"></label>
+<label>Max entries<input name="max_entries" type="number" min="1" max="10000000" value="{{with .F}}{{.MaxEntries}}{{else}}100000{{end}}"></label>
+<label>Auth header<input name="auth_name" maxlength="64" placeholder="none, a header name, or Authorization-Basic" value="{{with .F}}{{.AuthName}}{{end}}"></label>
+<label>Key<input name="auth_value" type="password" autocomplete="off" placeholder="{{with .F}}{{if .Key}}{{.Key}} (leave empty to keep){{end}}{{end}}"></label>
+<label class="wide">Note<input name="note" maxlength="200" value="{{with .F}}{{.Note}}{{end}}"></label>
+<div class="act"><button class="plain">{{if .F}}Save{{else}}Add list{{end}}</button></div>
+</div>{{end}}
+
+<section class="card" id="overview">
+<div class="hd"><h2>Overview</h2></div>
+<div class="bd">
+<table>
+<tr>{{range .Reasons}}<th class="r">{{.}}</th>{{end}}</tr>
+<tr>{{range $i, $r := .Reasons}}<td class="r" data-n="today-{{$r}}">{{index $.Today $i}}</td>{{end}}</tr>
+</table>
+<p class="mut xs pad">Refused today (since 00:00 UTC), by reason. <b data-n="sharing">{{.Sharing}}</b> box(es) share their bans &middot; <b data-n="active-bans">{{.ActiveBans}}</b> active community ban(s).</p>
+</div>
+<div class="chart">
+<div class="tabs"><span class="mut">Refused per day, last 7 days</span></div>
+{{.Chart}}
+<div class="lg">{{range $i, $s := .Series}}<span><b class="c{{$i}}"></b>{{$s.Name}}</span>{{end}}</div>
+</div>
+</section>
+
+<section class="card" id="feeds">
+<div class="hd"><h2>External lists</h2><span class="chip">{{len .Feeds}}</span>{{if not .Fetcher}}<span class="chip warn">downloads not available</span>{{end}}</div>
+<div class="bd">
+{{if .Feeds}}<table>
+<tr><th>List</th><th>Source</th><th>Updated</th><th class="r">Addresses</th><th>Key</th><th>State</th><th></th></tr>
+{{range .Feeds}}<tr>
+<td class="n wrap">{{.Name}}{{if .Note}}<br><span class="mut xs">{{.Note}}</span>{{end}}{{if .LastError}}<br><span class="err xs">{{.LastError}}</span>{{end}}</td>
+<td class="mut"><code>{{.Host}}</code></td>
+<td class="mut">{{if .LastOK.IsZero}}never{{else}}{{ago .LastOK $.Now}}{{end}}</td>
+<td class="r">{{.Count}}</td>
+<td class="mut"><code>{{if .Key}}{{.Key}}{{else}}–{{end}}</code></td>
+<td>{{if .Enabled}}<span class="chip ok"><span class="dot on"></span>on</span>{{else}}<span class="chip">off</span>{{end}}</td>
+<td class="r"><form method="post" action="/admin/protection/feeds/{{.ID}}/toggle"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="plain">{{if .Enabled}}Turn off{{else}}Turn on{{end}}</button></form>
+{{if $.Fetcher}}<form method="post" action="/admin/protection/feeds/{{.ID}}/refresh"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="plain">Update now</button></form>{{end}}
+<form method="post" action="/admin/protection/feeds/{{.ID}}/delete" onsubmit="return confirm('Delete this list?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button>Delete</button></form></td>
+</tr>
+<tr><td colspan="7"><details class="edit"{{if eq $.Edit .ID}} open{{end}}><summary>Edit {{.Name}}</summary>
+<form method="post" action="/admin/protection/feeds/{{.ID}}" style="display:block">{{template "feedform" dict "F" . "CSRF" $.CSRF}}</form>
+</details></td></tr>
+{{end}}</table>{{else}}<p class="mut">No external list. Add one of the presets below, or your own.</p>{{end}}
+</div>
+<div class="bd">
+<h3 class="mut">Presets (added turned off)</h3>
+<div class="presets">{{range .Presets}}<div class="preset">
+<div class="top"><b>{{.Name}}</b>{{if .NeedsKey}}<span class="chip">needs a key</span>{{end}}{{if .Added}}<span class="chip ok">added</span>{{else}}<form method="post" action="/admin/protection/feeds/presets/{{.Key}}"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="plain">Add</button></form>{{end}}</div>
+<span class="mut xs">{{.Note}}</span>
+</div>{{end}}</div>
+</div>
+<div class="bd">
+<h3 class="mut">Your own list</h3>
+<form method="post" action="/admin/protection/feeds" style="display:block">{{template "feedform" dict "F" nil "CSRF" .CSRF}}</form>
+</div>
+</section>
+
+<section class="card" id="community">
+<div class="hd"><h2>Community list</h2></div>
+<div class="bd" id="active-bans-table">
+{{if .Timed}}<table>
+<tr><th>Key</th><th>Kind</th><th>Reasons</th><th class="r">Fleets</th><th>Since</th><th>Until</th><th class="r">Strike</th><th></th></tr>
+{{range .Timed}}{{template "ban" dict "B" . "Now" $.Now "CSRF" $.CSRF}}{{end}}</table>{{else}}<p class="mut">No timed ban.</p>{{end}}
+</div>
+<div class="bd" id="permanent">
+<h3 class="mut">Permanent bans</h3>
+{{if .Permanent}}<table>
+<tr><th>Key</th><th>Kind</th><th>Reasons</th><th class="r">Fleets</th><th>Since</th><th>Until</th><th class="r">Strike</th><th></th></tr>
+{{range .Permanent}}{{template "ban" dict "B" . "Now" $.Now "CSRF" $.CSRF}}{{end}}</table>{{else}}<p class="mut">No permanent ban.</p>{{end}}
+</div>
+<div class="bd">
+<h3 class="mut">Flagged networks</h3>
+{{if .Flags}}<table>
+<tr><th>ASN</th><th>Network</th><th class="r">Banned ranges</th><th></th></tr>
+{{range .Flags}}<tr><td class="n"><code>AS{{.ASN}}</code></td><td class="mut wrap">{{.Org}}</td><td class="r">{{.Ranges}}</td>
+<td class="r"><form method="post" action="/admin/protection/asn/{{.ASN}}/ban" onsubmit="return confirm('Ban the whole network permanently?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button>Ban network</button></form></td></tr>
+{{end}}</table>{{else}}<p class="mut">{{if .Geo}}No network holds several banned ranges.{{else}}Network data not available: the DB-IP files are not loaded.{{end}}</p>{{end}}
+</div>
+</section>
+
+<section class="card" id="manual">
+<div class="hd"><h2>Manual bans</h2><span class="chip">{{len .Manual}}</span>{{if not .Geo}}<span class="chip warn">country and ASN bans wait for the DB-IP files</span>{{end}}</div>
+<div class="bd">
+{{if .Manual}}<table>
+<tr><th>Kind</th><th>Value</th><th>Note</th><th>Since</th><th>Until</th><th></th></tr>
+{{range .Manual}}<tr><td class="mut">{{.Kind}}</td><td class="n"><code>{{if eq .Kind "asn"}}AS{{end}}{{.Value}}</code></td><td class="mut wrap">{{.Note}}</td>
+<td class="mut">{{ago .Since $.Now}}</td><td class="mut">{{if .Until.IsZero}}permanent{{else}}{{until .Until $.Now}}{{end}}</td>
+<td class="r"><form method="post" action="/admin/protection/manual/{{.ID}}/delete"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button>Lift</button></form></td></tr>
+{{end}}</table>{{else}}<p class="mut">No manual ban.</p>{{end}}
+</div>
+<div class="bd">
+<form method="post" action="/admin/protection/manual" style="display:block"><input type="hidden" name="csrf" value="{{.CSRF}}">
+<div class="fields">
+<label>Kind<select name="kind"><option value="address">address</option><option value="range">range</option><option value="asn">ASN</option><option value="country">country</option></select></label>
+<label>Value<input name="value" required placeholder="192.0.2.7, 198.51.100.0/24, AS64500 or FR"></label>
+<label>Hours<input name="hours" type="number" min="0" max="8760" value="24" required><span class="mut xs">0: permanent</span></label>
+<label>Note<input name="note" maxlength="200"></label>
+<div class="act"><button class="plain">Ban</button></div>
+</div></form>
+<p class="mut xs pad"><a href="https://db-ip.com">IP Geolocation by DB-IP</a></p>
+</div>
+</section>
+
+<section class="card" id="names">
+<div class="hd"><h2>Shared names</h2></div>
+<div class="bd">
+{{if .Names}}<table>
+<tr><th>Name</th>{{range .Reasons}}<th class="r">{{.}}</th>{{end}}<th>relay filter</th><th>share bans</th><th></th></tr>
+{{range .Names}}{{$n := .Name}}<tr><td class="n"><code>{{.Name}}</code>{{if .IsSuspended}} <span class="chip warn">suspended</span>{{end}}</td>
+{{range $i, $c := .Today}}<td class="r" data-n="name-{{$n}}-{{index $.Reasons $i}}">{{$c}}</td>{{end}}
+<td class="mut">{{.Filter}}</td><td class="mut">{{.Bans}}</td>
+<td class="r"><form method="post" action="/admin/protection/names/{{.Name}}/{{if .IsSuspended}}resume{{else}}suspend{{end}}"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="plain">{{if .IsSuspended}}Resume{{else}}Suspend{{end}}</button></form>
+<form method="post" action="/admin/share/names/{{.Name}}/revoke" onsubmit="return confirm('Revoke and forbid this name?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button>Revoke</button></form></td></tr>
+{{end}}</table>{{else}}<p class="mut">No shared name.</p>{{end}}
+<p class="mut xs pad">Refused today by reason. Suspending refuses every visitor of a name until you resume it.</p>
+</div>
+</section>
+
+<section class="card" id="allow">
+<div class="hd"><h2>Relay allow list</h2><span class="chip">{{len .Allow}}</span></div>
+<div class="bd">
+{{if .Allow}}<table>
+<tr><th>Address or range</th><th>Note</th><th>Added</th><th></th></tr>
+{{range .Allow}}<tr><td class="n"><code>{{.Prefix}}</code></td><td class="mut wrap">{{.Note}}</td><td class="mut">{{ago .Added $.Now}}</td>
+<td class="r"><form method="post" action="/admin/protection/allow/{{.ID}}/delete"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button>Remove</button></form></td></tr>
+{{end}}</table>{{else}}<p class="mut">No address is let through every filter.</p>{{end}}
+</div>
+<div class="bd">
+<form method="post" action="/admin/protection/allow" style="display:block"><input type="hidden" name="csrf" value="{{.CSRF}}">
+<div class="fields">
+<label>Address or range<input name="value" required placeholder="203.0.113.9 or 203.0.113.0/24"></label>
+<label>Note<input name="note" maxlength="200"></label>
+<div class="act"><button class="plain">Allow</button></div>
+</div></form>
+</div>
+</section>
+
+<section class="card" id="caps">
+<div class="hd"><h2>Connection caps</h2></div>
+<div class="bd pad"><p>Caps in force: <b>{{.ConnsPerIP}}</b> connections per address, <b>{{.ConnsPerIPPerBox}}</b> per address and box.</p></div>
+<div class="bd">
+<h3 class="mut">Refused today by address (top 50)</h3>
+{{if .CapKeys}}<table>
+<tr><th>Address</th><th class="r">Refusals</th></tr>
+{{range .CapKeys}}<tr><td class="n">{{with .Key}}<code>{{.}}</code>{{else}}<span class="mut">other addresses</span>{{end}}</td><td class="r" data-n="cap-key-{{.Key}}">{{.Count}}</td></tr>
+{{end}}</table>{{else}}<p class="mut">No connection refused by a cap today.</p>{{end}}
+</div>
+<div class="bd">
+<h3 class="mut">Refused today by name</h3>
+{{if .CapNames}}<table>
+<tr><th>Name</th><th class="r">Refusals</th></tr>
+{{range .CapNames}}<tr><td class="n">{{if .Key}}<code>{{.Key}}</code>{{else}}<span class="mut">no box (address cap)</span>{{end}}</td><td class="r" data-n="cap-name-{{.Key}}">{{.Count}}</td></tr>
+{{end}}</table>{{else}}<p class="mut">None.</p>{{end}}
+</div>
+</section>
+{{if .Version}}<footer class="mut xs foot">relay {{.Version}}</footer>{{end}}
+</body>
+</html>

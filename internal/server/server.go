@@ -10,8 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ReCasaOS/recasaos-relay/internal/community"
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
+	"github.com/ReCasaOS/recasaos-relay/internal/protect"
 	"github.com/ReCasaOS/recasaos-relay/internal/ratelimit"
 	"github.com/ReCasaOS/recasaos-relay/internal/sharename"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
@@ -46,6 +48,10 @@ type Config struct {
 	ShareDomain          string        // public sharing: boxes get <name>.<ShareDomain>; empty disables every share route (503)
 	ShareACMETTL         time.Duration // validity of an _acme-challenge TXT value
 	ShareACMERatePerHour int           // ACME TXT writes per hour, per box
+
+	FilterMaxEntries     int           // entries of all enabled feeds together; a feed past it is refused whole
+	CommunityMinFleetAge time.Duration // age a fleet needs for its ban reports to count (lowered only by tests)
+	ProtectRatePerHour   int           // protection routes of the boxes (protection, bans, refusals) per hour, per IP, counted before the signature is checked
 }
 
 // prefix48Factor: an IPv6 /48 may create this many times CREATE_RATE_PER_HOUR fleets per hour in
@@ -65,6 +71,11 @@ type Deps struct {
 	// Admin, when not nil, is served under /admin/ (and /admin redirects to it).
 	Admin http.Handler
 	Now   func() time.Time // default time.Now
+	// Protect compiles the filter snapshot of GET /internal/share/filter; nil: both protection
+	// routes (filter and events) are absent.
+	Protect *protect.Compiler
+	// Community takes the bans boxes share; nil: POST /v1/share/bans answers 204 and stores nothing.
+	Community *community.Engine
 }
 
 // New returns the service's HTTP handler.
@@ -109,10 +120,21 @@ func New(cfg Config, deps Deps) http.Handler {
 		mux.HandleFunc("GET /v1/share", cfg.shareEnabled(sh.status))
 		mux.HandleFunc("PUT /v1/share/acme", cfg.shareEnabled(sh.putACME))
 		mux.HandleFunc("DELETE /v1/share/acme", cfg.shareEnabled(sh.deleteACME))
+		// The protection routes count on their own budget: bans sent all through an attack must not
+		// use up the one of the name and ACME routes.
+		ph := *sh
+		ph.authLimiter = ratelimit.New(cfg.ProtectRatePerHour, deps.Now).OpenWhenFull()
+		mux.HandleFunc("PUT /v1/share/protection", cfg.shareEnabled(ph.putProtection))
+		mux.HandleFunc("POST /v1/share/bans", cfg.shareEnabled(ph.postBans))
+		mux.HandleFunc("GET /v1/share/refusals", cfg.shareEnabled(ph.getRefusals))
 		if cfg.ShareDomain != "" { // like the /v1/share routes, absent (404) while sharing is off
 			in := &internalHandler{deps: deps, beats: beats}
 			mux.Handle("GET /internal/share/boxes/{key}", internalOnly(cfg.TrustedProxyHeader, in.boxByKey))
 			mux.Handle("POST /internal/share/usage", internalOnly(cfg.TrustedProxyHeader, in.usage))
+			if deps.Protect != nil {
+				mux.Handle("GET /internal/share/filter", internalOnly(cfg.TrustedProxyHeader, in.filter))
+				mux.Handle("POST /internal/share/events", internalOnly(cfg.TrustedProxyHeader, in.events))
+			}
 		}
 		login := &loginHandler{cfg: cfg, deps: deps,
 			limiter:   ratelimit.New(cfg.LoginRatePerHour, deps.Now),
@@ -194,6 +216,15 @@ func ConfigFromEnv() (Config, error) {
 		return c, err
 	}
 	if c.ShareACMERatePerHour, err = envInt("SHARE_ACME_RATE_PER_HOUR", 20); err != nil {
+		return c, err
+	}
+	if c.FilterMaxEntries, err = envInt("FILTER_MAX_ENTRIES", 1_000_000); err != nil {
+		return c, err
+	}
+	if c.CommunityMinFleetAge, err = envDuration("COMMUNITY_MIN_FLEET_AGE", 7*24*time.Hour); err != nil {
+		return c, err
+	}
+	if c.ProtectRatePerHour, err = envInt("PROTECT_RATE_PER_HOUR", 600); err != nil {
 		return c, err
 	}
 	return c, nil
