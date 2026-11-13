@@ -335,7 +335,7 @@ func TestFollowSeesNewLinesAndNewDayFile(t *testing.T) {
 }
 
 func TestCaddyLineDropsHeaders(t *testing.T) {
-	line := `{"level":"info","ts":1763030400.123,"logger":"http.log.access","msg":"handled request","request":{"remote_ip":"172.29.0.10","remote_port":"41000","client_ip":"203.0.113.7","proto":"HTTP/1.1","method":"PUT","host":"relay.example.org","uri":"/v1/share/protection","headers":{"Authorization":["Bearer s3cr3t-t0ken"],"Cookie":["sid=c00kie"],"X-Box-Signature":["s1gn"]}},"bytes_read":42,"user_id":"","duration":0.0126,"size":120,"status":200,"resp_headers":{"Set-Cookie":["sid=c00kie"]}}`
+	line := `{"level":"info","ts":1763030400.123,"logger":"http.log.access","msg":"handled request","request":{"remote_ip":"172.29.0.10","remote_port":"41000","client_ip":"203.0.113.7","proto":"HTTP/1.1","method":"PUT","host":"relay.example.org","uri":"/v1/share/protection?code=q5ecr3t","headers":{"Authorization":["Bearer s3cr3t-t0ken"],"Cookie":["sid=c00kie"],"X-Box-Signature":["s1gn"]}},"bytes_read":42,"user_id":"","duration":0.0126,"size":120,"status":200,"resp_headers":{"Set-Cookie":["sid=c00kie"]}}`
 	e, ok := ParseCaddy([]byte(line))
 	if !ok {
 		t.Fatal("not parsed")
@@ -346,7 +346,7 @@ func TestCaddyLineDropsHeaders(t *testing.T) {
 		t.Fatalf("got %+v\nwant %+v", e, want)
 	}
 	b, _ := json.Marshal(e)
-	for _, secret := range []string{"s3cr3t", "Authorization", "c00kie", "s1gn", "172.29.0.10"} {
+	for _, secret := range []string{"s3cr3t", "q5ecr3t", "Authorization", "c00kie", "s1gn", "172.29.0.10"} {
 		if strings.Contains(string(b), secret) {
 			t.Fatalf("%q in %s", secret, b)
 		}

@@ -3,6 +3,7 @@ package journal
 import (
 	"encoding/json"
 	"math"
+	"strings"
 	"time"
 )
 
@@ -28,6 +29,7 @@ func ParseCaddy(line []byte) (Entry, bool) {
 	if json.Unmarshal(line, &c) != nil || c.TS <= 0 || c.Request == nil {
 		return Entry{}, false
 	}
+	path, _, _ := strings.Cut(c.Request.URI, "?") // the query is not kept: it can carry codes and personal data
 	return Entry{
 		// Round: 1763030400.123 is 1763030400.12299990654 as a float.
 		Time:   time.UnixMilli(int64(math.Round(c.TS * 1000))).UTC().Format(timeLayout),
@@ -36,7 +38,7 @@ func ParseCaddy(line []byte) (Entry, bool) {
 		IP:     c.Request.ClientIP,
 		Host:   c.Request.Host,
 		Method: c.Request.Method,
-		Path:   c.Request.URI,
+		Path:   path,
 		Status: c.Status,
 		Ms:     int64(math.Round(c.Duration * 1000)),
 		In:     c.BytesRead,
