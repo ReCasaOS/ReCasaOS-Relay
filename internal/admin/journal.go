@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -74,6 +75,32 @@ type journalLine struct {
 	When  string `json:"when"`
 	Text  string `json:"text"`
 	Class string `json:"cls,omitempty"`
+	// Flag is the country flag of IP and Country its ISO code, both empty when unknown.
+	Flag    string `json:"flag,omitempty"`
+	Country string `json:"cc,omitempty"`
+}
+
+// flagOf is the flag emoji of an ISO 3166 alpha-2 code: two regional indicator letters.
+func flagOf(cc string) string {
+	if len(cc) != 2 || cc[0] < 'A' || cc[0] > 'Z' || cc[1] < 'A' || cc[1] > 'Z' {
+		return ""
+	}
+	return string([]rune{0x1F1E6 + rune(cc[0]-'A'), 0x1F1E6 + rune(cc[1]-'A')})
+}
+
+// withFlag fills the country of the entry's address from the DB-IP file; no file, no flag.
+func (h *handler) withFlag(l journalLine) journalLine {
+	if h.deps.Geo == nil || l.IP == "" {
+		return l
+	}
+	a, err := netip.ParseAddr(l.IP)
+	if err != nil {
+		return l
+	}
+	if l.Country = h.deps.Geo.Country(a); l.Country != "" {
+		l.Flag = flagOf(l.Country)
+	}
+	return l
 }
 
 func millis(ms int64) string {
@@ -154,7 +181,7 @@ func (h *handler) journal(w http.ResponseWriter, r *http.Request) {
 		srcs[i] = src{s.Key, s.Label, len(q.Src) == 0 || slices.Contains(q.Src, s.Key)}
 	}
 	data := map[string]any{"Version": h.cfg.Version, "Sources": srcs, "Q": q.Text, "Problems": q.Problems,
-		"Range": rg.Key, "Ranges": journalRanges, "Before": v.Get("before")}
+		"Geo": h.deps.Geo != nil && h.deps.Geo.Version() != "", "Range": rg.Key, "Ranges": journalRanges, "Before": v.Get("before")}
 	status := http.StatusOK
 	if rd := h.deps.JournalReader; rd == nil {
 		data["Off"] = true
@@ -172,7 +199,7 @@ func (h *handler) journal(w http.ResponseWriter, r *http.Request) {
 		}
 		lines := make([]journalLine, len(entries))
 		for i, e := range entries {
-			lines[i] = viewLine(e)
+			lines[i] = h.withFlag(viewLine(e))
 		}
 		data["Lines"] = lines
 		data["Live"] = err == nil && rg.Key == "1h" && before.IsZero()
@@ -260,7 +287,7 @@ func (h *handler) journalStream(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			sent[next], next = now, (next+1)%len(sent)
-			b, _ := json.Marshal(viewLine(e))
+			b, _ := json.Marshal(h.withFlag(viewLine(e)))
 			msg = "data: " + string(b) + "\n\n"
 		case <-tick.C:
 			if dropped == 0 {

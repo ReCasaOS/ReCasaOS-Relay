@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,7 +17,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ReCasaOS/recasaos-relay/internal/geo"
 	"github.com/ReCasaOS/recasaos-relay/internal/journal"
+	"github.com/maxmind/mmdbwriter"
+	"github.com/maxmind/mmdbwriter/mmdbtype"
 )
 
 // appendLines adds raw journal lines to dir/name.
@@ -497,5 +501,50 @@ func TestJournalStreamEndsOnShutdown(t *testing.T) {
 	start := time.Now()
 	if err := srv.Config.Shutdown(ctx); err != nil || time.Since(start) > 2*time.Second {
 		t.Fatalf("Shutdown: %v after %v", err, time.Since(start))
+	}
+}
+
+func TestFlagOf(t *testing.T) {
+	for cc, want := range map[string]string{"FR": "🇫🇷", "US": "🇺🇸", "": "", "F": "", "fr": "", "F1": "", "FRA": ""} {
+		if got := flagOf(cc); got != want {
+			t.Errorf("flagOf(%q) = %q, want %q", cc, got, want)
+		}
+	}
+}
+
+func TestJournalShowsCountryFlag(t *testing.T) {
+	w, err := mmdbwriter.New(mmdbwriter.Options{DatabaseType: "DBIP-Country-Lite", IPVersion: 6, IncludeReservedNetworks: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, n, _ := net.ParseCIDR("203.0.113.0/24")
+	if err := w.Insert(n, mmdbtype.Map{"country": mmdbtype.Map{"iso_code": mmdbtype.String("FR")}}); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	f, err := os.Create(filepath.Join(dir, "dbip-country-lite.mmdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.WriteTo(f); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	g := &geo.DB{Dir: dir, BaseURL: "http://127.0.0.1:1/"}
+	_, _ = g.Tick(context.Background()) // opens the file; the failed download of the missing ASN file is of no interest
+
+	e := setup(t).withDeps(t, func(d *Deps) { d.JournalReader, d.Geo = journalFixture(t), g })
+	body := get(t, e, "/admin/journal")
+	if !strings.Contains(body, `<span class="fl" title="FR">🇫🇷</span>`) {
+		t.Errorf("no flag next to 203.0.113.7:\n%s", body)
+	}
+	if n := strings.Count(body, `class="fl"`); n != 3 { // the two 203.0.113.x visitor lines and the ban_open one
+		t.Errorf("%d flags, want 3 (addresses outside the file get none)", n)
+	}
+	if !strings.Contains(body, "IP Geolocation by DB-IP") {
+		t.Error("no DB-IP credit")
+	}
+	if line := viewLine(journal.Entry{IP: "203.0.113.7"}); line.Flag != "" {
+		t.Error("viewLine alone must not look anything up")
 	}
 }
