@@ -12,6 +12,7 @@ import (
 
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/headscale"
+	"github.com/ReCasaOS/recasaos-relay/internal/community"
 	"github.com/ReCasaOS/recasaos-relay/internal/protect"
 	"github.com/ReCasaOS/recasaos-relay/internal/ratelimit"
 	"github.com/ReCasaOS/recasaos-relay/internal/sharename"
@@ -69,6 +70,8 @@ type Deps struct {
 	// Protect compiles the filter snapshot of GET /internal/share/filter; nil: both protection
 	// routes (filter and events) are absent.
 	Protect *protect.Compiler
+	// Community takes the bans boxes share; nil: POST /v1/share/bans answers 204 and stores nothing.
+	Community *community.Engine
 }
 
 // New returns the service's HTTP handler.
@@ -113,6 +116,9 @@ func New(cfg Config, deps Deps) http.Handler {
 		mux.HandleFunc("GET /v1/share", cfg.shareEnabled(sh.status))
 		mux.HandleFunc("PUT /v1/share/acme", cfg.shareEnabled(sh.putACME))
 		mux.HandleFunc("DELETE /v1/share/acme", cfg.shareEnabled(sh.deleteACME))
+		mux.HandleFunc("PUT /v1/share/protection", cfg.shareEnabled(sh.putProtection))
+		mux.HandleFunc("POST /v1/share/bans", cfg.shareEnabled(sh.postBans))
+		mux.HandleFunc("GET /v1/share/refusals", cfg.shareEnabled(sh.getRefusals))
 		if cfg.ShareDomain != "" { // like the /v1/share routes, absent (404) while sharing is off
 			in := &internalHandler{deps: deps, beats: beats}
 			mux.Handle("GET /internal/share/boxes/{key}", internalOnly(cfg.TrustedProxyHeader, in.boxByKey))

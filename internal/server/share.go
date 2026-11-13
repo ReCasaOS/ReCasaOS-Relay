@@ -107,12 +107,17 @@ func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 // signature, key link. body, when not nil, receives the decoded JSON. It has answered the request
 // when ok is false.
 func (h *shareHandler) boxAuth(w http.ResponseWriter, r *http.Request, body any) (ref store.BoxRef, ok bool) {
+	return h.boxAuthMax(w, r, body, maxShareBody)
+}
+
+// boxAuthMax is boxAuth with a body cap of limit bytes.
+func (h *shareHandler) boxAuthMax(w http.ResponseWriter, r *http.Request, body any, limit int64) (ref store.BoxRef, ok bool) {
 	if ok, retry := h.authLimiter.Allow(clientKey(r, h.cfg.TrustedProxyHeader, 64)); !ok {
 		tooMany(w, retry)
 		return ref, false
 	}
 	// Read (capped) before verifying, decode only once the caller is known.
-	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxShareBody))
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 	if err != nil {
 		writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
 		return ref, false

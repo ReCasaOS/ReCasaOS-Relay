@@ -19,6 +19,7 @@ const (
 	day          = 24 * time.Hour
 	window       = day      // reports from two fleets within this open a ban
 	strikeWindow = 30 * day // a ban starting this soon after the previous one ended is a repeat
+	maxAhead     = 2 * time.Minute // a ban cannot start later than this from now
 	rangeMin     = 5        // address bans in one /24 or /48 that ban the range
 	asnMin       = 10       // range bans in one ASN that flag it
 )
@@ -104,7 +105,7 @@ func (e *Engine) Accept(ctx context.Context, ref store.BoxRef, items []Item) err
 	}
 	for _, it := range items {
 		key, ok := Key(it.Key)
-		if !ok || it.Since.IsZero() {
+		if !ok || it.Since.IsZero() || it.Since.Before(now.Add(-day)) || it.Since.After(now.Add(maxAhead)) {
 			continue
 		}
 		seen, err := e.Store.SeenBetween(ctx, key, ref.NodeID, it.Since.Add(-day), now)

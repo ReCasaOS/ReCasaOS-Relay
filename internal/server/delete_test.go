@@ -29,7 +29,10 @@ type delEnv struct {
 }
 
 // setupDel builds a handler over fakes that share one call log, with one fleet "fleet0001".
-func setupDel(t *testing.T, mutate func(*Config)) delEnv {
+func setupDel(t *testing.T, mutate func(*Config)) delEnv { return setupDelDeps(t, mutate, nil) }
+
+// setupDelDeps is setupDel with a hook on the Deps once the fakes are in.
+func setupDelDeps(t *testing.T, mutate func(*Config), deps func(*Deps)) delEnv {
 	t.Helper()
 	log := &fakes.Log{}
 	hs := fakes.NewHS(log, func() time.Time { return now0 })
@@ -46,6 +49,9 @@ func setupDel(t *testing.T, mutate func(*Config)) delEnv {
 		fst = &fakes.Store{Store: d.Store, Log: log}
 		d.Store, d.Headscale = fst, hs
 		d.Remover = &fleets.Remover{Store: fst, Headscale: hs, Policy: sy}
+		if deps != nil {
+			deps(d)
+		}
 	})
 	d := delEnv{env: e, hs: hs, log: log, sy: sy, fst: fst, id: "fleet0001", user: "f-fleet0001"}
 	d.secret = addFleet(t, e.st, d.id)

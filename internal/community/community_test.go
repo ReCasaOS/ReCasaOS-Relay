@@ -416,3 +416,21 @@ func TestFlaggedASNs(t *testing.T) {
 		t.Fatalf("9 ranges: %+v", got)
 	}
 }
+
+func TestAcceptDropsSinceOutOfBounds(t *testing.T) {
+	v := newEnv(t)
+	a := v.box("A", "1", 8*day, true)
+	ctx := context.Background()
+	v.must(v.st.RecordSeen(ctx, v.now, []store.Seen{{Key: ip, NodeID: "1"}}))
+	v.must(v.e.Accept(ctx, a, []Item{
+		{Key: ip, Reason: "scan", App: "x", Since: v.now.Add(-day - time.Second)},
+		{Key: ip, Reason: "scan", App: "x", Since: v.now.Add(3 * time.Minute)},
+	}))
+	if rs, err := v.st.ReportsSince(ctx, time.Time{}); err != nil || len(rs) != 0 {
+		t.Fatalf("reports = %+v, %v", rs, err)
+	}
+	v.must(v.e.Accept(ctx, a, []Item{{Key: ip, Reason: "scan", App: "x", Since: v.now.Add(-day + time.Minute)}}))
+	if rs, err := v.st.ReportsSince(ctx, time.Time{}); err != nil || len(rs) != 1 {
+		t.Fatalf("reports = %+v, %v", rs, err)
+	}
+}
