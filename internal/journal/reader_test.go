@@ -122,6 +122,9 @@ func TestPageFilters(t *testing.T) {
 	appendLines(t, filepath.Join(enrol, "enrolment-2026-11-13.jsonl"),
 		jsonLine(Entry{Time: stampOf(at(2)), Src: "log", Msg: "feed failed"}),
 		jsonLine(Entry{Time: stampOf(at(3)), Src: "relay", Event: "feed_ok", Msg: "ok"}))
+	// Caddy's lines as enrolment's ingest writes them: our format, src front.
+	appendLines(t, filepath.Join(enrol, "front-2026-11-13.jsonl"),
+		jsonLine(Entry{Time: stampOf(at(6)), Src: "front", Svc: "front", IP: "192.0.2.6", Path: "/ingested", Status: 200}))
 	appendLines(t, filepath.Join(front, "front.log"),
 		caddyLineAt(at(4), "192.0.2.4", "GET", "/ok", 200),
 		caddyLineAt(at(5), "192.0.2.5", "GET", "/missing", 404))
@@ -131,7 +134,7 @@ func TestPageFilters(t *testing.T) {
 		q    Query
 		want []string
 	}{
-		{"src front", Query{Src: []string{"front"}}, stamps(5, 4)},
+		{"src front", Query{Src: []string{"front"}}, stamps(6, 5, 4)},
 		{"src share+relay", Query{Src: []string{"share", "relay"}}, stamps(3, 1, 0)},
 		{"text source", Query{Text: "SPAMHAUS"}, stamps(1)},
 		{"text path", Query{Text: "missing"}, stamps(5)},
@@ -333,7 +336,7 @@ func TestFollowSeesNewLinesAndNewDayFile(t *testing.T) {
 
 func TestCaddyLineDropsHeaders(t *testing.T) {
 	line := `{"level":"info","ts":1763030400.123,"logger":"http.log.access","msg":"handled request","request":{"remote_ip":"172.29.0.10","remote_port":"41000","client_ip":"203.0.113.7","proto":"HTTP/1.1","method":"PUT","host":"relay.example.org","uri":"/v1/share/protection","headers":{"Authorization":["Bearer s3cr3t-t0ken"],"Cookie":["sid=c00kie"],"X-Box-Signature":["s1gn"]}},"bytes_read":42,"user_id":"","duration":0.0126,"size":120,"status":200,"resp_headers":{"Set-Cookie":["sid=c00kie"]}}`
-	e, ok := parseCaddy([]byte(line))
+	e, ok := ParseCaddy([]byte(line))
 	if !ok {
 		t.Fatal("not parsed")
 	}
@@ -349,7 +352,7 @@ func TestCaddyLineDropsHeaders(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{`{}`, `{"ts":1763030400}`, `{"request":{"method":"GET"}}`, `{"ts":`, ``} {
-		if _, ok := parseCaddy([]byte(bad)); ok {
+		if _, ok := ParseCaddy([]byte(bad)); ok {
 			t.Fatalf("%q parsed", bad)
 		}
 	}

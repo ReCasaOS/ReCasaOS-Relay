@@ -62,8 +62,6 @@ services:
       - front
     volumes:
       - ./e2e/Caddyfile.tls:/etc/caddy/Caddyfile:ro
-      # tlsfront faces the clients here, so its access log is the one with their addresses.
-      - front-logs:/logs
 
   # Always on in the test network: the tunnel and sharing tests go through it.
   share:

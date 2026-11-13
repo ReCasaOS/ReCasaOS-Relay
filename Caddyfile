@@ -7,16 +7,14 @@
 	auto_https off
 }
 
-# Access log for the journal (/admin/journal): JSON lines in the `front-logs` volume, which enrolment reads.
-# Headers are never written (Authorization, cookies, X-Box-Signature); rolls stay uncompressed so they are read.
+# Access log for the journal (/admin/journal): JSON lines sent to `enrolment`, which keeps them in its own
+# daily files (LOG_KEEP). Headers are never sent (Authorization, cookies, X-Box-Signature). With `enrolment`
+# down, Caddy starts and serves anyway (soft_start), prints the lines on its own output and reconnects.
 (journal) {
 	log {
-		output file /logs/front.log {
-			roll_size 64MiB
-			roll_keep 8
-			roll_keep_for {$LOG_KEEP:168h}
-			roll_uncompressed
-			mode 0644
+		output net tcp/enrolment:8083 {
+			dial_timeout 2s
+			soft_start
 		}
 		format filter {
 			wrap json

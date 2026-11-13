@@ -106,6 +106,22 @@ func run() error {
 			log.SetOutput(io.MultiWriter(os.Stderr, jw.Log()))
 			defer closeJournal(jw)
 		}
+		// front's access log (the Caddyfile's `(journal)`) in front-*.jsonl next to ours; set empty: off.
+		addr, set := os.LookupEnv("LOG_INGEST_ADDR")
+		if !set {
+			addr = ":8083"
+		}
+		if addr != "" {
+			if fw := openJournal(dir, "front", keep, size); fw != nil {
+				defer closeJournal(fw)
+				if l, err := net.Listen("tcp", addr); err != nil {
+					log.Printf("front access log not kept: %v", err)
+				} else {
+					defer l.Close()
+					go serveIngest(l, fw)
+				}
+			}
+		}
 	}
 	apiKey := os.Getenv("HEADSCALE_API_KEY")
 	if apiKey == "" {

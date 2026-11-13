@@ -21,36 +21,13 @@
 	}
 }
 
-# Access log for the journal (/admin/journal): JSON lines in the `front-logs` volume, which enrolment reads.
-# Headers are never written (Authorization, cookies, X-Box-Signature); rolls stay uncompressed so they are read.
-(journal) {
-	log {
-		output file /logs/front.log {
-			roll_size 64MiB
-			roll_keep 8
-			roll_keep_for {$LOG_KEEP:168h}
-			roll_uncompressed
-			mode 0644
-		}
-		format filter {
-			wrap json
-			fields {
-				request>headers delete
-				resp_headers delete
-			}
-		}
-	}
-}
-
 # An explicit http:// site: the wrapper of `servers :80` only reaches a server defined by a site like this
 # one, not the redirect server Caddy adds by itself for relay.test (same site as section 14 of the docs).
 http://*.box.relay.test {
-	import journal
 	redir https://{host}{uri} 301
 }
 
 relay.test {
-	import journal
 	tls internal
 
 	# In production one Caddy terminates TLS and routes to enrolment itself. Here tlsfront stands in for it,

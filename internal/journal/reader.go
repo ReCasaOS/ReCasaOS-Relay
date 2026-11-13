@@ -86,14 +86,15 @@ func (f *filter) match(e *Entry) bool {
 	return false
 }
 
-// mayMatch tells whether a file of this kind can hold entries of q.Src:
-// Caddy's files hold only front, ours never.
-func (f *filter) mayMatch(caddy bool) bool {
+// mayMatch tells whether fl can hold entries of q.Src: Caddy's files hold
+// only front; front-*.jsonl (enrolment's ingest) front and log; ours never front.
+func (f *filter) mayMatch(fl file) bool {
 	if len(f.q.Src) == 0 {
 		return true
 	}
+	front := fl.caddy || strings.HasPrefix(filepath.Base(fl.name), "front-")
 	for _, src := range f.q.Src {
-		if (src == "front") == caddy {
+		if (src == "front") == front || src == "log" && !fl.caddy {
 			return true
 		}
 	}
@@ -104,7 +105,7 @@ func (f *filter) mayMatch(caddy bool) bool {
 // such as a partial line left by a full disk.
 func parseLine(line []byte, caddy bool) (Entry, bool) {
 	if caddy {
-		return parseCaddy(line)
+		return ParseCaddy(line)
 	}
 	var e Entry
 	if json.Unmarshal(line, &e) != nil || len(e.Time) != len("2006-01-02T15:04:05.000Z") {
@@ -332,7 +333,7 @@ func (r *Reader) Page(ctx context.Context, q Query, before time.Time, n int) (en
 
 	var live []*cursor
 	for _, fl := range r.files(q.From, stop) {
-		if !f.mayMatch(fl.caddy) {
+		if !f.mayMatch(fl) {
 			continue
 		}
 		fh, err := os.Open(fl.name)

@@ -22,8 +22,8 @@ type caddyLine struct {
 	Status    int     `json:"status"`
 }
 
-// parseCaddy converts one line of Caddy's JSON access log to an Entry.
-func parseCaddy(line []byte) (Entry, bool) {
+// ParseCaddy converts one line of Caddy's JSON access log to an Entry.
+func ParseCaddy(line []byte) (Entry, bool) {
 	var c caddyLine
 	if json.Unmarshal(line, &c) != nil || c.TS <= 0 || c.Request == nil {
 		return Entry{}, false
