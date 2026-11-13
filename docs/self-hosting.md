@@ -10,7 +10,7 @@ This is for an operator who wants to run their own relay and point ReCasaOS boxe
   - `443/tcp` (control plane, enrolment API, DERP relay over HTTPS),
   - `80/tcp` if you use the Caddy automatic HTTPS setup below (certificate issuance and redirect),
   - `3478/udp` (STUN, now served by the `derper` service; `compose.yaml` publishes it).
-- Never open `8081` (enrolment service) or `50443` (Headscale gRPC). `compose.yaml` publishes neither.
+- Never open `8081` (enrolment service), `8083` (front's access log into the journal, section 15) or `50443` (Headscale gRPC). `compose.yaml` publishes none of them.
 - Public sharing (section 14, optional) also needs `53/udp` and `53/tcp` on the public IP, and moves `80` and `443` from `front` to `share`.
 
 ## 2. First start
@@ -182,7 +182,7 @@ You still need an override for steps 1 and 2 of section 2: `compose.tls.yaml` ab
 
 ## 4. Settings
 
-Put them in a `.env` file next to `compose.yaml` (Compose substitutes them). An unset or empty value takes the default, except `TRUSTED_PROXY_HEADER` (an empty value really is empty) and the two required ones; a non-positive number or duration, or a missing or invalid `LOGIN_SERVER`, makes the service refuse to start. `.env` is listed in `.gitignore`: never commit it.
+Put them in a `.env` file next to `compose.yaml` (Compose substitutes them). An unset or empty value takes the default, except `TRUSTED_PROXY_HEADER` (an empty value really is empty), the journal switches `ENROLMENT_LOG_DIR`, `SHARE_LOG_DIR` and `LOG_INGEST_ADDR` (set empty: off) and the two required ones; a non-positive number or duration, or a missing or invalid `LOGIN_SERVER`, makes the service refuse to start. `.env` is listed in `.gitignore`: never commit it.
 
 | Variable | Default | In `.env`? | Notes |
 |---|---|---|---|
@@ -207,9 +207,16 @@ Put them in a `.env` file next to `compose.yaml` (Compose substitutes them). An 
 | `ADMIN_TOKEN` | none (page disabled) | yes | 24 characters or more. Turns on the operator page (section 11) |
 | `DERPER_DEBUG_KEY` | none (metering off) | yes | secret that lets `enrolment` read `derper`'s byte counters; create it with `openssl rand -hex 32` (section 12). Unset: metering is off and `/admin` shows "metering unavailable". After setting or changing it, also run `docker compose up -d --force-recreate derper` (section 12). The key file given to `derper` is never empty and `/debug` stays closed either way |
 | `MONTHLY_TRAFFIC_REFERENCE` | none (no reference) | yes | monthly relayed-traffic budget shown on `/admin`, e.g. `100G`, `100GB` or `2t` (K, M, G, T are decimal, any case). A yardstick, not a limit |
+| `LOG_KEEP` | `168h` (7 days) | yes | how long the journal keeps its lines (section 15), for `share`, `enrolment` and `front` alike; at most `168h`: a longer value makes the service refuse to start |
+| `ENROLMENT_LOG_MAX_SIZE` | `268435456` (256 MiB) | yes | size cap, in bytes, of `enrolment`'s journal files, and separately of `front`'s (so up to twice this in `/data/logs`); past it the oldest files go before `LOG_KEEP` |
+| `SHARE_LOG_MAX_SIZE` | `1073741824` (1 GiB) | yes | the same for `share`'s journal files (public sharing, section 14) |
+| `ENROLMENT_LOG_DIR` | `/data/logs` | yes, only set empty | an on/off switch, not a path setting: set empty, `enrolment` writes no journal (neither its own lines nor `front`'s) |
+| `SHARE_LOG_DIR` | `/logs` | yes, only set empty | the same for `share`: set empty, no visitor line is written |
+| `LOG_INGEST_ADDR` | `:8083` | yes, only set empty | where `enrolment` takes `front`'s access log; set empty, `front`'s requests are not kept. Never publish this port |
 | `HEADSCALE_URL` | `http://headscale:8080` | no, fixed in `compose.yaml` | Headscale REST API, compose network only |
 | `STORE_PATH` | `/data/relay.db` | no, fixed in `compose.yaml` | SQLite file, in the `enrolment-data` volume |
 | `LISTEN_ADDR` | `:8081` | no, not passed by `compose.yaml` | never publish it |
+| `LOG_READ_DIRS` | `/data/logs,/logs/share` | no, not passed by `compose.yaml` | the folders `/admin/journal` reads (section 15) |
 
 What each one does: [README](../README.md#configuration-enrolment-service-environment).
 
@@ -245,6 +252,14 @@ Headscale is pinned in `compose.yaml` (`headscale/headscale:v0.29.7`), and the e
 4. `docker compose pull && docker compose up -d` (with your `-f` options if any).
 
 The enrolment service is built from this repository: `git pull && docker compose up -d --build`, or use the published image below. When a release changes `Caddyfile` or `headscale/config.yaml` (v0.5.0 does: section 13, "Upgrading to v0.5.0"), also run `docker compose up -d --force-recreate front headscale`: both files are bind-mounted, so Compose does not recreate those containers by itself. **Upgrading from a build before the non-root image** (the enrolment image used to run as root, so the `enrolment-data` volume and `relay.db` belong to root): give them to uid 65532 once before starting the new image, `docker compose stop enrolment && docker run --rm --volumes-from "$(docker compose ps -aq enrolment)" alpine chown -R 65532:65532 /data && docker compose up -d --build enrolment` (not run here on an old volume). `front` is pinned to `caddy:2.10.0-alpine`; the README's proxy-header checks were made with that version.
+
+### Upgrading to the release with the journal
+
+The release that adds the journal (`/admin/journal`, section 15) changes the shipped `Caddyfile`. The journal's folders need no step by hand: `enrolment` creates `/data/logs` in its volume, and the new `share-logs` volume takes the owner of the image's `/logs`.
+
+1. If you use the TLS setup of section 3a, add to your own `Caddyfile.tls` what its example now has: the `(journal)` snippet before the first site, `import journal` at the top of **each** site block, and the `@journalstream` block (`/admin/journal/stream` to `enrolment:8081` with `flush_interval -1`; without it the live view of the journal does not get its lines as they come). Without `import journal`, `front`'s requests are not in the journal.
+2. `git pull`, then `docker compose up -d --build` with your `-f` options, then `docker compose up -d --force-recreate front` (with the same options): the Caddyfile is bind-mounted, so Compose does not recreate `front` by itself.
+3. Check: `/admin/journal` lists your own visit to `/admin` as a `front` line within a few seconds. Not verified on an upgraded relay: the e2e test `TestJournalShowsVisitorAndAPI` runs the shipped files on a fresh stack.
 
 ### Upgrading from v0.3.x: standalone `derper` and metering
 
@@ -291,7 +306,7 @@ and pass it as one more `-f compose.image.yaml`; the default `compose.yaml` stil
 State lives in two named volumes (Compose prefixes them with the project name, by default the directory name, e.g. `recasaos-relay_headscale-data`):
 
 - `headscale-data` (`/var/lib/headscale`): `db.sqlite` (users, nodes, access policy, API keys), `noise_private.key` (and `derp_server_private.key`, unused since v0.4.0: `derper` makes its own key, which clients do not pin). Losing the keys or the database means every box must enrol again.
-- `enrolment-data` (`/data`): `relay.db`, the fleets and the hashes of the fleet secrets. Each fleet also carries the network it was created from (the IPv4 address, or the IPv6 /64 and /48), kept while the fleet exists and used only to count the fleets of one network (`MAX_FLEETS_PER_ORIGIN`): say so where you tell your users what your relay keeps.
+- `enrolment-data` (`/data`): `relay.db`, the fleets and the hashes of the fleet secrets; also `logs/`, the journal of `enrolment` and `front` (section 15: client addresses, up to 7 days), which the backup below carries too (add `--exclude ./logs` to its `tar` to leave it out). Each fleet also carries the network it was created from (the IPv4 address, or the IPv6 /64 and /48), kept while the fleet exists and used only to count the fleets of one network (`MAX_FLEETS_PER_ORIGIN`): say so where you tell your users what your relay keeps.
 
 The enrolment image runs as the unprivileged uid/gid `65532` (distroless `:nonroot`) and its `/data` belongs to that user, so a fresh named volume does too. If you mount a host directory on `/data` instead of the named volume, `chown 65532:65532` it first, or the service cannot create `relay.db` and its WAL files. Verified: `docker compose build enrolment`, then a one-shot `docker run` of that image on a fresh named volume created `relay.db` owned by 65532, in WAL mode.
 
@@ -337,7 +352,7 @@ In ReCasaOS, enter your public URL (`https://relay.example.org`, no path) in the
 
 - TLS in front of everything. The enrolment API relies on it: a box signature is bearer-like within its ±120 s validity window. While the service runs, each signature is accepted once (replay is refused); a restart forgets which signatures were seen, so a signature captured on the wire can be replayed within the window after a restart.
 - `ADMIN_TOKEN` opens `/admin` to the Internet: long random token, HTTPS only (section 11).
-- Do not add a `ports:` entry for `enrolment` (8081) or Headscale's gRPC (50443). The rate limiter trusts `X-Client-IP`, which only `front` sets, and the admin API has no other protection. `/api/` must stay unreachable from outside (`front` answers 404).
+- Do not add a `ports:` entry for `enrolment` (8081, and 8083 which takes `front`'s access log) or Headscale's gRPC (50443), and route neither 8081 nor 8083 through another proxy. The rate limiter trusts `X-Client-IP`, which only `front` sets, and the admin API has no other protection. `/api/` must stay unreachable from outside (`front` answers 404).
 - `X-Client-IP` and `trusted_proxies`: read the README section on the proxy header before putting another proxy in front of `front`.
 - Keep `.env` (the API key) out of version control; rotate the key (section 5).
 - Do not edit the access policy in Headscale by hand: the next sync overwrites it.
@@ -348,6 +363,8 @@ In ReCasaOS, enter your public URL (`https://relay.example.org`, no path) in the
 A small page at `https://your-relay/admin/` lists the fleets and their nodes (online or not, activity, quotas) and can delete a fleet or remove a node. It is off, and `/admin` answers 404, until you set `ADMIN_TOKEN` in `.env` (24 characters or more, for example `openssl rand -hex 16`) and run `docker compose up -d`.
 
 The browser asks for a login: any user name, the token as the password. Use it over HTTPS only (section 3), since the token travels with every request. After 120 failed logins from one client address within an hour it answers 429 to that address, even with the right token, until the window frees up; this makes guessing the token impractical, and a long random token is still what protects it. The page shows no fleet secret and no join key: the relay does not keep them. Deleting a fleet takes its boxes off the relay, and each box notices the next time it asks for its state.
+
+Its header links to **Protection** (section 14, "Protection of shared apps") and **Journal** (section 15).
 
 If you would rather not expose it, remove `/admin /admin/*` from the `@enrolment` line of your Caddyfile.
 
@@ -422,6 +439,7 @@ Ask for `box.example.org` to be added to the PRIVATE section of the [Public Suff
 | `80/tcp`, `443/tcp` | `share` (moved from `front`) | `share` reads the TLS server name (or the HTTP `Host`) and forwards to `front`, or into the box's tunnel for a shared name |
 | `53/udp`, `53/tcp` | `enrolment` (the DNS zone) | publish **on the public IP explicitly** (`<ip>:53:53/udp`, `<ip>:53:53/tcp`), never `0.0.0.0`: on a typical Linux host `systemd-resolved` already holds `127.0.0.53:53` and `127.0.0.54:53`, so a wildcard bind can fail, and a DNS server should not answer on every interface anyway |
 | `8082/tcp` | `share` tunnel listener | never published: only `front` reaches it (`/v1/share/tunnel`; the block is already in the `Caddyfile.tls` of section 3a) |
+| `8083/tcp` | `enrolment`, `front`'s access log | never published nor routed: only `front` writes to it (section 15) |
 | `443/udp` | none | HTTP/3 is lost, see below |
 
 Open `53/udp` and `53/tcp` in the host firewall or cloud security group too. Behind the SNI front, **Caddy loses HTTP/3** on the relay name: `share` forwards TCP only, so `443/udp` is no longer reachable. Boxes and Tailscale clients do not use it; browsers fall back to HTTP/2.
@@ -581,7 +599,7 @@ docker compose -f compose.yaml -f compose.tls.yaml up -d
 
 Between the two commands, take the `listener_wrappers` blocks out of the global options of `Caddyfile.tls` (back to the `{ email ... }` of section 3a): the second command publishes `front` again, and with the wrapper still there the PROXY header trust would apply to clients reaching `front` directly. The second command recreates `front`, which reads the file.
 
-`front` takes 80 and 443 back, and `enrolment` restarts without the zone and without port 53. Nothing else to undo: claimed names and TXT rows stay in `relay.db` and do no harm (the share API answers 503 until `SHARE_DOMAIN` is set again). Boxes lose their public address meanwhile; their tunnels reconnect when `share` is back.
+`front` takes 80 and 443 back, and `enrolment` restarts without the zone and without port 53. `share`'s journal stays in the `share-logs` volume, and nothing deletes it once `share` no longer runs: delete it (section 15, "Turning it off"). Nothing else to undo: claimed names and TXT rows stay in `relay.db` and do no harm (the share API answers 503 until `SHARE_DOMAIN` is set again). Boxes lose their public address meanwhile; their tunnels reconnect when `share` is back.
 
 ### Operating it
 
@@ -633,6 +651,7 @@ A fleet's reports count once per address, and reports during a running ban neith
 **Personal data.** Visitor addresses are personal data: say so where you tell your users what your relay keeps. The relay keeps the following, and deletes it on time even after sharing is turned off:
 
 - each accepted connection (address and box) for **24 hours**, only to check reports as above;
+- **in the journal (section 15), every visitor connection, passed or cut (address, name asked for, decision, duration and bytes), for 7 days** (`LOG_KEEP`, at most 7 days): longer than the 24 hours above. `share` deletes these lines on time while it runs; once sharing is turned off, delete its files yourself (section 15);
 - the raw reports for **30 days**, deleted at once for a box that turns share my bans off;
 - refusal counts (hour, name, address, reason, source) for 7 days, shown on `/admin` and to the box that owns the name, never to another box;
 - community bans until they end, then deleted (an address's count of past bans is kept 30 days after its last ban ends);
@@ -640,3 +659,65 @@ A fleet's reports count once per address, and reports during a running ban neith
 - **permanent bans** until you lift them, listed apart on `/admin` with their date and reasons. Home addresses change hands: review that list from time to time.
 
 **Countries and networks.** Country and AS bans, and the networks shown on `/admin`, use DB-IP Lite (country and ASN), which `enrolment` downloads into `/data/geo/`, checks daily and replaces when the month changes. Until the files are there, country and AS bans match nothing and `/admin` says so. [IP Geolocation by DB-IP](https://db-ip.com), under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/): keep that attribution wherever you show its data. `/data/geo/` and `/data/feeds/` are downloaded again if lost; a backup of `/data` (section 7) carries them anyway.
+
+## 15. Logs
+
+The relay keeps a journal of what passes through it, like an access log and an error log merged into one: a JSON line per visitor connection to a shared app, per HTTP request to the relay, per relay event and per message of its services. It is on by default, kept **7 days** (`LOG_KEEP`), shown on `/admin/journal` (section 11) and readable on the server.
+
+### What is written, and where
+
+| `src` | Written by, to | One line per |
+|---|---|---|
+| `share` | `share`, in its volume `share-logs` (`/logs/share-YYYY-MM-DD.jsonl`) | visitor connection to a share name (section 14): the visitor's address, the name it asked for, and `pass`, or `cut` with the reason and its source (as on the Protection page); when a passed connection closes, a second line `close` with its duration and the bytes each way. The relay does not decrypt: no path, no status code. Connections to the relay's own name are `front` lines |
+| `front` | `front` (Caddy's access log) sends it over the compose network to `enrolment` on port 8083 (`LOG_INGEST_ADDR`), which writes `/data/logs/front-YYYY-MM-DD.jsonl` | HTTP request to the relay (the boxes' API, `/register`, `/admin`, Headscale, DERP, box tunnels): the client's address, host, method, path (query included), status, duration, bytes each way. A long connection (DERP, a box's tunnel) is written when it ends |
+| `relay` | `enrolment`, `/data/logs/enrolment-YYYY-MM-DD.jsonl` | relay event: a block list updated or failing, DB-IP updated, a community ban opened, ban reports received from a box (how many were kept), a box's protection settings changed, a change made on the Protection page |
+| `log` | `share` and `enrolment`, each in its own files | message the service also prints on its output (`docker compose logs`), errors included |
+
+Files are per writer and per UTC day. Each line has `time` (UTC, milliseconds) and `src`, and only the fields of its kind: `svc` (`share`, `enrolment`, `front`), `ip`, `host`, `act` (`pass`, `cut`, `close`), `reason`, `source`, `ms`, `in` and `out` (bytes from and to the client), `method`, `path`, `status`, `event`, `msg`, `count`.
+
+**Never written:** the keys of block lists, `ADMIN_TOKEN`, the `Authorization` header, cookies, the boxes' signatures. `front`'s lines carry no header at all (the `(journal)` snippet of the Caddyfile deletes them, and `enrolment` keeps only the fields above).
+
+**Kept** `LOG_KEEP`, 7 days by default and at most: each writer deletes its own files older than that, checked every minute. **Size caps:** `share` 1 GiB (`SHARE_LOG_MAX_SIZE`), `enrolment` 256 MiB and `front` 256 MiB (`ENROLMENT_LOG_MAX_SIZE`, each); past its cap a writer deletes its oldest files before 7 days, and if today's file alone passes it, that file starts over with a line saying so. `share` never slows a connection for its journal: when the disk does not keep up it drops lines and then writes how many. If a journal cannot be opened (a full disk, a folder it may not write to), the service runs without it and says so on its output.
+
+### `/admin/journal`
+
+The newest lines first, one colour per kind (passed, cut, error). Filters: **Visitors**, **Relay requests**, **Events**, **Messages**, **Problems only** (cut connections, `4xx` and `5xx` answers, messages), free text (address, name, path, reason) and the period (last hour, 6 h, 24 h, 7 days). Clicking an address or a name searches for it. On the last hour the page is **live**: new lines arrive by themselves, and **Pause** holds them while you read. **Older** goes back page by page. A search reads at most 64 MiB or 5 s per page, one search at a time on the relay (a second one is asked to try again in a moment), and **Search on** continues where it stopped. At most 4 live views are open at once on the relay; a fifth is refused until one closes.
+
+### On the server
+
+The images have no shell (distroless): read the files through a throwaway container, as for backups (section 7), with your `-f` options on `docker compose`. `enrolment` mounts `share`'s volume read-only on `/logs/share`, so its container gives all three:
+
+```
+# follow today's lines as they come (Ctrl-C to stop)
+docker run --rm -it --volumes-from "$(docker compose ps -q enrolment)" alpine \
+  sh -c 'tail -F /data/logs/*-$(date -u +%F).jsonl /logs/share/share-$(date -u +%F).jsonl'
+
+# everything one address did, over the whole journal (jq on the host)
+docker run --rm --volumes-from "$(docker compose ps -q enrolment)" alpine \
+  sh -c 'cat /data/logs/*.jsonl /logs/share/*.jsonl' | jq -c 'select(.ip == "203.0.113.7")'
+
+# cut visitor connections, with why
+docker run --rm --volumes-from "$(docker compose ps -q enrolment)" alpine \
+  sh -c 'cat /logs/share/*.jsonl' | jq -r 'select(.act == "cut") | [.time, .ip, .host, .reason, .source] | @tsv'
+
+# requests to the relay answered 5xx
+docker run --rm --volumes-from "$(docker compose ps -q enrolment)" alpine \
+  sh -c 'cat /data/logs/front-*.jsonl' | jq -c 'select(.status >= 500)'
+```
+
+Lines are not sorted across files: add `jq -s 'sort_by(.time)[]'` when the order matters. Verified on the e2e stack (Docker Desktop): the `cat` and `tail` commands read the three files, with `share-logs` written by uid 65532 and no step by hand. **Not verified:** the `jq` filters on a real relay.
+
+### Docker's own logs
+
+`front`, `share` and `enrolment` also print to Docker's log of their container, and visitor addresses can appear there: `front` prints its access lines on its own output while it cannot reach `enrolment` (it reconnects by itself), and the services' messages can name an address. `compose.yaml` caps those logs at 3 files of 10 MB per container: **by size, not by time**, so on a quiet relay a line can stay there longer than 7 days. Recreating a container (`docker compose up -d --force-recreate <service>`) empties its Docker log.
+
+### Turning it off, or shortening it
+
+- Shorter: `LOG_KEEP=24h` (any duration up to `168h`) in `.env`, then `docker compose up -d` with your `-f` options. Each writer deletes its files past the new limit as it restarts.
+- Off: set `ENROLMENT_LOG_DIR=`, `SHARE_LOG_DIR=` and `LOG_INGEST_ADDR=` (empty) in `.env`, **and remove every `import journal` line from your Caddyfile** (otherwise `front` prints its access log on its own output instead), then `docker compose up -d` and `docker compose up -d --force-recreate front`.
+- Nothing deletes the files of a writer that no longer runs (journal off, or `share` removed): delete them yourself. `enrolment`'s and `front`'s: `docker run --rm --volumes-from "$(docker compose ps -q enrolment)" alpine sh -c 'rm -f /data/logs/*.jsonl'`. `share`'s: `docker run --rm -v <project>_share-logs:/logs alpine sh -c 'rm -f /logs/*.jsonl'` (the volume name carries the Compose project name, section 7).
+- `/admin/journal` reads the folders of `LOG_READ_DIRS`, which `compose.yaml` does not pass: turned off as above, the page shows the lines left in those files, and none once they are deleted.
+
+**Known limit:** Caddy writes each access line to `enrolment` synchronously, so an `enrolment` that hangs (not one that is down: then `front` writes to its own output) can slow `front`'s answers.
+
+**Personal data.** The journal keeps the address of every visitor of a shared app and of every client of the relay (boxes, phones, you on `/admin`) for `LOG_KEEP`, **7 days by default**: longer than the 24 hours of the protection's connection record (section 14, "Protection of shared apps"). Say so where you tell your users what your relay keeps, and shorten `LOG_KEEP` if you need less.
