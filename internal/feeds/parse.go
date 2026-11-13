@@ -42,6 +42,9 @@ func Parse(r io.Reader, format string, column, max int) ([]netip.Prefix, error) 
 		}
 		if p, ok := entry(field); ok {
 			seen[p] = struct{}{}
+			if max > 0 && len(seen) > max { // stop at once: the rest of the body is never held
+				return nil, ErrTooMany
+			}
 		}
 	}
 	if err := sc.Err(); err != nil {
@@ -49,9 +52,6 @@ func Parse(r io.Reader, format string, column, max int) ([]netip.Prefix, error) 
 	}
 	if len(seen) == 0 {
 		return nil, ErrEmpty
-	}
-	if max > 0 && len(seen) > max {
-		return nil, ErrTooMany
 	}
 	out := make([]netip.Prefix, 0, len(seen))
 	for p := range seen {

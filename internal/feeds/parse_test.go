@@ -82,3 +82,14 @@ func TestPresetsAreHTTPS(t *testing.T) {
 		}
 	}
 }
+
+// The cap counts distinct entries: a repeated one is not counted twice.
+func TestParseMaxCountsDistinct(t *testing.T) {
+	got, err := Parse(strings.NewReader("1.1.1.1\n1.1.1.1\n2.2.2.2\n2.2.2.2/32\n"), "text", 0, 2)
+	if err != nil || !eq(got, prefixes("1.1.1.1/32", "2.2.2.2/32")) {
+		t.Fatalf("got %v, %v", got, err)
+	}
+	if _, err := Parse(strings.NewReader("1.1.1.1\n2.2.2.2\n3.3.3.3\n"+strings.Repeat("x", 2<<20)+"\n"), "text", 0, 2); !errors.Is(err, ErrTooMany) {
+		t.Fatalf("err = %v, want ErrTooMany before the over-long line", err)
+	}
+}
