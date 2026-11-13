@@ -17,11 +17,11 @@ import (
 
 const (
 	day          = 24 * time.Hour
-	window       = day      // reports from two fleets within this open a ban
-	strikeWindow = 30 * day // a ban starting this soon after the previous one ended is a repeat
+	window       = day             // reports from two fleets within this open a ban
+	strikeWindow = 30 * day        // a ban starting this soon after the previous one ended is a repeat
 	maxAhead     = 2 * time.Minute // a ban cannot start later than this from now
-	rangeMin     = 5        // address bans in one /24 or /48 that ban the range
-	asnMin       = 10       // range bans in one ASN that flag it
+	rangeMin     = 5               // address bans in one /24 or /48 that ban the range
+	asnMin       = 10              // range bans in one ASN that flag it
 )
 
 // tiers is the length of strike 1, 2, 3+; 0 is permanent.

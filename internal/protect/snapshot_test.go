@@ -208,7 +208,12 @@ func TestCurrentConcurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 8 {
 		wg.Add(1)
-		go func() { defer wg.Done(); c.Current(context.Background()); c.Invalidate(); c.Allowed(netip.MustParsePrefix("1.1.1.1/32")) }()
+		go func() {
+			defer wg.Done()
+			c.Current(context.Background())
+			c.Invalidate()
+			c.Allowed(netip.MustParsePrefix("1.1.1.1/32"))
+		}()
 	}
 	wg.Wait()
 }
