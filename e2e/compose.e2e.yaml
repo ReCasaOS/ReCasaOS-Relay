@@ -37,6 +37,7 @@ services:
       ADMIN_TOKEN: e2e-admin-token-0123456789abcdef
       AUTH_RATE_PER_HOUR: "1000"
       KEY_RATE_PER_HOUR: "100"
+      COMMUNITY_MIN_FLEET_AGE: 1s # fresh test fleets may report bans
 
     # The test reads the zone through these (random loopback ports, nothing on 53 of the host).
     ports:
@@ -88,9 +89,18 @@ services:
         aliases:
           - share.relay.test
           - relay.test # the tailscale containers reach the relay through share
+      visitors:
+        ipv4_address: 198.51.100.10
 
 networks:
   default:
     ipam:
       config:
         - subnet: 172.29.0.0/24
+  # Visitor containers with a public-looking address (TEST-NET-2): share keeps no private address in its
+  # filter or events. Internal, so share's default route stays on `default`.
+  visitors:
+    internal: true
+    ipam:
+      config:
+        - subnet: 198.51.100.0/24

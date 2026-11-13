@@ -158,6 +158,25 @@ func (b *fakeBox) signed(method, path, body string) (int, string) {
 	return resp.StatusCode, string(out)
 }
 
+// setProtection sets the box's relay filter and ban sharing (PUT /v1/share/protection).
+func (b *fakeBox) setProtection(filter, share bool) {
+	b.r.t.Helper()
+	body := fmt.Sprintf(`{"relay_filter":%t,"share_bans":%t}`, filter, share)
+	if code, out := b.signed("PUT", "/v1/share/protection", body); code != http.StatusOK {
+		b.r.t.Fatalf("protection %s: %d %s", b.name, code, out)
+	}
+}
+
+// reportBan shares a ban of key, started now (POST /v1/share/bans). A 204 does not mean it was
+// kept: a report the relay cannot back with a seen connection is dropped silently.
+func (b *fakeBox) reportBan(key, reason string) {
+	b.r.t.Helper()
+	body := fmt.Sprintf(`{"bans":[{"key":%q,"reason":%q,"app":"web","since":%q}]}`, key, reason, time.Now().UTC().Format(time.RFC3339))
+	if code, out := b.signed("POST", "/v1/share/bans", body); code != http.StatusNoContent {
+		b.r.t.Fatalf("report %s: %d %s", b.name, code, out)
+	}
+}
+
 // sources returns the PROXY source addresses received so far.
 func (b *fakeBox) sources() []*net.TCPAddr {
 	b.mu.Lock()
