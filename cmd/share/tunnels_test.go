@@ -29,6 +29,10 @@ type fakeEnrolment struct {
 	failUsage bool
 	tooLarge  bool // answer usage posts 413
 	posts     [][]sample
+
+	filterVersion string // /internal/share/filter: body with ETag "<version>"; 304 on a match
+	filterBody    string
+	filterStatus  int // when set, answered instead (500: enrolment down)
 }
 
 func (f *fakeEnrolment) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -37,6 +41,20 @@ func (f *fakeEnrolment) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"name": "alpha", "node_id": "7", "fleet_id": "f1"})
 	case strings.HasPrefix(r.URL.Path, "/internal/share/boxes/"):
 		http.NotFound(w, r)
+	case r.URL.Path == "/internal/share/filter":
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.filterStatus != 0 {
+			http.Error(w, "down", f.filterStatus)
+			return
+		}
+		etag := `"` + f.filterVersion + `"`
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", etag)
+		io.WriteString(w, f.filterBody)
 	case r.URL.Path == "/internal/share/usage":
 		f.mu.Lock()
 		defer f.mu.Unlock()

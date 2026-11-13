@@ -66,6 +66,11 @@ func run() error {
 		}
 	}()
 	go every(ctx, 60*time.Second, func(ctx context.Context) { tunnel.Revalidate(ctx, reg, resolve) })
+	fh := &filterHolder{}
+	go func() {
+		fh.poll(ctx, cfg.EnrolmentURL)
+		every(ctx, 30*time.Second, func(ctx context.Context) { fh.poll(ctx, cfg.EnrolmentURL) })
+	}()
 	go every(ctx, 15*time.Second, newUsage(reg, cfg.EnrolmentURL).tick)
 	go func() {
 		<-ctx.Done()
@@ -87,7 +92,7 @@ func run() error {
 	acceptors.Add(2)
 	go func() {
 		defer acceptors.Done()
-		accept(lt, &inflight, perIP, func(c net.Conn) { handleTLS(cfg, reg, perBox, c) })
+		accept(lt, &inflight, perIP, func(c net.Conn) { handleTLS(cfg, reg, perBox, fh, c) })
 	}()
 	go func() {
 		defer acceptors.Done()
@@ -141,7 +146,7 @@ func accept(l net.Listener, wg *sync.WaitGroup, perIP *connCap, handle func(net.
 	}
 }
 
-func handleTLS(cfg Config, reg *tunnel.Registry, perBox *connCap, c net.Conn) {
+func handleTLS(cfg Config, reg *tunnel.Registry, perBox *connCap, fh *filterHolder, c net.Conn) {
 	name, replay, err := sni.PeekServerName(c, cfg.PeekTimeout)
 	if err != nil && !errors.Is(err, sni.ErrNotTLS) {
 		return
@@ -151,6 +156,15 @@ func handleTLS(cfg Config, reg *tunnel.Registry, perBox *connCap, c net.Conn) {
 	case front: // non-TLS bytes (err == ErrNotTLS) go to front as well
 		toFront(replay, cfg.FrontTLS, cfg.FrontProxyProtocol)
 	case box != "":
+		// Only share names are filtered: the relay host (enrolment, Headscale, /admin) must stay
+		// reachable from any country. A refused visitor gets a plain close.
+		if f := fh.get(); f != nil {
+			if a, ok := remoteAddr(c); ok {
+				if reason, _ := f.decide(a, box); reason != "" {
+					return
+				}
+			}
+		}
 		toTunnel(reg, perBox, box, c, replay)
 	}
 }
