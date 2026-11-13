@@ -530,6 +530,9 @@ func TestJournalShowsCountryFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Close()
+	if err := os.Link(f.Name(), filepath.Join(dir, "dbip-asn-lite.mmdb")); err != nil { // Version() wants both files; only the country one is read here
+		t.Fatal(err)
+	}
 	g := &geo.DB{Dir: dir, BaseURL: "http://127.0.0.1:1/"}
 	_, _ = g.Tick(context.Background()) // opens the file; the failed download of the missing ASN file is of no interest
 
