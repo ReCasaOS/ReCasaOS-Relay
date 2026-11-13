@@ -47,13 +47,37 @@ Create `Caddyfile.tls` next to `compose.yaml`: the shipped `Caddyfile` with `aut
 	email admin@example.org
 }
 
+# Access log for the journal (/admin/journal): JSON lines in the `front-logs` volume, which enrolment reads.
+# Headers are never written (Authorization, cookies, X-Box-Signature); rolls stay uncompressed so they are read.
+(journal) {
+	log {
+		output file /logs/front.log {
+			roll_size 64MiB
+			roll_keep 8
+			roll_keep_for {$LOG_KEEP:168h}
+			roll_uncompressed
+			mode 0644
+		}
+		format filter {
+			wrap json
+			fields {
+				request>headers delete
+				resp_headers delete
+			}
+		}
+	}
+}
+
 # Only for public sharing (section 14); harmless without `share`. It makes the port-80 server explicit, which
 # the `proxy_protocol` wrapper of section 14 needs; Caddy's own HTTP-to-HTTPS redirect answers the shared names.
 http://*.box.example.org {
+	import journal
 	redir https://{host}{uri} 301
 }
 
 relay.example.org {
+	import journal
+
 	@debug path /debug /debug/*
 	handle @debug {
 		respond 404
@@ -70,6 +94,14 @@ relay.example.org {
 	handle @tunnel {
 		reverse_proxy share:8082 {
 			header_up X-Client-IP {client_ip}
+		}
+	}
+
+	@journalstream path /admin/journal/stream
+	handle @journalstream {
+		reverse_proxy enrolment:8081 {
+			header_up X-Client-IP {client_ip}
+			flush_interval -1
 		}
 	}
 

@@ -42,8 +42,13 @@ services:
       - headscale
       - derper
       - enrolment
+    environment:
+      # Access log retention (Caddy keeps whole days; at most 168h, like the other writers).
+      LOG_KEEP: ${LOG_KEEP:-168h}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # The access log (/logs/front.log and its rolls), read by `enrolment` for /admin/journal.
+      - front-logs:/logs
     # Plain HTTP: put your TLS reverse proxy in front of this port (it serves Headscale and /v1/*).
     # With public sharing, 80/443 move to `share` and this list is emptied by the docs override (docs/self-hosting.md, section 14).
     ports:
@@ -94,8 +99,14 @@ services:
       # The caps `share` enforces, read here only to show them on /admin: keep them equal to share's below.
       CONNS_PER_IP: ${CONNS_PER_IP:-256}
       CONNS_PER_IP_PER_BOX: ${CONNS_PER_IP_PER_BOX:-64}
+      # Journal: days kept (at most 168h) and the size cap of enrolment's own log files, in bytes.
+      LOG_KEEP: ${LOG_KEEP:-168h}
+      LOG_MAX_SIZE: ${ENROLMENT_LOG_MAX_SIZE:-268435456}
     volumes:
       - enrolment-data:/data
+      # The other writers' logs, read for /admin/journal (enrolment's own are in /data/logs).
+      - share-logs:/logs/share:ro
+      - front-logs:/logs/front:ro
     # Reached only through `front` (Caddyfile): never publish this port, the rate limiter trusts X-Client-IP.
     expose:
       - "8081"
@@ -133,6 +144,11 @@ services:
       TUNNEL_RATE_PER_HOUR: ${TUNNEL_RATE_PER_HOUR:-60}
       CONNS_PER_IP: ${CONNS_PER_IP:-256}
       CONNS_PER_IP_PER_BOX: ${CONNS_PER_IP_PER_BOX:-64}
+      # Journal: days kept (at most 168h) and the size cap of share's log files, in bytes.
+      LOG_KEEP: ${LOG_KEEP:-168h}
+      LOG_MAX_SIZE: ${SHARE_LOG_MAX_SIZE:-1073741824}
+    volumes:
+      - share-logs:/logs
     # ports:
     #   - "80:80"
     #   - "443:443"
@@ -141,6 +157,8 @@ services:
 volumes:
   headscale-data:
   enrolment-data:
+  share-logs:
+  front-logs:
 
 configs:
   derper-debug-key:
