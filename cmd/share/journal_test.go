@@ -151,3 +151,48 @@ func TestJournalNotForRelayHost(t *testing.T) {
 		t.Fatalf("lines for the relay host: %+v", l)
 	}
 }
+
+// A flood past a cap must not fill the journal: the first refusal of a key is written at once, then at
+// most one line per key per cutWindow carries the count of the refusals since; a key quiet for a whole
+// window frees its slot. Past maxCutKeys keys, refusals go to one line with no address.
+func TestJournalCapRefusalsSummarised(t *testing.T) {
+	w, lines := testJournal(t)
+	old := maxCutKeys
+	maxCutKeys = 1
+	defer func() { maxCutKeys = old }()
+	cc := newConnCap(1, "t")
+	c, p := net.Pipe()
+	defer c.Close()
+	defer p.Close()
+	a := fromAddr{c, &net.TCPAddr{IP: net.ParseIP("203.0.113.9"), Port: 1}}
+	b := fromAddr{c, &net.TCPAddr{IP: net.ParseIP("198.51.100.1"), Port: 1}}
+	t0 := time.Unix(1_800_000_000, 0)
+	at := func(s int) time.Time { return t0.Add(time.Duration(s) * time.Second) }
+	for i := 0; i < 5; i++ {
+		cc.logRefused(w, "203.0.113.9", a, "", "ip", at(i))
+	}
+	cc.flushCuts(w, at(9))  // window not over: nothing
+	cc.flushCuts(w, at(10)) // count 4
+	cc.flushCuts(w, at(20)) // quiet window: the slot is freed
+	cc.logRefused(w, "203.0.113.9", a, "", "ip", at(21))
+	cc.logRefused(w, "198.51.100.1", b, "", "ip", at(22)) // past the bound: aggregate
+	cc.logRefused(w, "198.51.100.1", b, "", "ip", at(23))
+	if n := len(cc.cuts); n > maxCutKeys+1 {
+		t.Fatalf("%d keys kept, bound %d (+1 aggregate)", n, maxCutKeys)
+	}
+	cc.flushCuts(w, at(32))
+
+	got := lines()
+	want := []struct {
+		ip    string
+		count int64
+	}{{"203.0.113.9", 0}, {"203.0.113.9", 4}, {"203.0.113.9", 0}, {"", 0}, {"", 1}}
+	if len(got) != len(want) {
+		t.Fatalf("lines = %+v, want %d", got, len(want))
+	}
+	for i, e := range got {
+		if e.Act != "cut" || e.Reason != "cap" || e.Source != "ip" || e.IP != want[i].ip || e.Count != want[i].count {
+			t.Errorf("line %d = %+v, want ip %q count %d", i, e, want[i].ip, want[i].count)
+		}
+	}
+}

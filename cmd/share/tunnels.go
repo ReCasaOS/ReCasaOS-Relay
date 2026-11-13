@@ -92,7 +92,7 @@ func toTunnel(reg *tunnel.Registry, perBox *connCap, fh *filterHolder, ev *event
 	}
 	if !perBox.acquire(k) {
 		ev.refused(box, connKey(c), "cap", "ip-box")
-		logCut(jw, c, host, "cap", "ip-box")
+		perBox.logRefused(jw, k, c, host, "ip-box", time.Now())
 		return
 	}
 	defer perBox.release(k)
