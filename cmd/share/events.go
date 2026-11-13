@@ -49,12 +49,12 @@ type events struct {
 	seenAt   map[seenItem]time.Time // last recorded, pruned on flush
 	seenQ    []seenItem             // oldest first
 	refs     map[refKey]*refItem
-	refOrder []refKey          // oldest first
-	rows     map[[2]string]int // distinct rows recorded per (hour, name), kept across flushes
+	refOrder []refKey                          // oldest first
+	rows     map[[2]string]map[refKey]struct{} // rows recorded per (hour, name), kept across flushes
 }
 
 func newEvents() *events {
-	return &events{now: time.Now, seenAt: map[seenItem]time.Time{}, refs: map[refKey]*refItem{}, rows: map[[2]string]int{}}
+	return &events{now: time.Now, seenAt: map[seenItem]time.Time{}, refs: map[refKey]*refItem{}, rows: map[[2]string]map[refKey]struct{}{}}
 }
 
 // eventKey is the address key of the contract: IPv4 as a.b.c.d/32, IPv6 as its /64. Addresses that are
@@ -107,11 +107,15 @@ func (e *events) refused(name, key, reason, source string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	hour := e.now().UTC().Truncate(time.Hour).Format(time.RFC3339)
-	if _, ok := e.refs[refKey{hour, name, key, reason, source}]; !ok {
-		if hn := [2]string{hour, name}; e.rows[hn] >= maxRefusalRows {
+	hn, k := [2]string{hour, name}, refKey{hour, name, key, reason, source}
+	if _, ok := e.rows[hn][k]; !ok {
+		if e.rows[hn] == nil {
+			e.rows[hn] = map[refKey]struct{}{}
+		}
+		if len(e.rows[hn]) >= maxRefusalRows {
 			key = ""
 		} else {
-			e.rows[hn]++
+			e.rows[hn][k] = struct{}{}
 		}
 	}
 	e.addRef(refItem{Hour: hour, Name: name, Key: key, Reason: reason, Source: source, Count: 1})

@@ -296,3 +296,20 @@ func TestRefusalRowsCappedPerNameAndHour(t *testing.T) {
 		t.Fatalf("posts = %+v, want the key kept in a new hour", p)
 	}
 }
+
+// The cap counts distinct rows, not sightings: one address refused again after every flush keeps
+// its key, and does not use up the budget of new ones.
+func TestRefusalRowCapCountsDistinctRows(t *testing.T) {
+	now := t0
+	e := clockedEvents(&now)
+	for i := range maxRefusalRows + 5 {
+		e.refused("", "203.0.113.7/32", "cap", "ip")
+		if p := flushed(t, e); len(p) != 1 || p[0].Refusals[0].Key != "203.0.113.7/32" {
+			t.Fatalf("flush %d: posts = %+v, want the key kept", i, p)
+		}
+	}
+	e.refused("", "203.0.113.8/32", "cap", "ip")
+	if p := flushed(t, e); len(p) != 1 || p[0].Refusals[0].Key != "203.0.113.8/32" {
+		t.Fatalf("posts = %+v, want a second address keyed", p)
+	}
+}
