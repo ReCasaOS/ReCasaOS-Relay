@@ -425,7 +425,7 @@ In `.env`, next to the ones of section 4:
 | `FILTER_MAX_ENTRIES` | `1000000` | `enrolment` | entries of all enabled block lists together ("Protection of shared apps" below); a list that would take the total past it is refused whole and its last good copy stays |
 | `COMMUNITY_MIN_FLEET_AGE` | `168h` (7 days) | `enrolment` | how old a fleet must be before its boxes' ban reports count. **For tests only**: keep the default on a relay open to the public |
 
-The rows from `PEEK_TIMEOUT` on are the processes' own defaults (`compose.yaml` passes `LISTEN_TLS`, `LISTEN_HTTP`, `LISTEN_TUNNEL`, `FRONT_TLS`, `FRONT_HTTP`, `ENROLMENT_URL`, `PEEK_TIMEOUT`, `FRONT_PROXY_PROTOCOL`, `TUNNEL_RATE_PER_HOUR`, `CONNS_PER_IP` and `CONNS_PER_IP_PER_BOX` to `share`; neither cap counts loopback, private or link-local sources, which is what Docker's userland proxy and boxes on the relay's own LAN arrive from, and `SHARE_PSL_TXT` to `enrolment`, as shown there); none needs changing except `SHARE_PSL_TXT` once you have a PSL request.
+The rows from `PEEK_TIMEOUT` on are the processes' own defaults (`compose.yaml` passes `LISTEN_TLS`, `LISTEN_HTTP`, `LISTEN_TUNNEL`, `FRONT_TLS`, `FRONT_HTTP`, `ENROLMENT_URL`, `PEEK_TIMEOUT`, `FRONT_PROXY_PROTOCOL`, `TUNNEL_RATE_PER_HOUR`, `CONNS_PER_IP` and `CONNS_PER_IP_PER_BOX` to `share`; neither cap counts loopback, private or link-local sources, which is what Docker's userland proxy and boxes on the relay's own LAN arrive from, and `SHARE_PSL_TXT`, `FILTER_MAX_ENTRIES`, `COMMUNITY_MIN_FLEET_AGE`, `CONNS_PER_IP` and `CONNS_PER_IP_PER_BOX` to `enrolment`, as shown there); none needs changing except `SHARE_PSL_TXT` once you have a PSL request.
 
 ### Compose override
 
