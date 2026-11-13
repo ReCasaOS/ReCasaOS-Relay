@@ -210,3 +210,36 @@ func TestDownloadKeepsOldOnBadGzip(t *testing.T) {
 		t.Fatalf("old file lost: %v", got)
 	}
 }
+
+func TestDownloadCapsDecompressedSize(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(gz(countryDB(t))) }))
+	defer srv.Close()
+	d := &DB{Dir: t.TempDir(), BaseURL: srv.URL + "/", MaxRaw: 100}
+	if d.Tick(t.Context()) == nil {
+		t.Fatal("oversized file accepted")
+	}
+	if m, _ := filepath.Glob(filepath.Join(d.Dir, "*")); len(m) != 0 {
+		t.Fatalf("files left: %v", m)
+	}
+}
+
+func TestDownloadCreatesMissingDir(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(gz(countryDB(t))) }))
+	defer srv.Close()
+	d := &DB{Dir: filepath.Join(t.TempDir(), "a", "geo"), BaseURL: srv.URL + "/"}
+	d.Tick(t.Context())
+	if d.Country(netip.MustParseAddr("203.0.113.1")) != "XX" {
+		t.Fatal("download into a missing dir failed")
+	}
+}
+
+func TestReopenKeepsGoodReaderOnBadFile(t *testing.T) {
+	d := fixtureDir(t)
+	// replace by rename: truncating a mapped file in place would corrupt the old reader itself
+	os.WriteFile(d.path("bad"), []byte("garbage"), 0o644)
+	os.Rename(d.path("bad"), d.path(countryFile))
+	d.reopen()
+	if d.Country(netip.MustParseAddr("203.0.113.1")) != "XX" {
+		t.Fatal("good reader replaced")
+	}
+}

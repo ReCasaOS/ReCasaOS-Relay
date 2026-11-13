@@ -23,6 +23,7 @@ const (
 	asnFile     = "dbip-asn-lite.mmdb"
 	defaultBase = "https://download.db-ip.com/free/"
 	maxGz       = 200 << 20
+	maxRaw      = 1 << 30
 	okEvery     = 24 * time.Hour
 	retryEvery  = time.Hour
 )
@@ -33,6 +34,7 @@ type DB struct {
 	Client  *http.Client
 	Now     func() time.Time
 	BaseURL string
+	MaxRaw  int64 // cap on one decompressed file; 0 means 1 GiB
 
 	mu      sync.RWMutex // lookups hold it shared; a swapped-out reader is closed under the write lock
 	country *maxminddb.Reader
@@ -57,14 +59,21 @@ func (d *DB) reopen() {
 	c, _ := maxminddb.Open(d.path(countryFile))
 	a, _ := maxminddb.Open(d.path(asnFile))
 	d.mu.Lock()
-	old := []*maxminddb.Reader{d.country, d.asn}
-	d.country, d.asn, d.loaded = c, a, true
-	for _, r := range old {
-		if r != nil {
-			r.Close()
+	defer d.mu.Unlock()
+	d.loaded = true
+	// a file that cannot be opened keeps the previous good reader
+	if c != nil {
+		if d.country != nil {
+			d.country.Close()
 		}
+		d.country = c
 	}
-	d.mu.Unlock()
+	if a != nil {
+		if d.asn != nil {
+			d.asn.Close()
+		}
+		d.asn = a
+	}
 }
 
 // month is the "YYYY-MM" a file was written in, "" when it is missing.
@@ -149,12 +158,22 @@ func (d *DB) fetch(ctx context.Context, file, remote string) error {
 	if err != nil {
 		return err
 	}
+	if err := os.MkdirAll(d.Dir, 0o755); err != nil {
+		return err
+	}
 	tmp, err := os.CreateTemp(d.Dir, file+".tmp*")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(tmp.Name())
-	_, err = io.Copy(tmp, zr)
+	limit := d.MaxRaw
+	if limit == 0 {
+		limit = maxRaw
+	}
+	n, err := io.Copy(tmp, io.LimitReader(zr, limit+1))
+	if err == nil && n > limit {
+		err = errors.New("decompressed file too large")
+	}
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
