@@ -20,7 +20,15 @@ import (
 	"github.com/ReCasaOS/recasaos-relay/internal/tunnel"
 )
 
-var enrolmentClient = &http.Client{Timeout: 5 * time.Second}
+// enrolmentClient drops idle connections well before enrolment's 60 s IdleTimeout: a pooled one
+// reused just as the server closes it fails a POST with "connection reset by peer" (not retried).
+var enrolmentClient = &http.Client{Timeout: 5 * time.Second, Transport: enrolmentTransport()}
+
+func enrolmentTransport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.IdleConnTimeout = 30 * time.Second
+	return t
+}
 
 // do runs req, dropping the URL from transport errors: the resolve URL holds the box key.
 func do(req *http.Request) (*http.Response, error) { return doWith(enrolmentClient, req) }
