@@ -364,7 +364,9 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 			defer func() { <-h.nodeFetch }()
 			ns, err := h.deps.Headscale.ListNodes(ctx, f.HeadscaleUser)
 			if err != nil {
-				log.Printf("admin: fleet %s: list nodes: %v", f.ID, err)
+				if r.Context().Err() == nil { // the browser left mid-render: not worth a line per fleet
+					log.Printf("admin: fleet %s: list nodes: %v", f.ID, err)
+				}
 				views[i].Err = true
 				return
 			}
@@ -402,7 +404,7 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 		"Month": monthTotal, "SharedMonth": sharedTotal, "Kind": kind, "UpNow": upNow, "Live": live.OK, "Deleted": deleted, "DeletedShared": deletedShared,
 		"Reference": h.cfg.MonthlyReference, "Range": rangeKey,
 		"Names": names, "Banned": banned, "Reserved": sharename.Reserved(), "Version": h.cfg.Version,
-	}); err != nil {
+	}); err != nil && r.Context().Err() == nil {
 		log.Printf("admin: render: %v", err)
 	}
 }
