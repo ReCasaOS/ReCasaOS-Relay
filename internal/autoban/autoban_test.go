@@ -61,7 +61,7 @@ func TestNotFound(t *testing.T) {
 			t.Fatal("200 counted")
 		}
 	}
-	for _, p := range []string{"/sitemap.xml", "/robots.txt", "/favicon.ico", "/.well-known/x"} {
+	for _, p := range []string{"/sitemap.xml", "/robots.txt", "/favicon.ico", "/.well-known/x", "/v1/share", "/V1/fleets/x/devices"} {
 		for i := 0; i < 50; i++ {
 			if f, _ := d.Front("k", p, 404); f != "" {
 				t.Fatalf("%s counted", p)

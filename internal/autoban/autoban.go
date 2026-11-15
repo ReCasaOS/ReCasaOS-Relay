@@ -92,7 +92,7 @@ func (d *Detector) Front(key, path string, status int) (fault, detail string) {
 		return "", ""
 	}
 	p := strings.ToLower(path)
-	if strings.HasPrefix(p, "/.well-known/") {
+	if strings.HasPrefix(p, "/.well-known/") || strings.HasPrefix(p, "/v1/") { // the relay's own API answers 404 to honest boxes
 		return "", ""
 	}
 	if t := trapOf(p); t != "" {
