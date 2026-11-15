@@ -81,7 +81,7 @@ func (a *autoBan) ban(ctx context.Context, key, fault, detail string) {
 	if p, err := netip.ParsePrefix(key); err != nil || (a.compiler != nil && a.compiler.Allowed(p)) {
 		return
 	}
-	note := []rune("auto · " + fault + " · " + detail)
+	note := []rune(store.AutoNote + fault + " · " + detail)
 	if len(note) > maxBanNote {
 		note = note[:maxBanNote]
 	}

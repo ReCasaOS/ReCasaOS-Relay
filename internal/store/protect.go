@@ -467,7 +467,7 @@ func (s *sqlStore) DeleteManual(ctx context.Context, id int64) (err error) {
 	var kind, value, note string
 	switch err = tx.QueryRowContext(ctx, `SELECT kind, value, note FROM share_manual WHERE id = ?`, id).Scan(&kind, &value, &note); err {
 	case nil:
-		if strings.HasPrefix(note, autoNote) {
+		if strings.HasPrefix(note, AutoNote) {
 			if kind == "address" {
 				value += "/32"
 			}
@@ -485,7 +485,8 @@ func (s *sqlStore) DeleteManual(ctx context.Context, id int64) (err error) {
 	return tx.Commit()
 }
 
-const autoNote = "auto · "
+// AutoNote starts the note of every ban the relay set itself; it tells those rows from the operator's.
+const AutoNote = "auto · "
 
 // maxAutoBans bounds the active automatic rows: rotating addresses would otherwise grow share_manual without limit.
 var maxAutoBans = 5000
@@ -508,7 +509,7 @@ func (s *sqlStore) AddAutoBan(ctx context.Context, key, note string, now time.Ti
 	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM share_manual WHERE kind = ? AND value = ? AND (until = 0 OR until > ?)`, b.Kind, b.Value, ts(now)).Scan(&n); err != nil || n > 0 {
 		return b, false, wrap("auto ban", err)
 	}
-	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM share_manual WHERE note LIKE ? AND (until = 0 OR until > ?)`, autoNote+"%", ts(now)).Scan(&n); err != nil || n >= maxAutoBans {
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM share_manual WHERE note LIKE ? AND (until = 0 OR until > ?)`, AutoNote+"%", ts(now)).Scan(&n); err != nil || n >= maxAutoBans {
 		return b, false, wrap("auto ban", err)
 	}
 	d := 24 * time.Hour

@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -35,6 +36,12 @@ type Community struct {
 	Range   []string `json:"range"`
 }
 
+// Auto holds the relay's own bans (note starts with store.AutoNote): they cut share names only.
+type Auto struct {
+	Address []string `json:"address"`
+	Range   []string `json:"range"`
+}
+
 type NameFilter struct {
 	Filter    bool `json:"filter"`
 	Community bool `json:"community"`
@@ -45,6 +52,7 @@ type Snapshot struct {
 	Version   string                `json:"version"`
 	Allow     []string              `json:"allow"`
 	Manual    Manual                `json:"manual"`
+	Auto      Auto                  `json:"auto"`
 	External  map[string][]string   `json:"external"`
 	Community Community             `json:"community"`
 	Names     map[string]NameFilter `json:"names"`
@@ -205,15 +213,20 @@ func (c *Compiler) build(ctx context.Context) (body []byte, version string, ends
 	if err != nil {
 		return nil, "", time.Time{}, err
 	}
-	var addr, rng, asn, country []netip.Prefix
+	var addr, rng, autoAddr, autoRng, asn, country []netip.Prefix
 	for _, m := range manual {
 		ends(m.Until)
 		switch m.Kind {
 		case "address", "range":
 			if p, ok := norm(m.Value); ok {
-				if m.Kind == "address" {
+				switch {
+				case strings.HasPrefix(m.Note, store.AutoNote) && m.Kind == "address":
+					autoAddr = append(autoAddr, p)
+				case strings.HasPrefix(m.Note, store.AutoNote):
+					autoRng = append(autoRng, p)
+				case m.Kind == "address":
 					addr = append(addr, p)
-				} else {
+				default:
 					rng = append(rng, p)
 				}
 			}
@@ -224,6 +237,7 @@ func (c *Compiler) build(ctx context.Context) (body []byte, version string, ends
 		}
 	}
 	s.Manual = Manual{Address: strs(addr), Range: strs(rng), ASN: strs(asn), Country: strs(country)}
+	s.Auto = Auto{Address: strs(autoAddr), Range: strs(autoRng)}
 
 	fs, err := c.Store.Feeds(ctx)
 	if err != nil {

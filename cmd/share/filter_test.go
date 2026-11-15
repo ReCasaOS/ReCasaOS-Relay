@@ -91,6 +91,8 @@ func TestDecideOrder(t *testing.T) {
 		"comm": {Community: true}, // community without filter: nothing
 	}
 	s.Suspended = []string{"badname", "on"}
+	s.Auto.Address = []string{"203.0.117.1/32", "198.51.100.9/32"}
+	s.Auto.Range = []string{"203.0.118.0/24"}
 	f := snap(t, s)
 	for _, c := range []struct{ addr, name, reason, source string }{
 		{"198.51.100.5", "both", "", ""}, // allow wins over manual
@@ -98,6 +100,10 @@ func TestDecideOrder(t *testing.T) {
 		{"203.0.114.9", "off", "manual", "range"},
 		{"203.0.115.9", "off", "manual", "asn"},
 		{"203.0.116.9", "off", "manual", "country"},
+		{"203.0.117.1", "off", "manual", "auto"}, // the relay's own bans cut every share name
+		{"203.0.118.9", "gone", "manual", "auto"},
+		{"203.0.117.1", "on", "manual", "auto"},    // before suspended
+		{"198.51.100.9", "both", "", ""},           // allow wins over an automatic ban
 		{"1.1.1.1", "badname", "suspended", ""},    // suspended even for a name with no row
 		{"203.0.113.1", "on", "manual", "address"}, // manual before suspended
 		{"1.1.1.1", "on", "suspended", ""},
@@ -377,12 +383,17 @@ func TestDecideFront(t *testing.T) {
 	s.External = map[string][]string{"feed": {"192.0.2.0/24"}}
 	s.Community.Address = []string{"192.0.3.1/32"}
 	s.Community.Range = []string{"192.0.4.0/24"}
+	s.Auto.Address = []string{"203.0.117.1/32", "198.51.100.9/32"}
+	s.Auto.Range = []string{"203.0.118.0/24"}
 	s.Names = map[string]nameFilter{"n": {Filter: true, Community: true}}
 	f := snap(t, s)
 	for _, c := range []struct{ addr, reason, source string }{
 		{"203.0.113.1", "manual", "address"},
 		{"203.0.114.9", "manual", "range"},
 		{"198.51.100.5", "", ""}, // allow wins
+		{"203.0.117.1", "", ""},  // an automatic ban cuts shares only
+		{"203.0.118.9", "", ""},
+		{"198.51.100.9", "", ""},
 		{"203.0.115.9", "", ""},
 		{"203.0.116.9", "", ""},
 		{"192.0.2.9", "", ""},

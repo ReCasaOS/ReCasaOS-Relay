@@ -88,6 +88,11 @@ func TestSnapshotHasEverySource(t *testing.T) {
 	st.AddAllow(ctx, store.AllowEntry{Prefix: "192.0.2.0/24", Added: t0})
 	st.AddManual(ctx, store.ManualBan{Kind: "address", Value: "198.51.100.200", Since: t0})
 	st.AddManual(ctx, store.ManualBan{Kind: "country", Value: "XX", Since: t0})
+	for _, k := range []string{"203.0.113.9/32", "2001:db8:1:2::/64"} { // the relay's own bans land in Auto, not Manual
+		if _, ok, err := st.AddAutoBan(ctx, k, "auto · trap · /.env", t0); err != nil || !ok {
+			t.Fatal(k, ok, err)
+		}
+	}
 	addFeed(t, c, "FireHOL level 1", true, "1.1.1.1\n2.2.2.0/24\n")
 	addFeed(t, c, "Off", false, "9.9.9.9\n")
 	st.OpenBan(ctx, store.CommunityBan{Key: "203.0.113.7/32", Kind: "address", Since: t0, Reasons: "scan", Fleets: 3}, nil)
@@ -112,6 +117,7 @@ func TestSnapshotHasEverySource(t *testing.T) {
 		Allow:   []string{"192.0.2.0/24"},
 		Manual: Manual{Address: []string{"198.51.100.200/32"}, Range: []string{},
 			ASN: []string{}, Country: []string{"198.51.100.0/25", "203.0.113.0/24"}},
+		Auto:      Auto{Address: []string{"203.0.113.9/32"}, Range: []string{"2001:db8:1:2::/64"}},
 		External:  map[string][]string{"FireHOL level 1": {"1.1.1.1/32", "2.2.2.0/24"}},
 		Community: Community{Address: []string{"203.0.113.7/32"}, Range: []string{}},
 		Names:     map[string]NameFilter{"mybox": {Filter: true, Community: false}},
