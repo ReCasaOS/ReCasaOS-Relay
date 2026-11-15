@@ -57,7 +57,7 @@ services:
       - "127.0.0.1::15000"
 
   tlsfront:
-    image: caddy:2.10.0-alpine
+    image: caddy:2.11.9-alpine
     depends_on:
       - front
     volumes:
