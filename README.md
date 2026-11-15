@@ -97,6 +97,10 @@ Fleet creation is limited per client IP (per /64 for IPv6, and in addition per /
 | `PROTECT_RATE_PER_HOUR` | `600` | protection requests of the boxes (`PUT /v1/share/protection`, `POST /v1/share/bans`, `GET /v1/share/refusals`) per hour per client IP, counted before the signature check, on a budget of their own (not `AUTH_RATE_PER_HOUR`'s) |
 | `FILTER_MAX_ENTRIES` | `1000000` | entries of all enabled block lists together (protection of shared apps, only with `SHARE_DOMAIN`); a list that would take the total past it is refused whole and its last good copy stays. See `docs/self-hosting.md`, "Protection of shared apps" |
 | `COMMUNITY_MIN_FLEET_AGE` | `168h` | how old a fleet must be before its boxes' ban reports count toward the community list. For tests only: keep the default on a public relay |
+| `AUTOBAN` | on | `off` disables the relay's automatic bans of addresses that probe trap paths, pile up 404s or guess share names. See `docs/self-hosting.md`, "Protection of shared apps" |
+| `AUTOBAN_404` | `20` | 404 answers within the window that ban an address |
+| `AUTOBAN_NAMES` | `10` | different share names no box holds, within the window, that ban an address |
+| `AUTOBAN_WINDOW` | `10m` | the window of both counters (a Go duration) |
 | `CONNS_PER_IP`, `CONNS_PER_IP_PER_BOX` | `256`, `64` | the connection caps `share` enforces (below), read here only to show them on `/admin`: give both processes the same values (`compose.yaml` does) |
 | `LOG_DIR` | `/data/logs` | folder of the journal (`enrolment-*.jsonl`, and `front-*.jsonl` taken on `LOG_INGEST_ADDR`), one file per UTC day; set empty: no journal. `compose.yaml` passes `ENROLMENT_LOG_DIR` here, as an on/off switch. See `docs/self-hosting.md`, "Logs" |
 | `LOG_KEEP` | `168h` | how long journal files are kept; at most `168h` (the service refuses to start otherwise) |

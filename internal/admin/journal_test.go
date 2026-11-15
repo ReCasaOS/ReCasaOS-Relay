@@ -561,3 +561,17 @@ func TestFlagFontServed(t *testing.T) {
 		t.Error("the CSP blocks the font")
 	}
 }
+
+func TestViewLineAutoBanAndNoBox(t *testing.T) {
+	ban := viewLine(journal.Entry{Src: "relay", Event: "ban_auto", IP: "203.0.113.9", Msg: "trap · /.env · 24 h"})
+	if ban.Class != "bad" || ban.Text != "ban_auto · trap · /.env · 24 h" {
+		t.Errorf("ban_auto: %q %q", ban.Class, ban.Text)
+	}
+	nb := viewLine(journal.Entry{Src: "share", Act: "cut", Reason: "nobox", Host: "x.nobody.box.example"})
+	if nb.Class != "warn" || nb.Text != "no box behind this name" {
+		t.Errorf("nobox: %q %q", nb.Class, nb.Text)
+	}
+	if c := viewLine(journal.Entry{Src: "share", Act: "cut", Reason: "external"}).Class; c != "bad" {
+		t.Errorf("other cuts stay bad: %q", c)
+	}
+}
