@@ -103,7 +103,7 @@ services:
       FILTER_MAX_ENTRIES: ${FILTER_MAX_ENTRIES:-1000000}
       # Age a fleet needs before its ban reports count. For tests only: keep the default in production.
       COMMUNITY_MIN_FLEET_AGE: ${COMMUNITY_MIN_FLEET_AGE:-168h}
-      # Automatic bans (only with SHARE_DOMAIN): "off" disables them; thresholds and window of the two counters. Empty: the default.
+      # Automatic bans (only with SHARE_DOMAIN): "off" disables them; thresholds, and the window of the 404 and unknown-name counters. Empty: the default.
       AUTOBAN: ${AUTOBAN:-}
       AUTOBAN_404: ${AUTOBAN_404:-}
       AUTOBAN_NAMES: ${AUTOBAN_NAMES:-}

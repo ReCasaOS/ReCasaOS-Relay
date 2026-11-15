@@ -210,7 +210,7 @@ func parseFilter(body []byte) (*filter, error) {
 
 // decide says why the visitor at a is refused for the share name, and by which source; "" means pass.
 // Order: allow list, operator bans, the relay's own (automatic) bans, suspended name, then the box's own choices (feeds, community list).
-// A name absent from the snapshot (a box that never set its protection) only has the first three.
+// A name absent from the snapshot (a box that never set its protection) only has the first four (allow list, operator bans, automatic bans, suspended).
 func (f *filter) decide(a netip.Addr, name string) (reason, source string) {
 	if f.allow.contains(a) {
 		return "", ""

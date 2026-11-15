@@ -58,12 +58,19 @@ func TestAutoBanCutsSharesNotRelay(t *testing.T) {
 	// Registered before the ban exists, so no failure path leaves it behind: the other tests share this address.
 	t.Cleanup(func() {
 		// Lifting sits inside the loop: a report still in flight can land a ban after the first lift.
-		// share refreshes its filter every 30 s.
-		eventually(t, "the visitor reaches the relay again", 120*time.Second, func() error {
+		// Done only when no ban row of the visitor is left (the relay host answers with or without one).
+		eventually(t, "no ban of the visitor is left", 120*time.Second, func() error {
 			if err := r.liftAutoBan(visitorIP); err != nil {
 				return err
 			}
-			return relayAnswers()
+			page, err := r.adminProtection()
+			if err != nil {
+				return err
+			}
+			if _, _, ok := banRow(page, visitorIP); ok {
+				return fmt.Errorf("ban of %s still listed", visitorIP)
+			}
+			return nil
 		})
 	})
 
@@ -104,8 +111,20 @@ func TestAutoBanCutsSharesNotRelay(t *testing.T) {
 		t.Fatalf("no ban_auto line for %s on /admin/journal", visitorIP)
 	}
 
-	// The filter with the ban is in force now (boxa is cut), and an automatic ban must leave the relay's own pages open.
-	time.Sleep(10 * time.Second)
+	// boxa may also be cut because its tunnel dropped: share's own journal must say the automatic ban did it,
+	// which proves the filter with the ban is loaded before the relay host is checked.
+	eventually(t, "share's cut by the automatic ban on /admin/journal", 30*time.Second, func() error {
+		fetch("app.boxa.box.relay.test", "/") // a fresh cut line, whatever the journal's rate limit kept
+		page, err := r.adminJournal(url.Values{"src": {"share"}, "q": {visitorIP}})
+		if err != nil {
+			return err
+		}
+		if !strings.Contains(page, "cut · manual · auto") {
+			return fmt.Errorf("no cut · manual · auto line for %s yet", visitorIP)
+		}
+		return nil
+	})
+	// An automatic ban must leave the relay's own pages open.
 	if err := relayAnswers(); err != nil {
 		t.Fatalf("the automatic ban closed the relay host: %v", err)
 	}
