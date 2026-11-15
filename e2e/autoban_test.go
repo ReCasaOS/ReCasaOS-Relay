@@ -45,19 +45,21 @@ func TestAutoBanClosesRelayAndShares(t *testing.T) {
 
 	// Registered before the ban exists, so no failure path leaves it behind: the other tests share this address.
 	t.Cleanup(func() {
-		if err := r.liftAutoBan(visitorIP + "/32"); err != nil {
-			t.Errorf("lifting the ban: %v", err)
-			return
-		}
+		// Lifting sits inside the loop: a report still in flight can land a ban after the first lift.
 		// share refreshes its filter every 30 s.
-		eventually(t, "the visitor reaches the relay again", 90*time.Second, relayAnswers)
+		eventually(t, "the visitor reaches the relay again", 120*time.Second, func() error {
+			if err := r.liftAutoBan(visitorIP); err != nil {
+				return err
+			}
+			return relayAnswers()
+		})
 	})
 
 	eventually(t, "the visitor reaches the relay before any ban", 30*time.Second, relayAnswers)
 
 	// More different names than AUTOBAN_NAMES (10); each try may be reported later than it is made, so keep trying.
 	n := 0
-	key := visitorIP + "/32"
+	key := visitorIP // an IPv4 ban is stored without /32
 	eventually(t, "the automatic ban on /admin/protection", 90*time.Second, func() error {
 		for i := 0; i < 12; i++ {
 			n++
@@ -67,7 +69,7 @@ func TestAutoBanClosesRelayAndShares(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if !strings.Contains(page, "<code>"+key+"</code>") {
+		if _, _, ok := banRow(page, key); !ok {
 			return fmt.Errorf("no ban of %s yet", key)
 		}
 		return nil
@@ -97,11 +99,11 @@ func (r *rig) liftAutoBan(key string) error {
 	if err != nil {
 		return err
 	}
-	m := regexp.MustCompile(`(?s)<code>` + regexp.QuoteMeta(key) + `</code>.*?/admin/protection/manual/(\d+)/delete"><input type="hidden" name="csrf" value="([0-9a-f]+)"`).FindStringSubmatch(page)
-	if m == nil {
-		return nil // never opened
+	id, csrf, ok := banRow(page, key)
+	if !ok {
+		return nil // no ban
 	}
-	req, _ := http.NewRequest("POST", r.frontURL+"/admin/protection/manual/"+m[1]+"/delete", strings.NewReader(url.Values{"csrf": {m[2]}}.Encode()))
+	req, _ := http.NewRequest("POST", r.frontURL+"/admin/protection/manual/"+id+"/delete", strings.NewReader(url.Values{"csrf": {csrf}}.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth("e2e", e2eAdminToken)
 	resp, err := (&http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(req)
@@ -113,4 +115,19 @@ func (r *rig) liftAutoBan(key string) error {
 		return fmt.Errorf("POST delete: %d %.200s", resp.StatusCode, body)
 	}
 	return nil
+}
+
+// banRow finds the Manual bans row of value (it holds both the value and its own delete form) and
+// returns the row id and the CSRF token of that form. Other tables print the same keys with /32.
+func banRow(page, value string) (id, csrf string, ok bool) {
+	re := regexp.MustCompile(`/admin/protection/manual/(\d+)/delete"><input type="hidden" name="csrf" value="([0-9a-f]+)"`)
+	for _, row := range strings.Split(page, "</tr>") {
+		if i := strings.LastIndex(row, "<tr>"); i >= 0 {
+			row = row[i:]
+		}
+		if m := re.FindStringSubmatch(row); m != nil && strings.Contains(row, "<code>"+value+"</code>") {
+			return m[1], m[2], true
+		}
+	}
+	return "", "", false
 }
