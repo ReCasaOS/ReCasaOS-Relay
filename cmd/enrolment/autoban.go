@@ -26,17 +26,30 @@ type autoBan struct {
 	compiler *protect.Compiler
 	journal  *journal.Writer // nil: no journal
 	now      func() time.Time
+	shareDom string // lower case: lines for a shared app are not the relay's own traffic
 }
 
 // Front takes one parsed front access line.
 func (a *autoBan) Front(e journal.Entry) {
 	key, ok := community.Key(e.IP)
-	if !ok {
+	if !ok || a.sharedHost(e.Host) {
 		return
 	}
 	if fault, detail := a.det.Front(key, e.Path, e.Status); fault != "" {
 		a.ban(context.Background(), key, fault, detail)
 	}
+}
+
+// sharedHost: share sends all of port 80 to front, so a plain-HTTP request to a shared app is a line too.
+func (a *autoBan) sharedHost(host string) bool {
+	if a.shareDom == "" {
+		return false
+	}
+	h := strings.ToLower(host)
+	if i := strings.LastIndexByte(h, ':'); i >= 0 && !strings.Contains(h[i:], "]") {
+		h = h[:i]
+	}
+	return h == a.shareDom || strings.HasSuffix(h, "."+a.shareDom)
 }
 
 // Unknown takes one try of a share name that has no tunnel; a held name is not a guess.
@@ -89,10 +102,14 @@ func (a *autoBan) ban(ctx context.Context, key, fault, detail string) {
 		Msg: fmt.Sprintf("%s · %s · %d h", fault, detail, int(b.Until.Sub(b.Since).Round(time.Hour)/time.Hour))})
 }
 
-// autoBanFromEnv reads AUTOBAN ("off" disables), AUTOBAN_404, AUTOBAN_NAMES and AUTOBAN_WINDOW.
+// autoBanFromEnv reads AUTOBAN ("on" or "off"), AUTOBAN_404, AUTOBAN_NAMES and AUTOBAN_WINDOW.
 func autoBanFromEnv() (cfg autoban.Config, on bool, err error) {
-	if os.Getenv("AUTOBAN") == "off" {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("AUTOBAN"))) {
+	case "", "on":
+	case "off":
 		return cfg, false, nil
+	default:
+		return cfg, false, errors.New("AUTOBAN: on or off")
 	}
 	if cfg.NotFound, err = envPositive("AUTOBAN_404", 20); err != nil {
 		return cfg, false, err

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -20,6 +21,16 @@ func TestAutoBanFromEnv(t *testing.T) {
 	set("off", "", "", "")
 	if _, on, err := autoBanFromEnv(); on || err != nil {
 		t.Errorf("off: %v %v", on, err)
+	}
+	for _, v := range []string{"on", " ON ", "Off"} {
+		set(v, "", "", "")
+		if _, on, err := autoBanFromEnv(); err != nil || on != (strings.TrimSpace(strings.ToLower(v)) == "on") {
+			t.Errorf("%q: %v %v", v, on, err)
+		}
+	}
+	set("maybe", "", "", "")
+	if _, _, err := autoBanFromEnv(); err == nil {
+		t.Error("maybe: want an error")
 	}
 	set("", "5", "3", "2m")
 	if cfg, on, err := autoBanFromEnv(); err != nil || !on || cfg.NotFound != 5 || cfg.Names != 3 || cfg.Window != 2*time.Minute {

@@ -478,3 +478,25 @@ func TestNameClaimed(t *testing.T) {
 		t.Fatalf("unclaimed: %v %v", ok, err)
 	}
 }
+
+func TestAddAutoBanIsCapped(t *testing.T) {
+	ctx := context.Background()
+	s := openTmp(t)
+	old := maxAutoBans
+	maxAutoBans = 2
+	t.Cleanup(func() { maxAutoBans = old })
+	for _, k := range []string{"203.0.113.1/32", "203.0.113.2/32"} {
+		if _, ok, err := s.AddAutoBan(ctx, k, "auto · x · y", pt0); err != nil || !ok {
+			t.Fatalf("%s: ok=%v err=%v", k, ok, err)
+		}
+	}
+	if _, ok, err := s.AddAutoBan(ctx, "203.0.113.3/32", "auto · x · y", pt0); err != nil || ok {
+		t.Fatalf("past the cap: ok=%v err=%v", ok, err)
+	}
+	if m, _ := s.ManualBans(ctx, pt0); len(m) != 2 {
+		t.Fatalf("rows = %+v", m)
+	}
+	if _, ok, err := s.AddAutoBan(ctx, "203.0.113.3/32", "auto · x · y", pt0.Add(25*time.Hour)); err != nil || !ok {
+		t.Fatalf("after the first two ended: ok=%v err=%v", ok, err)
+	}
+}

@@ -238,6 +238,9 @@ func (h *fleetsHandler) authenticate(w http.ResponseWriter, r *http.Request) (st
 		writeError(w, http.StatusUnauthorized, "unauthorized") // generic: says nothing about why
 		return store.Fleet{}, false
 	}
+	if h.deps.AutoBan != nil { // a box that only uses fleets lives here too
+		h.deps.AutoBan.Box(clientKey(r, h.cfg.TrustedProxyHeader, 64))
+	}
 	return f, true
 }
 

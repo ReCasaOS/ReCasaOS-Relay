@@ -151,3 +151,22 @@ func claimAll(t *testing.T, st store.Store, names []string) {
 		}
 	}
 }
+
+func TestAutoBanIgnoresSharedAppHosts(t *testing.T) {
+	e := newAutoBanEnv(t)
+	e.ab.shareDom = "box.example.org"
+	for _, h := range []string{"app.box.example.org", "APP.box.example.org:80", "box.example.org"} {
+		l := trap("203.0.113.7")
+		l.Path, l.Host = "/wp-admin", h
+		e.ab.Front(l)
+	}
+	if b := e.bans(t); len(b) != 0 {
+		t.Fatalf("bans %+v, want none for a shared app", b)
+	}
+	l := trap("203.0.113.7")
+	l.Path, l.Host = "/wp-admin", "relay.example.org"
+	e.ab.Front(l)
+	if b := e.bans(t); len(b) != 1 {
+		t.Fatalf("bans %+v, want the relay host's trap to ban", b)
+	}
+}

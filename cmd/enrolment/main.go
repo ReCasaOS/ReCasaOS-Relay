@@ -190,7 +190,7 @@ func run() error {
 	var autoBanDep server.AutoBan // never a nil *autoBan in the interface
 	prot := newProtection(st, storePath, cfg.ShareDomain != "", cfg.FilterMaxEntries, cfg.CommunityMinFleetAge, jw)
 	if abOn && cfg.ShareDomain != "" {
-		ab := &autoBan{det: autoban.New(abCfg, time.Now), store: st, compiler: prot.compiler, journal: jw, now: time.Now}
+		ab := &autoBan{det: autoban.New(abCfg, time.Now), store: st, compiler: prot.compiler, journal: jw, now: time.Now, shareDom: strings.ToLower(cfg.ShareDomain)}
 		abp.Store(ab)
 		log.Printf("autoban: on (404: %d, names: %d, window: %s)", abCfg.NotFound, abCfg.Names, abCfg.Window)
 		if lookupenv("LOG_DIR", "/data/logs") == "" || lookupenv("LOG_INGEST_ADDR", ":8083") == "" {

@@ -487,6 +487,9 @@ func (s *sqlStore) DeleteManual(ctx context.Context, id int64) (err error) {
 
 const autoNote = "auto · "
 
+// maxAutoBans bounds the active automatic rows: rotating addresses would otherwise grow share_manual without limit.
+var maxAutoBans = 5000
+
 func (s *sqlStore) AddAutoBan(ctx context.Context, key, note string, now time.Time) (b ManualBan, ok bool, err error) {
 	b = ManualBan{Kind: "range", Value: key, Note: note, Since: now}
 	if v, found := strings.CutSuffix(key, "/32"); found {
@@ -503,6 +506,9 @@ func (s *sqlStore) AddAutoBan(ctx context.Context, key, note string, now time.Ti
 	}()
 	var n int
 	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM share_manual WHERE kind = ? AND value = ? AND (until = 0 OR until > ?)`, b.Kind, b.Value, ts(now)).Scan(&n); err != nil || n > 0 {
+		return b, false, wrap("auto ban", err)
+	}
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM share_manual WHERE note LIKE ? AND (until = 0 OR until > ?)`, autoNote+"%", ts(now)).Scan(&n); err != nil || n >= maxAutoBans {
 		return b, false, wrap("auto ban", err)
 	}
 	d := 24 * time.Hour
