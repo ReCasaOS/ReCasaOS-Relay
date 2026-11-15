@@ -571,6 +571,9 @@ func TestViewLineAutoBanAndNoBox(t *testing.T) {
 	if nb.Class != "warn" || nb.Text != "no box behind this name" {
 		t.Errorf("nobox: %q %q", nb.Class, nb.Text)
 	}
+	if na := viewLine(journal.Entry{Src: "share", Act: "cut", Reason: "noapp"}); na.Class != "warn" || na.Text != "box name without an app" {
+		t.Errorf("noapp: %q %q", na.Class, na.Text)
+	}
 	if c := viewLine(journal.Entry{Src: "share", Act: "cut", Reason: "external"}).Class; c != "bad" {
 		t.Errorf("other cuts stay bad: %q", c)
 	}

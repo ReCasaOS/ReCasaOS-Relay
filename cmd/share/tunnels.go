@@ -83,7 +83,7 @@ func toTunnel(reg *tunnel.Registry, perBox *connCap, fh *filterHolder, ev *event
 	start := time.Now()
 	t, ok := reg.Get(box)
 	if !ok {
-		noBox(fh, ev, jw, host, box, c)
+		noBox(fh, ev, jw, host, box, "nobox", c)
 		return
 	}
 	// Country, network, feed and community bans only apply to share names: the relay host (enrolment,
@@ -151,10 +151,11 @@ func frontRefused(fh *filterHolder, ev *events, jw *journal.Writer, c net.Conn, 
 	return true
 }
 
-// noBox reports a try of a share name no box holds. The label and host are cut: they are the
+// noBox reports a try of a share name no box holds (reason "nobox"), or of a box's bare name, which
+// serves nothing (reason "noapp"). The label and host are cut: they are the
 // visitor's, and a long one would grow the queue and make enrolment refuse whole batches. An address
 // the filter already refuses for the front, or for every share name (automatic ban), reports nothing (each report costs enrolment a query).
-func noBox(fh *filterHolder, ev *events, jw *journal.Writer, host, name string, c net.Conn) {
+func noBox(fh *filterHolder, ev *events, jw *journal.Writer, host, name, reason string, c net.Conn) {
 	name, host = name[:min(len(name), 64)], host[:min(len(host), 64)]
 	if f := fh.get(); f != nil {
 		if a, ok := remoteAddr(c); ok {
@@ -168,7 +169,7 @@ func noBox(fh *filterHolder, ev *events, jw *journal.Writer, host, name string, 
 		return
 	}
 	key := cmp.Or(connKey(c), peerIP(c))
-	fh.cuts.log(jw, key, peerIP(c), host, "nobox", "", time.Now())
+	fh.cuts.log(jw, key, peerIP(c), host, reason, "", time.Now())
 }
 
 // peerIP is the visitor's plain address (not the /64 key); private ones too: it is the operator's own log.

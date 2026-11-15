@@ -16,7 +16,7 @@ func noBoxConn(t *testing.T) net.Conn {
 
 func TestNoBoxCutsLongLabel(t *testing.T) {
 	e := newEvents()
-	noBox(nil, e, nil, strings.Repeat("a", 300)+".box.relay.test", strings.Repeat("a", 300), noBoxConn(t))
+	noBox(nil, e, nil, strings.Repeat("a", 300)+".box.relay.test", strings.Repeat("a", 300), "nobox", noBoxConn(t))
 	if len(e.unkQ) != 1 || len(e.unkQ[0].Name) > 64 {
 		t.Fatalf("unknown = %+v, want one name of at most 64 bytes", e.unkQ)
 	}
@@ -27,19 +27,19 @@ func TestNoBoxSkipsABannedAddress(t *testing.T) {
 	s.Version = "v1"
 	s.Manual.Address = []string{"203.0.113.7/32"}
 	e := newEvents()
-	noBox(holderWith(snap(t, s)), e, nil, "x.box.relay.test", "x", noBoxConn(t))
+	noBox(holderWith(snap(t, s)), e, nil, "x.box.relay.test", "x", "nobox", noBoxConn(t))
 	if len(e.unkQ) != 0 {
 		t.Fatalf("unknown = %+v, want none for a banned address", e.unkQ)
 	}
 	var a snapshot // an automatic ban refuses every share name too: nothing to report either
 	a.Version = "v2"
 	a.Auto.Address = []string{"203.0.113.7/32"}
-	noBox(holderWith(snap(t, a)), e, nil, "x.box.relay.test", "x", noBoxConn(t))
+	noBox(holderWith(snap(t, a)), e, nil, "x.box.relay.test", "x", "nobox", noBoxConn(t))
 	if len(e.unkQ) != 0 {
 		t.Fatalf("unknown = %+v, want none for an automatically banned address", e.unkQ)
 	}
-	noBox(&filterHolder{}, e, nil, "x.box.relay.test", "x", noBoxConn(t)) // no filter yet: reported
-	noBox(nil, e, nil, "y.box.relay.test", "y", noBoxConn(t))             // nil holder: no panic
+	noBox(&filterHolder{}, e, nil, "x.box.relay.test", "x", "nobox", noBoxConn(t)) // no filter yet: reported
+	noBox(nil, e, nil, "y.box.relay.test", "y", "nobox", noBoxConn(t))             // nil holder: no panic
 	if len(e.unkQ) != 2 {
 		t.Fatalf("unknown = %+v, want 2", e.unkQ)
 	}
