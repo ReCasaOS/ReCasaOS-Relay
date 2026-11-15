@@ -151,9 +151,22 @@ func frontRefused(fh *filterHolder, ev *events, jw *journal.Writer, c net.Conn, 
 	return true
 }
 
-// noBox reports a try of a share name no box holds.
+// noBox reports a try of a share name no box holds. The label and host are cut: they are the
+// visitor's, and a long one would grow the queue and make enrolment refuse whole batches. An address
+// the filter already refuses for the front reports nothing (each report costs enrolment a query).
 func noBox(fh *filterHolder, ev *events, jw *journal.Writer, host, name string, c net.Conn) {
+	name, host = name[:min(len(name), 64)], host[:min(len(host), 64)]
+	if f := fh.get(); f != nil {
+		if a, ok := remoteAddr(c); ok {
+			if r, _ := f.decideFront(a); r != "" {
+				return
+			}
+		}
+	}
 	ev.unknown(connKey(c), name)
+	if fh == nil {
+		return
+	}
 	key := cmp.Or(connKey(c), peerIP(c))
 	fh.cuts.log(jw, key, peerIP(c), host, "nobox", "", time.Now())
 }

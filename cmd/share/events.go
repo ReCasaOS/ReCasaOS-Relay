@@ -215,17 +215,17 @@ func (e *events) putBack(rows []refItem) {
 	e.refOrder = order
 }
 
-// trim drops the oldest pending items past maxEvents (seen, unknown, boxes first: a refusal count cannot
+// trim drops the oldest pending items past maxEvents (unknown, seen, boxes first: a refusal count cannot
 // be rebuilt).
 func (e *events) trim() {
 	for over := len(e.seenQ) + len(e.unkQ) + len(e.boxQ) + len(e.refOrder) - maxEvents; over > 0; over-- {
 		switch { // never sent: a later sighting must be queued again
+		case len(e.unkQ) > 0: // the visitor chose these names: they go first
+			delete(e.unkAt, e.unkQ[0])
+			e.unkQ = e.unkQ[1:]
 		case len(e.seenQ) > 0:
 			delete(e.seenAt, e.seenQ[0])
 			e.seenQ = e.seenQ[1:]
-		case len(e.unkQ) > 0:
-			delete(e.unkAt, e.unkQ[0])
-			e.unkQ = e.unkQ[1:]
 		case len(e.boxQ) > 0:
 			delete(e.boxAt, e.boxQ[0])
 			e.boxQ = e.boxQ[1:]
