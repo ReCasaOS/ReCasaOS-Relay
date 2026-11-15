@@ -228,3 +228,31 @@ func TestJournalFilterCutsSummarised(t *testing.T) {
 		t.Errorf("lines = %+v", got)
 	}
 }
+
+func TestNameWithoutBoxIsReportedAndJournalled(t *testing.T) {
+	_, _, reg, _ := rig(t)
+	w, lines := testJournal(t)
+	e, fh := newEvents(), &filterHolder{}
+	for _, name := range []string{"app.nobody.box.relay.test", "a.b.c.box.relay.test"} { // no box; malformed
+		v, c := tcpPair(t)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			defer c.Close()
+			handleTLS(filterCfg("127.0.0.1:1"), reg, newConnCap(5, "t"), fh, e, w, fromAddr{c, testVisitor})
+		}()
+		v.Write(clientHello(name))
+		io.Copy(io.Discard, v)
+		v.Close()
+		<-done
+	}
+	p := flushed(t, e)
+	if len(p) != 1 || len(p[0].Unknown) != 2 || p[0].Unknown[0] != (unknownItem{"203.0.113.7/32", "nobody"}) ||
+		p[0].Unknown[1] != (unknownItem{"203.0.113.7/32", "a.b.c.box.relay.test"}) {
+		t.Fatalf("posts = %+v, want the box label, then the whole malformed name", p)
+	}
+	got := lines()
+	if len(got) != 1 || got[0].Act != "cut" || got[0].Reason != "nobox" || got[0].Source != "" || got[0].IP != "203.0.113.7" {
+		t.Fatalf("lines = %+v, want one nobox cut (the second is within the rate window)", got)
+	}
+}

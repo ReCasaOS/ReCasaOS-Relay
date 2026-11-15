@@ -313,3 +313,47 @@ func TestRefusalRowCapCountsDistinctRows(t *testing.T) {
 		t.Fatalf("posts = %+v, want a second address keyed", p)
 	}
 }
+
+func TestUnknownAndBoxesAreSentOncePerTenMinutes(t *testing.T) {
+	now := t0
+	e := clockedEvents(&now)
+	e.unknown("203.0.113.7/32", "ghost")
+	e.unknown("203.0.113.7/32", "ghost")
+	e.unknown("", "ghost")
+	e.unknown("203.0.113.7/32", "other") // another name: its own entry
+	e.box("198.51.100.4/32")
+	e.box("198.51.100.4/32")
+	e.box("")
+	p := flushed(t, e)
+	if len(p) != 1 || len(p[0].Unknown) != 2 || len(p[0].Boxes) != 1 || p[0].Unknown[0] != (unknownItem{"203.0.113.7/32", "ghost"}) {
+		t.Fatalf("posts = %+v, want 2 unknown and 1 box in one post", p)
+	}
+	now = now.Add(11 * time.Minute)
+	e.unknown("203.0.113.7/32", "ghost")
+	e.box("198.51.100.4/32")
+	if p := flushed(t, e); len(p) != 1 || len(p[0].Unknown) != 1 || len(p[0].Boxes) != 1 {
+		t.Fatalf("posts = %+v, want both again after 10 minutes", p)
+	}
+}
+
+func TestUnknownAndBoxesAreBounded(t *testing.T) {
+	e := newEvents()
+	for i := 0; i < maxEvents+5; i++ {
+		e.unknown("203.0.113.7/32", strconv.Itoa(i))
+		e.box("198.51.100." + strconv.Itoa(i) + "/32")
+	}
+	if n := len(e.unkQ) + len(e.boxQ); n > maxEvents {
+		t.Fatalf("%d pending items, want at most %d", n, maxEvents)
+	}
+}
+
+func TestClientEventKey(t *testing.T) {
+	for in, want := range map[string]string{
+		"203.0.113.7": "203.0.113.7/32", "2001:db8:1:2::/64": "2001:db8:1:2::/64",
+		"10.0.0.1": "", "unknown": "", "": "",
+	} {
+		if got := clientEventKey(in); got != want {
+			t.Errorf("clientEventKey(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

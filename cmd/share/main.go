@@ -86,6 +86,13 @@ func run() error {
 	}()
 	go every(ctx, 15*time.Second, newUsage(reg, cfg.EnrolmentURL).tick)
 	ev := newEvents()
+	go every(ctx, time.Minute, func(context.Context) { // the addresses boxes connect from are never banned
+		for _, n := range reg.Names() {
+			if t, ok := reg.Get(n); ok {
+				ev.box(clientEventKey(t.Client))
+			}
+		}
+	})
 	go every(ctx, 15*time.Second, func(ctx context.Context) { ev.flush(ctx, cfg.EnrolmentURL+"/internal/share/events") })
 	go func() {
 		<-ctx.Done()
@@ -193,6 +200,9 @@ func handleTLS(cfg Config, reg *tunnel.Registry, perBox *connCap, fh *filterHold
 		toFront(replay, cfg.FrontTLS, cfg.FrontProxyProtocol)
 	case box != "":
 		toTunnel(reg, perBox, fh, ev, jw, name, box, c, replay)
+	default: // malformed name under the share domain
+		lower := strings.ToLower(name)
+		noBox(fh, ev, jw, name, lower[:min(len(lower), 64)], c)
 	}
 }
 

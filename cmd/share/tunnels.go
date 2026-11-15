@@ -77,11 +77,13 @@ func resolver(enrolmentURL string) tunnel.Resolver {
 // toTunnel sends the visitor connection c (replay holds its peeked ClientHello) into box's tunnel,
 // unless fh's filter refuses c's address for that box, or c's address already holds perBox's max
 // streams of that box: one address alone must not fill the tunnel's tunnel.MaxStreams and lock every
-// other visitor out. A name no tunnel serves closes silently, before the filter: nothing is recorded.
+// other visitor out. A name no tunnel serves closes before the filter, with no refusal row: it is
+// reported as an unknown name (for automatic bans) and gets one rate-limited "nobox" journal line.
 func toTunnel(reg *tunnel.Registry, perBox *connCap, fh *filterHolder, ev *events, jw *journal.Writer, host, box string, c, replay net.Conn) {
 	start := time.Now()
 	t, ok := reg.Get(box)
 	if !ok {
+		noBox(fh, ev, jw, host, box, c)
 		return
 	}
 	// Only share names are filtered: the relay host (enrolment, Headscale, /admin) must stay
@@ -126,6 +128,13 @@ func toTunnel(reg *tunnel.Registry, perBox *connCap, fh *filterHolder, ev *event
 	vc := &idleConn{Conn: replay, t: idle}
 	sni.Forward(vc, stream) // the stream counts the bytes into t
 	jw.Write(journal.Entry{Src: "share", IP: peerIP(c), Host: host, Act: "close", Ms: time.Since(start).Milliseconds(), In: vc.in.Load(), Out: vc.out.Load()})
+}
+
+// noBox reports a try of a share name no box holds.
+func noBox(fh *filterHolder, ev *events, jw *journal.Writer, host, name string, c net.Conn) {
+	ev.unknown(connKey(c), name)
+	key := cmp.Or(connKey(c), peerIP(c))
+	fh.cuts.log(jw, key, peerIP(c), host, "nobox", "", time.Now())
 }
 
 // peerIP is the visitor's plain address (not the /64 key); private ones too: it is the operator's own log.

@@ -397,3 +397,11 @@ func TestBoxOpenedStreamsAreRefused(t *testing.T) {
 		}
 	}
 }
+
+func TestHandlerRecordsTheBoxAddress(t *testing.T) {
+	reg, f, url := newRelay(t)
+	dial(t, url, newBox(t, f, "alpha"), DialOptions{})
+	if tun := waitTunnel(t, reg, "alpha", nil); tun.Client != "127.0.0.1" {
+		t.Fatalf("Client = %q, want 127.0.0.1", tun.Client)
+	}
+}
