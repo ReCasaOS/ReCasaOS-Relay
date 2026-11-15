@@ -13,15 +13,17 @@ import (
 	"time"
 )
 
-// TestAutoBanClosesRelayAndShares: a visitor that tries many share names no box holds is banned by the
-// relay itself, and its new connections to the relay host are then closed without an answer.
+// TestAutoBanCutsSharesNotRelay: a visitor that tries many share names no box holds is banned by the
+// relay itself; shared apps are then closed to it, while the relay host keeps answering.
 // The trap path route is not run here: front sees tlsfront as the peer of every request (the visitor's
 // address stops at tlsfront), so only share's own sight of the visitor, the share names, reaches the ban.
 //
-//	go test -tags e2e ./e2e -run TestAutoBanClosesRelayAndShares -v -timeout 40m
-func TestAutoBanClosesRelayAndShares(t *testing.T) {
+//	go test -tags e2e ./e2e -run TestAutoBanCutsSharesNotRelay -v -timeout 40m
+func TestAutoBanCutsSharesNotRelay(t *testing.T) {
 	r := newRig(t)
 	r.up()
+	id, sec, node := r.boxNodeID("A")
+	r.startBox(id, sec, node, "boxa") // a shared app the ban must cut
 
 	vis := r.proj + "-visitor"
 	if out, err := sh("docker", "create", "--name", vis, "--label", "rre2e.project="+r.proj,
@@ -43,6 +45,16 @@ func TestAutoBanClosesRelayAndShares(t *testing.T) {
 		return nil
 	}
 
+	// boxCut is nil once share closes the visitor's connection to the app before sending a byte
+	// (curl's handshake fails with exit 35 and no inbound TLS record).
+	boxCut := func() error {
+		out, err := fetch("app.boxa.box.relay.test", "/")
+		if err == nil || !strings.Contains(err.Error(), "exit status 35") || strings.Contains(out, "(IN)") {
+			return fmt.Errorf("visitor -> boxa not cut: %v\n%.300s", err, out)
+		}
+		return nil
+	}
+
 	// Registered before the ban exists, so no failure path leaves it behind: the other tests share this address.
 	t.Cleanup(func() {
 		// Lifting sits inside the loop: a report still in flight can land a ban after the first lift.
@@ -56,6 +68,12 @@ func TestAutoBanClosesRelayAndShares(t *testing.T) {
 	})
 
 	eventually(t, "the visitor reaches the relay before any ban", 30*time.Second, relayAnswers)
+	eventually(t, "the visitor reaches boxa before any ban", 30*time.Second, func() error {
+		if out, err := fetch("app.boxa.box.relay.test", "/"); err != nil || !strings.Contains(out, "hello from boxa") {
+			return fmt.Errorf("visitor -> boxa: %v\n%.300s", err, out)
+		}
+		return nil
+	})
 
 	// More different names than AUTOBAN_NAMES (10); each try may be reported later than it is made, so keep trying.
 	n := 0
@@ -75,14 +93,8 @@ func TestAutoBanClosesRelayAndShares(t *testing.T) {
 		return nil
 	})
 
-	// share picks the ban up with its next snapshot poll (every 30 s): the relay host is then closed without a byte.
-	eventually(t, "the relay host closed to the visitor", 90*time.Second, func() error {
-		out, err := fetch("relay.test", "/v1/fleets/00000000000000000000000000000000")
-		if err == nil || !strings.Contains(err.Error(), "exit status 35") || strings.Contains(out, "(IN)") {
-			return fmt.Errorf("visitor -> relay.test not cut: %v\n%.300s", err, out)
-		}
-		return nil
-	})
+	// share picks the ban up with its next snapshot poll (every 30 s): the shared app is then closed.
+	eventually(t, "boxa closed to the visitor", 90*time.Second, boxCut)
 
 	page, err := r.adminJournal(url.Values{"src": {"relay"}, "q": {"ban_auto"}})
 	if err != nil {
@@ -90,6 +102,12 @@ func TestAutoBanClosesRelayAndShares(t *testing.T) {
 	}
 	if !strings.Contains(page, "ban_auto") || !strings.Contains(page, visitorIP) {
 		t.Fatalf("no ban_auto line for %s on /admin/journal", visitorIP)
+	}
+
+	// The filter with the ban is in force now (boxa is cut), and an automatic ban must leave the relay's own pages open.
+	time.Sleep(10 * time.Second)
+	if err := relayAnswers(); err != nil {
+		t.Fatalf("the automatic ban closed the relay host: %v", err)
 	}
 }
 
