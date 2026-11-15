@@ -148,9 +148,9 @@ func viewLine(e journal.Entry) journalLine {
 	case "log":
 		add(e.Svc)
 	}
-	noBox := e.Act == "cut" && e.Reason == "nobox"
+	noBox := e.Act == "cut" && (e.Reason == "nobox" || e.Reason == "noapp")
 	if noBox {
-		add("no box behind this name")
+		add(map[string]string{"nobox": "no box behind this name", "noapp": "box name without an app"}[e.Reason])
 	} else {
 		add(map[string]string{"pass": "passed", "cut": "cut", "close": "closed"}[e.Act], e.Reason, e.Source)
 	}

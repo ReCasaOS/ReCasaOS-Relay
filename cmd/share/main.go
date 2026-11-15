@@ -208,7 +208,13 @@ func handleTLS(cfg Config, reg *tunnel.Registry, perBox *connCap, fh *filterHold
 		toTunnel(reg, perBox, fh, ev, jw, name, box, c, replay)
 	default: // malformed name under the share domain
 		lower := strings.ToLower(name)
-		noBox(fh, ev, jw, name, lower[:min(len(lower), 64)], c)
+		// A box's bare name (<box>.<shareDomain>, what a crawler makes of a wildcard certificate) serves
+		// nothing, but it is not a guess when the box exists: report the label, which enrolment knows.
+		if b := strings.TrimSuffix(lower, "."+cfg.ShareDomain); b != "" && !strings.Contains(b, ".") {
+			noBox(fh, ev, jw, name, b, "noapp", c)
+			return
+		}
+		noBox(fh, ev, jw, name, lower[:min(len(lower), 64)], "nobox", c)
 	}
 }
 

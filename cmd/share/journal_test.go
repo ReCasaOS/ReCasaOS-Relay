@@ -233,7 +233,7 @@ func TestNameWithoutBoxIsReportedAndJournalled(t *testing.T) {
 	_, _, reg, _ := rig(t)
 	w, lines := testJournal(t)
 	e, fh := newEvents(), &filterHolder{}
-	for _, name := range []string{"app.nobody.box.relay.test", "a.b.c.box.relay.test"} { // no box; malformed
+	for _, name := range []string{"app.nobody.box.relay.test", "a.b.c.box.relay.test", "Lonely.box.relay.test"} { // no box; malformed; bare box name
 		v, c := tcpPair(t)
 		done := make(chan struct{})
 		go func() {
@@ -247,12 +247,14 @@ func TestNameWithoutBoxIsReportedAndJournalled(t *testing.T) {
 		<-done
 	}
 	p := flushed(t, e)
-	if len(p) != 1 || len(p[0].Unknown) != 2 || p[0].Unknown[0] != (unknownItem{"203.0.113.7/32", "nobody"}) ||
-		p[0].Unknown[1] != (unknownItem{"203.0.113.7/32", "a.b.c.box.relay.test"}) {
-		t.Fatalf("posts = %+v, want the box label, then the whole malformed name", p)
+	if len(p) != 1 || len(p[0].Unknown) != 3 || p[0].Unknown[0] != (unknownItem{"203.0.113.7/32", "nobody"}) ||
+		p[0].Unknown[1] != (unknownItem{"203.0.113.7/32", "a.b.c.box.relay.test"}) ||
+		p[0].Unknown[2] != (unknownItem{"203.0.113.7/32", "lonely"}) {
+		t.Fatalf("posts = %+v, want the box label, the whole malformed name, then the bare name's label", p)
 	}
 	got := lines()
-	if len(got) != 1 || got[0].Act != "cut" || got[0].Reason != "nobox" || got[0].Source != "" || got[0].IP != "203.0.113.7" {
-		t.Fatalf("lines = %+v, want one nobox cut (the second is within the rate window)", got)
+	if len(got) != 2 || got[0].Act != "cut" || got[0].Reason != "nobox" || got[0].Source != "" || got[0].IP != "203.0.113.7" ||
+		got[1].Reason != "noapp" || got[1].Host != "Lonely.box.relay.test" {
+		t.Fatalf("lines = %+v, want one nobox cut (the second is within the rate window), then one noapp cut", got)
 	}
 }
