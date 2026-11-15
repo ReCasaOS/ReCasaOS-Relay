@@ -140,3 +140,40 @@ func TestBounded(t *testing.T) {
 		t.Fatal("cap exceeded")
 	}
 }
+
+func TestFullSweptOncePerSecond(t *testing.T) {
+	old := maxKeys
+	maxKeys = 3
+	defer func() { maxKeys = old }()
+	d, c := newDet()
+	for _, k := range []string{"a", "b", "c"} {
+		d.Front(k, "/x", 404)
+		d.Unknown(k, "n")
+		d.Box(k)
+	}
+	before := d.sweeps
+	for i := 0; i < 100; i++ { // flood of new keys against a full, live table
+		d.Front(fmt.Sprint("x", i), "/x", 404)
+		d.Unknown(fmt.Sprint("x", i), "n")
+		d.Box(fmt.Sprint("x", i))
+	}
+	if n := d.sweeps - before; n > 3 {
+		t.Fatalf("%d sweeps for 3 maps within one second", n)
+	}
+	c.add(11 * time.Minute) // everything expired: slots free up at the next sweep
+	for _, k := range []string{"n1", "n2", "n3"} {
+		d.Front(k, "/x", 404)
+	}
+	if len(d.notFound) != 3 {
+		t.Fatalf("expired keys did not free slots: %d", len(d.notFound))
+	}
+	d.Unknown("n1", "z")
+	if _, ok := d.names["n1"]; !ok {
+		t.Fatal("names slot not freed")
+	}
+	c.add(25 * time.Hour)
+	d.Box("fresh")
+	if _, ok := d.exempt["fresh"]; !ok {
+		t.Fatal("exempt slot not freed")
+	}
+}

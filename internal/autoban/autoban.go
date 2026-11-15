@@ -44,6 +44,9 @@ type Detector struct {
 	notFound map[string][]time.Time          // key -> times of its recent 404s
 	names    map[string]map[string]time.Time // key -> unknown share name -> last try
 	exempt   map[string]time.Time            // key -> end of the box exemption
+	// last full sweep of each map and how many ran: a full counter must not be rescanned per request
+	lastSweep [3]time.Time
+	sweeps    int
 }
 
 // New returns a Detector.
@@ -69,11 +72,7 @@ func (d *Detector) Box(key string) {
 	defer d.mu.Unlock()
 	now := d.now()
 	if _, known := d.exempt[key]; !known && len(d.exempt) >= maxKeys {
-		for k, end := range d.exempt {
-			if !end.After(now) {
-				delete(d.exempt, k)
-			}
-		}
+		d.sweep(2, now)
 		if len(d.exempt) >= maxKeys {
 			return
 		}
@@ -105,7 +104,7 @@ func (d *Detector) Front(key, path string, status int) (fault, detail string) {
 	}
 	ev, known := d.notFound[key]
 	if !known && len(d.notFound) >= maxKeys {
-		d.sweep(now)
+		d.sweep(0, now)
 		if len(d.notFound) >= maxKeys {
 			return "", ""
 		}
@@ -136,7 +135,7 @@ func (d *Detector) Unknown(key, name string) (fault, detail string) {
 	seen, known := d.names[key]
 	if !known {
 		if len(d.names) >= maxKeys {
-			d.sweep(now)
+			d.sweep(1, now)
 			if len(d.names) >= maxKeys {
 				return "", ""
 			}
@@ -171,25 +170,40 @@ func (d *Detector) reset(key string) {
 	delete(d.names, key)
 }
 
-// sweep drops expired keys; callers do it only when a counter is full, so a flood of new keys
-// costs one pass per refused key at worst. shortcut: O(n) per call while full, add a throttle if it shows up in profiles.
-func (d *Detector) sweep(now time.Time) {
-	cut := now.Add(-d.cfg.Window)
-	for k, ev := range d.notFound {
-		if len(trim(ev, cut)) == 0 {
-			delete(d.notFound, k)
-		}
+// sweep drops the expired keys of map w (0 404s, 1 names, 2 exemptions), at most once a second per
+// map: under a flood of new keys a full map is refused without a scan, and frees up at the next sweep.
+func (d *Detector) sweep(w int, now time.Time) {
+	if now.Sub(d.lastSweep[w]) < time.Second {
+		return
 	}
-	for k, seen := range d.names {
-		live := false
-		for _, at := range seen {
-			if at.After(cut) {
-				live = true
-				break
+	d.lastSweep[w] = now
+	d.sweeps++
+	cut := now.Add(-d.cfg.Window)
+	switch w {
+	case 0:
+		for k, ev := range d.notFound {
+			if len(trim(ev, cut)) == 0 {
+				delete(d.notFound, k)
 			}
 		}
-		if !live {
-			delete(d.names, k)
+	case 1:
+		for k, seen := range d.names {
+			live := false
+			for _, at := range seen {
+				if at.After(cut) {
+					live = true
+					break
+				}
+			}
+			if !live {
+				delete(d.names, k)
+			}
+		}
+	default:
+		for k, end := range d.exempt {
+			if !end.After(now) {
+				delete(d.exempt, k)
+			}
 		}
 	}
 }
