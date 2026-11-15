@@ -22,6 +22,18 @@ import (
 //go:embed journal.html
 var journalHTML string
 
+// flagsWOFF2 is TwemojiCountryFlags.woff2 from the npm package country-flag-emoji-polyfill 0.1.10:
+// the flag glyphs of Twemoji (CC-BY 4.0), for browsers on Windows, which has none.
+//
+//go:embed flags.woff2
+var flagsWOFF2 []byte
+
+func flagFont(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "font/woff2")
+	w.Header().Set("Cache-Control", "private, max-age=604800") // guard's no-store is for pages; the font never changes within a version
+	w.Write(flagsWOFF2)
+}
+
 // journalPage shares page.html's "css" block.
 var journalPage = template.Must(template.Must(page.Clone()).New("journal").Parse(journalHTML))
 

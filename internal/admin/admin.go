@@ -149,6 +149,7 @@ func New(cfg Config, deps Deps) (http.Handler, error) {
 	mux.HandleFunc("GET /admin/protection", h.protection)
 	mux.HandleFunc("GET /admin/journal", h.journal)
 	mux.HandleFunc("GET /admin/journal/stream", h.journalStream)
+	mux.HandleFunc("GET /admin/flags.woff2", flagFont)
 	mux.HandleFunc("POST /admin/protection/feeds", h.addFeed)
 	mux.HandleFunc("POST /admin/protection/feeds/presets/{key}", h.addPreset)
 	mux.HandleFunc("POST /admin/protection/feeds/{id}", h.editFeed)
@@ -169,7 +170,7 @@ func New(cfg Config, deps Deps) (http.Handler, error) {
 func (h *handler) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'")
 		ip := h.client(r)
 		// Checked before the token, so a correct guess past the limit is not revealed.
 		if h.limiter.Blocked(ip) {

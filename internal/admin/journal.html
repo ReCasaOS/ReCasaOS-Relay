@@ -18,7 +18,9 @@
 .ln { display:grid; grid-template-columns:8.5rem 3.5rem 9.5rem minmax(10rem,18rem) 1fr; gap:0 .75rem; padding:.2rem 1rem; border-left:3px solid transparent; }
 .ln + .ln { border-top:1px solid var(--line); }
 .ln > * { min-width:0; overflow-wrap:anywhere; }
-.ln .fl { cursor:default; }
+/* Windows has no flag emoji: this subset of Twemoji draws them, and only them (unicode-range). */
+@font-face { font-family:"Twemoji Country Flags"; src:url("/admin/flags.woff2") format("woff2"); font-display:swap; unicode-range:U+1F1E6-1F1FF; }
+.ln .fl { cursor:default; font-family:"Twemoji Country Flags",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
 .ln .tm { color:var(--mut); white-space:nowrap; }
 .ln .src { font-weight:600; } .src.share { color:var(--s1); } .src.front { color:var(--s2); } .src.relay { color:var(--s3); } .src.log { color:var(--mut); }
 .ln.ok { border-left-color:var(--ok); } .ln.bad { border-left-color:var(--bad); background:var(--badbg); } .ln.warn { border-left-color:var(--warn); }
@@ -57,7 +59,7 @@ button.q:hover { background:none; color:var(--accent); text-decoration:underline
 <div class="more" id="more">{{with .Older}}<a id="older" href="{{.}}">Older</a>{{end}}{{if .SearchOn}}<span class="mut xs">{{if .Empty}}The search stopped before finding anything: narrow the period or the filters.{{else}}The search stopped at its limit ({{.Budget}} per page) before the start of the period.{{end}}</span> <a href="{{.SearchOn}}">Search on</a>{{end}}</div>
 {{end}}
 </section>
-{{if .Geo}}<p class="mut xs pad"><a href="https://db-ip.com">IP Geolocation by DB-IP</a></p>{{end}}
+{{if .Geo}}<p class="mut xs pad"><a href="https://db-ip.com">IP Geolocation by DB-IP</a> · flags by <a href="https://github.com/jdecked/twemoji">Twemoji</a> (CC-BY 4.0)</p>{{end}}
 {{if .Version}}<footer class="mut xs foot">relay {{.Version}}</footer>{{end}}
 <script>
 (function () {

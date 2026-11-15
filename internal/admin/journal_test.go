@@ -544,10 +544,20 @@ func TestJournalShowsCountryFlag(t *testing.T) {
 	if n := strings.Count(body, `class="fl"`); n != 3 { // the two 203.0.113.x visitor lines and the ban_open one
 		t.Errorf("%d flags, want 3 (addresses outside the file get none)", n)
 	}
-	if !strings.Contains(body, "IP Geolocation by DB-IP") {
-		t.Error("no DB-IP credit")
+	if !strings.Contains(body, "IP Geolocation by DB-IP") || !strings.Contains(body, "Twemoji") {
+		t.Error("no DB-IP or Twemoji credit")
 	}
 	if line := viewLine(journal.Entry{IP: "203.0.113.7"}); line.Flag != "" {
 		t.Error("viewLine alone must not look anything up")
+	}
+}
+
+func TestFlagFontServed(t *testing.T) {
+	w := setup(t).withDeps(t, func(d *Deps) {}).do("GET", "/admin/flags.woff2", token, nil)
+	if w.Code != 200 || w.Header().Get("Content-Type") != "font/woff2" || !strings.HasPrefix(w.Body.String(), "wOF2") {
+		t.Errorf("font: %d %q", w.Code, w.Header().Get("Content-Type"))
+	}
+	if !strings.Contains(w.Header().Get("Content-Security-Policy"), "font-src 'self'") {
+		t.Error("the CSP blocks the font")
 	}
 }
