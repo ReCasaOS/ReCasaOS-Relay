@@ -102,7 +102,7 @@ func (a *autoBan) ban(ctx context.Context, key, fault, detail string) {
 		Msg: fmt.Sprintf("%s · %s · %d h", fault, detail, int(b.Until.Sub(b.Since).Round(time.Hour)/time.Hour))})
 }
 
-// autoBanFromEnv reads AUTOBAN ("on" or "off"), AUTOBAN_404, AUTOBAN_NAMES and AUTOBAN_WINDOW.
+// autoBanFromEnv reads AUTOBAN ("on" or "off"), AUTOBAN_404, AUTOBAN_NAMES, AUTOBAN_TRAPS and AUTOBAN_WINDOW.
 func autoBanFromEnv() (cfg autoban.Config, on bool, err error) {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("AUTOBAN"))) {
 	case "", "on":
@@ -115,6 +115,9 @@ func autoBanFromEnv() (cfg autoban.Config, on bool, err error) {
 		return cfg, false, err
 	}
 	if cfg.Names, err = envPositive("AUTOBAN_NAMES", 10); err != nil {
+		return cfg, false, err
+	}
+	if cfg.Traps, err = envPositive("AUTOBAN_TRAPS", 3); err != nil {
 		return cfg, false, err
 	}
 	cfg.Window = 10 * time.Minute

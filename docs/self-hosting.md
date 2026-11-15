@@ -476,6 +476,7 @@ In `.env`, next to the ones of section 4:
 | `AUTOBAN` | on | `enrolment` | `on` or `off`: `off` disables automatic bans (section 14, "Protection of shared apps") |
 | `AUTOBAN_404` | `20` | `enrolment` | 404 answers within the window that ban an address |
 | `AUTOBAN_NAMES` | `10` | `enrolment` | different share names no box holds, within the window, that ban an address |
+| `AUTOBAN_TRAPS` | `3` | `enrolment` | trap-path requests within one hour (fixed window) that ban an address |
 | `AUTOBAN_WINDOW` | `10m` | `enrolment` | the window of both counters (a Go duration) |
 
 The rows from `PEEK_TIMEOUT` on are the processes' own defaults (`compose.yaml` passes `LISTEN_TLS`, `LISTEN_HTTP`, `LISTEN_TUNNEL`, `FRONT_TLS`, `FRONT_HTTP`, `ENROLMENT_URL`, `PEEK_TIMEOUT`, `FRONT_PROXY_PROTOCOL`, `TUNNEL_RATE_PER_HOUR`, `CONNS_PER_IP` and `CONNS_PER_IP_PER_BOX` to `share`; neither cap counts loopback, private or link-local sources, which is what Docker's userland proxy and boxes on the relay's own LAN arrive from, and `SHARE_PSL_TXT`, `PROTECT_RATE_PER_HOUR`, `FILTER_MAX_ENTRIES`, `COMMUNITY_MIN_FLEET_AGE`, `CONNS_PER_IP` and `CONNS_PER_IP_PER_BOX` to `enrolment`, as shown there); none needs changing except `SHARE_PSL_TXT` once you have a PSL request.

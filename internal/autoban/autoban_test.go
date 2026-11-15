@@ -16,6 +16,14 @@ func newDet() (*Detector, *clock) {
 	return New(Config{}, c.now), c
 }
 
+// hit3 sends three requests for path and returns the last answer: a trap needs three within the hour.
+func hit3(d *Detector, key, path string, status int) (fault, detail string) {
+	for i := 0; i < 3; i++ {
+		fault, detail = d.Front(key, path, status)
+	}
+	return
+}
+
 func TestTrap(t *testing.T) {
 	cases := map[string]string{
 		"/.env": "trap", "/.ENV": "trap", "/.git/config": "trap", "/wp-admin/x": "trap", "/actuator?x": "trap",
@@ -23,13 +31,58 @@ func TestTrap(t *testing.T) {
 	}
 	for path, want := range cases {
 		d, _ := newDet()
-		if got, _ := d.Front("1.1.1.1", path, 200); got != want {
+		if got, _ := hit3(d, "1.1.1.1", path, 200); got != want {
 			t.Errorf("%s: got %q want %q", path, got, want)
 		}
 	}
 	d, _ := newDet()
-	if f, detail := d.Front("k", "/.GIT/x", 200); f != "trap" || detail != "/.git/" {
+	if f, detail := hit3(d, "k", "/.GIT/x", 200); f != "trap" || detail != "/.git/" {
 		t.Errorf("detail = %q %q", f, detail)
+	}
+}
+
+func TestTrapNeedsThreeInAnHour(t *testing.T) {
+	d, c := newDet()
+	for i, p := range []string{"/.env", "/wp-login.php"} {
+		if f, _ := d.Front("k", p, 200); f != "" {
+			t.Fatalf("hit %d banned", i+1)
+		}
+	}
+	// different trap paths count together; the detail is the entry of the last hit
+	if f, detail := d.Front("k", "/.aws/credentials", 200); f != "trap" || detail != "/.aws/" {
+		t.Fatalf("3rd: %q %q", f, detail)
+	}
+	if f, _ := d.Front("k", "/.env", 200); f != "" {
+		t.Fatal("counters not reset")
+	}
+
+	d, c = newDet()
+	for i := 0; i < 3; i++ { // 3 hits over 2 h: never 3 within the hour
+		if f, _ := d.Front("k", "/.env", 200); f != "" {
+			t.Fatalf("spread hit %d banned", i+1)
+		}
+		c.add(time.Hour)
+	}
+	// two hits then a third just inside the hour of the second
+	d, c = newDet()
+	d.Front("k", "/.env", 200)
+	c.add(40 * time.Minute)
+	d.Front("k", "/.env", 200)
+	c.add(40 * time.Minute)
+	if f, _ := d.Front("k", "/.env", 200); f != "" {
+		t.Fatal("first hit is 80 min old and must not count")
+	}
+}
+
+func TestTrapIsNotAlsoA404(t *testing.T) {
+	d, _ := newDet()
+	for i := 0; i < 2; i++ {
+		d.Front("k", "/.env", 404)
+	}
+	for i := 0; i < 18; i++ { // 2 trap 404s + 18 plain = 20 only if the traps counted
+		if f, _ := d.Front("k", "/a", 404); f != "" {
+			t.Fatalf("trap 404s counted toward the burst (fault %q at %d)", f, i)
+		}
 	}
 }
 
@@ -100,8 +153,10 @@ func TestNames(t *testing.T) {
 func TestBoxExempt(t *testing.T) {
 	d, c := newDet()
 	d.Box("k")
-	if f, _ := d.Front("k", "/.env", 404); f != "" {
-		t.Fatal("trap banned an exempt box")
+	for i := 0; i < 5; i++ {
+		if f, _ := d.Front("k", "/.env", 404); f != "" {
+			t.Fatal("trap banned an exempt box")
+		}
 	}
 	for i := 0; i < 30; i++ {
 		if f, _ := d.Front("k", "/a", 404); f != "" {
@@ -112,7 +167,7 @@ func TestBoxExempt(t *testing.T) {
 		}
 	}
 	c.add(25 * time.Hour)
-	if f, _ := d.Front("k", "/.env", 404); f != "trap" {
+	if f, _ := hit3(d, "k", "/.env", 404); f != "trap" {
 		t.Fatal("exemption did not expire")
 	}
 }
@@ -125,6 +180,7 @@ func TestBounded(t *testing.T) {
 	d.Box("") // ignored
 	for _, k := range []string{"a", "b"} {
 		d.Front(k, "/x", 404)
+		d.Front(k, "/.env", 404)
 		d.Unknown(k, "n")
 		d.Box(k + "box")
 	}
@@ -132,11 +188,14 @@ func TestBounded(t *testing.T) {
 		if f, _ := d.Front("c", "/x", 404); f != "" {
 			t.Fatal("untracked key banned")
 		}
+		if f, _ := d.Front("c", "/.env", 404); f != "" {
+			t.Fatal("untracked key banned")
+		}
 		if f, _ := d.Unknown("c", fmt.Sprint(i)); f != "" {
 			t.Fatal("untracked key banned")
 		}
 	}
-	if len(d.notFound) > 2 || len(d.names) > 2 || len(d.exempt) > 2 {
+	if len(d.notFound) > 2 || len(d.traps) > 2 || len(d.names) > 2 || len(d.exempt) > 2 {
 		t.Fatal("cap exceeded")
 	}
 }

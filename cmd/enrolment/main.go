@@ -192,7 +192,7 @@ func run() error {
 	if abOn && cfg.ShareDomain != "" {
 		ab := &autoBan{det: autoban.New(abCfg, time.Now), store: st, compiler: prot.compiler, journal: jw, now: time.Now, shareDom: strings.ToLower(cfg.ShareDomain)}
 		abp.Store(ab)
-		log.Printf("autoban: on (404: %d, names: %d, window: %s)", abCfg.NotFound, abCfg.Names, abCfg.Window)
+		log.Printf("autoban: on (404: %d, names: %d, traps: %d, window: %s)", abCfg.NotFound, abCfg.Names, abCfg.Traps, abCfg.Window)
 		if lookupenv("LOG_DIR", "/data/logs") == "" || lookupenv("LOG_INGEST_ADDR", ":8083") == "" {
 			log.Printf("autoban: no front log ingest, only unknown share names are watched")
 		}

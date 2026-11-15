@@ -100,6 +100,7 @@ Fleet creation is limited per client IP (per /64 for IPv6, and in addition per /
 | `AUTOBAN` | on | `on` or `off`; `off` disables the relay's automatic bans of addresses that probe trap paths, pile up 404s or guess share names. See `docs/self-hosting.md`, "Protection of shared apps" |
 | `AUTOBAN_404` | `20` | 404 answers within the window that ban an address |
 | `AUTOBAN_NAMES` | `10` | different share names no box holds, within the window, that ban an address |
+| `AUTOBAN_TRAPS` | `3` | trap-path requests within one hour that ban an address |
 | `AUTOBAN_WINDOW` | `10m` | the window of both counters (a Go duration) |
 | `CONNS_PER_IP`, `CONNS_PER_IP_PER_BOX` | `256`, `64` | the connection caps `share` enforces (below), read here only to show them on `/admin`: give both processes the same values (`compose.yaml` does) |
 | `LOG_DIR` | `/data/logs` | folder of the journal (`enrolment-*.jsonl`, and `front-*.jsonl` taken on `LOG_INGEST_ADDR`), one file per UTC day; set empty: no journal. `compose.yaml` passes `ENROLMENT_LOG_DIR` here, as an on/off switch. See `docs/self-hosting.md`, "Logs" |

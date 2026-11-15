@@ -107,6 +107,7 @@ services:
       AUTOBAN: ${AUTOBAN:-}
       AUTOBAN_404: ${AUTOBAN_404:-}
       AUTOBAN_NAMES: ${AUTOBAN_NAMES:-}
+      AUTOBAN_TRAPS: ${AUTOBAN_TRAPS:-}
       AUTOBAN_WINDOW: ${AUTOBAN_WINDOW:-}
       # The caps `share` enforces, read here only to show them on /admin: keep them equal to share's below.
       CONNS_PER_IP: ${CONNS_PER_IP:-256}

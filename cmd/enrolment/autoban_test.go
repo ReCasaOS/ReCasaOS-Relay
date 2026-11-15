@@ -55,8 +55,19 @@ func trap(ip string) journal.Entry {
 	return journal.Entry{IP: ip, Path: "/.env", Status: 404}
 }
 
+// traps sends n trap requests from ip.
+func traps(e abEnv, ip string, n int) {
+	for i := 0; i < n; i++ {
+		e.ab.Front(trap(ip))
+	}
+}
+
 func TestAutoBanTrapBansAndJournals(t *testing.T) {
 	e := newAutoBanEnv(t)
+	traps(e, "203.0.113.7", 2)
+	if len(e.bans(t)) != 0 {
+		t.Fatal("banned before the third trap request")
+	}
 	e.ab.Front(trap("203.0.113.7"))
 	b := e.bans(t)
 	if len(b) != 1 || b[0].Value != "203.0.113.7" || b[0].Note != "auto · trap · /.env" {
@@ -73,9 +84,9 @@ func TestAutoBanSkipsAllowedAndPrivate(t *testing.T) {
 	if _, err := e.st.AddAllow(context.Background(), store.AllowEntry{Prefix: "203.0.113.0/24", Added: e.t0}); err != nil {
 		t.Fatal(err)
 	}
-	e.ab.Front(trap("203.0.113.7"))
-	e.ab.Front(trap("192.168.1.5"))
-	e.ab.Front(trap(""))
+	traps(e, "203.0.113.7", 3)
+	traps(e, "192.168.1.5", 3)
+	traps(e, "", 3)
 	if b := e.bans(t); len(b) != 0 {
 		t.Fatalf("bans %+v", b)
 	}
@@ -86,8 +97,7 @@ func TestAutoBanSkipsAllowedAndPrivate(t *testing.T) {
 
 func TestAutoBanSecondTrapWritesNoSecondLine(t *testing.T) {
 	e := newAutoBanEnv(t)
-	e.ab.Front(trap("203.0.113.7"))
-	e.ab.Front(trap("203.0.113.7"))
+	traps(e, "203.0.113.7", 6) // the fault reset the counter: 3 more would ban again, the store says no
 	if len(e.bans(t)) != 1 || len(e.read()) != 1 {
 		t.Fatal("a second ban or journal line was written")
 	}
@@ -96,7 +106,7 @@ func TestAutoBanSecondTrapWritesNoSecondLine(t *testing.T) {
 func TestAutoBanBoxExemptsTrap(t *testing.T) {
 	e := newAutoBanEnv(t)
 	e.ab.Box("203.0.113.7")
-	e.ab.Front(trap("203.0.113.7"))
+	traps(e, "203.0.113.7", 5)
 	if len(e.bans(t)) != 0 {
 		t.Fatal("a box address was banned")
 	}
@@ -156,16 +166,20 @@ func TestAutoBanIgnoresSharedAppHosts(t *testing.T) {
 	e := newAutoBanEnv(t)
 	e.ab.shareDom = "box.example.org"
 	for _, h := range []string{"app.box.example.org", "APP.box.example.org:80", "box.example.org"} {
-		l := trap("203.0.113.7")
-		l.Path, l.Host = "/wp-admin", h
-		e.ab.Front(l)
+		for i := 0; i < 3; i++ {
+			l := trap("203.0.113.7")
+			l.Path, l.Host = "/wp-admin", h
+			e.ab.Front(l)
+		}
 	}
 	if b := e.bans(t); len(b) != 0 {
 		t.Fatalf("bans %+v, want none for a shared app", b)
 	}
-	l := trap("203.0.113.7")
-	l.Path, l.Host = "/wp-admin", "relay.example.org"
-	e.ab.Front(l)
+	for i := 0; i < 3; i++ {
+		l := trap("203.0.113.7")
+		l.Path, l.Host = "/wp-admin", "relay.example.org"
+		e.ab.Front(l)
+	}
 	if b := e.bans(t); len(b) != 1 {
 		t.Fatalf("bans %+v, want the relay host's trap to ban", b)
 	}
