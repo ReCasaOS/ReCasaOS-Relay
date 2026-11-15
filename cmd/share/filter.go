@@ -242,6 +242,19 @@ func (f *filter) decide(a netip.Addr, name string) (reason, source string) {
 	return "", ""
 }
 
+// decideFront says why the visitor at a may not reach the relay's own pages: only the allow list and
+// the operator's address and range bans count. "" means pass.
+func (f *filter) decideFront(a netip.Addr) (reason, source string) {
+	switch {
+	case f.allow.contains(a):
+	case f.mAddress.contains(a):
+		return "manual", "address"
+	case f.mRange.contains(a):
+		return "manual", "range"
+	}
+	return "", ""
+}
+
 // remoteAddr is the TCP peer of c, IPv4-mapped addresses as IPv4. Anything else is not filtered.
 func remoteAddr(c net.Conn) (netip.Addr, bool) {
 	t, ok := c.RemoteAddr().(*net.TCPAddr)

@@ -123,7 +123,11 @@ func run() error {
 	}()
 	go func() {
 		defer acceptors.Done()
-		accept(lh, &inflight, perIP, ev, jw, func(c net.Conn) { toFront(c, cfg.FrontHTTP, cfg.FrontProxyProtocol) })
+		accept(lh, &inflight, perIP, ev, jw, func(c net.Conn) {
+			if !frontRefused(fh, ev, jw, c, "") {
+				toFront(c, cfg.FrontHTTP, cfg.FrontProxyProtocol)
+			}
+		})
 	}()
 	acceptors.Wait()
 
@@ -197,7 +201,9 @@ func handleTLS(cfg Config, reg *tunnel.Registry, perBox *connCap, fh *filterHold
 	box, front := route(name, cfg.RelayHost, cfg.ShareDomain)
 	switch {
 	case front: // non-TLS bytes (err == ErrNotTLS) go to front as well
-		toFront(replay, cfg.FrontTLS, cfg.FrontProxyProtocol)
+		if !frontRefused(fh, ev, jw, c, name) {
+			toFront(replay, cfg.FrontTLS, cfg.FrontProxyProtocol)
+		}
 	case box != "":
 		toTunnel(reg, perBox, fh, ev, jw, name, box, c, replay)
 	default: // malformed name under the share domain

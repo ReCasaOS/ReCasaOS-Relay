@@ -86,8 +86,9 @@ func toTunnel(reg *tunnel.Registry, perBox *connCap, fh *filterHolder, ev *event
 		noBox(fh, ev, jw, host, box, c)
 		return
 	}
-	// Only share names are filtered: the relay host (enrolment, Headscale, /admin) must stay
-	// reachable from any country. A refused visitor gets a plain close.
+	// Country, network, feed and community bans only apply to share names: the relay host (enrolment,
+	// Headscale, /admin) must stay reachable from any country. Address and range bans also close it
+	// (frontRefused). A refused visitor gets a plain close.
 	if f := fh.get(); f != nil {
 		if a, ok := remoteAddr(c); ok {
 			if reason, source := f.decide(a, box); reason != "" {
@@ -128,6 +129,26 @@ func toTunnel(reg *tunnel.Registry, perBox *connCap, fh *filterHolder, ev *event
 	vc := &idleConn{Conn: replay, t: idle}
 	sni.Forward(vc, stream) // the stream counts the bytes into t
 	jw.Write(journal.Entry{Src: "share", IP: peerIP(c), Host: host, Act: "close", Ms: time.Since(start).Milliseconds(), In: vc.in.Load(), Out: vc.out.Load()})
+}
+
+// frontRefused closes nothing itself: it records and reports true when an operator address or range
+// ban covers c, which must then not reach the relay's own pages. No filter yet, or no readable peer: pass.
+func frontRefused(fh *filterHolder, ev *events, jw *journal.Writer, c net.Conn, host string) bool {
+	f := fh.get()
+	if f == nil {
+		return false
+	}
+	a, ok := remoteAddr(c)
+	if !ok {
+		return false
+	}
+	reason, source := f.decideFront(a)
+	if reason == "" {
+		return false
+	}
+	ev.refused("", eventKey(a), reason, source)
+	fh.cuts.log(jw, cmp.Or(eventKey(a), a.String()), a.String(), host, reason, source, time.Now())
+	return true
 }
 
 // noBox reports a try of a share name no box holds.
