@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ReCasaOS/recasaos-relay/internal/autoban"
 	"github.com/ReCasaOS/recasaos-relay/internal/feeds"
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/journal/journaltest"
@@ -507,5 +509,66 @@ func TestJournalFeedAdminHasNoKey(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("feed_admin lines: %d", n)
+	}
+}
+
+type fakeAutoBan struct {
+	cfg autoban.Config
+	err error
+}
+
+func (f *fakeAutoBan) Thresholds() autoban.Config { return f.cfg }
+func (f *fakeAutoBan) SetThresholds(c autoban.Config) error {
+	if f.err == nil {
+		f.cfg = c
+	}
+	return f.err
+}
+
+func TestAutoBanThresholds(t *testing.T) {
+	off := setup(t)
+	if strings.Contains(off.do("GET", "/admin/protection", token, nil).Body.String(), `id="autoban"`) {
+		t.Error("the section shows with automatic bans off")
+	}
+	if w := off.do("POST", "/admin/protection/autoban", token, form(off, "traps", "3", "notfound", "20", "names", "10", "minutes", "10")); w.Code != 404 {
+		t.Errorf("off: %d, want 404", w.Code)
+	}
+	ab := &fakeAutoBan{cfg: autoban.Config{Traps: 3, NotFound: 20, Names: 10, Window: 10 * time.Minute}}
+	h, err := New(Config{Token: token, NodesPerFleet: 50, MaxFleets: 1000}, Deps{Store: off.st, Headscale: off.hs, Now: func() time.Time { return t0 },
+		Remover: &fleets.Remover{Store: off.st, Headscale: off.hs, Locks: &fleets.Locks{}}, AutoBan: ab})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := env{h, off.hs, off.st}
+	if body := e.do("GET", "/admin/protection", token, nil).Body.String(); !strings.Contains(body, `name="notfound" type="number" min="2" max="100000" value="20"`) {
+		t.Error("the form does not show the thresholds in force")
+	}
+	for _, bad := range [][]string{
+		{"traps", "0", "notfound", "20", "names", "10", "minutes", "10"},
+		{"traps", "3", "notfound", "1", "names", "10", "minutes", "10"},
+		{"traps", "3", "notfound", "20", "names", "x", "minutes", "10"},
+		{"traps", "3", "notfound", "20", "names", "10", "minutes", "1441"},
+		{"traps", "3", "notfound", "20", "names", "10"},
+	} {
+		if w := e.do("POST", "/admin/protection/autoban", token, form(e, bad...)); w.Code != 400 {
+			t.Errorf("%v: %d, want 400", bad, w.Code)
+		}
+	}
+	if ab.cfg.Traps != 3 {
+		t.Fatalf("a refused form changed the thresholds: %+v", ab.cfg)
+	}
+	w := e.do("POST", "/admin/protection/autoban", token, form(e, "traps", "5", "notfound", "30", "names", "12", "minutes", "15"))
+	if w.Code != 303 || w.Header().Get("Location") != "/admin/protection#autoban" {
+		t.Fatalf("save: %d %q", w.Code, w.Header().Get("Location"))
+	}
+	if want := (autoban.Config{Traps: 5, NotFound: 30, Names: 12, Window: 15 * time.Minute}); ab.cfg != want {
+		t.Errorf("thresholds = %+v, want %+v", ab.cfg, want)
+	}
+	ab.err = errors.New("disk full")
+	if w := e.do("POST", "/admin/protection/autoban", token, form(e, "traps", "5", "notfound", "30", "names", "12", "minutes", "15")); w.Code != 500 {
+		t.Errorf("save error: %d, want 500", w.Code)
+	}
+	if w := e.do("POST", "/admin/protection/autoban", token, url.Values{"traps": {"5"}}); w.Code != 403 {
+		t.Errorf("no csrf: %d, want 403", w.Code)
 	}
 }

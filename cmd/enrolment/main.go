@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -188,15 +189,20 @@ func run() error {
 	// only then, and without them nothing would use the feeds or DB-IP. Its retention runs either
 	// way (nil pointers below: the handlers and the page treat them as absent).
 	var autoBanDep server.AutoBan // never a nil *autoBan in the interface
+	var adminAutoBan admin.AutoBan
 	prot := newProtection(st, storePath, cfg.ShareDomain != "", cfg.FilterMaxEntries, cfg.CommunityMinFleetAge, jw)
 	if abOn && cfg.ShareDomain != "" {
-		ab := &autoBan{det: autoban.New(abCfg, time.Now), store: st, compiler: prot.compiler, journal: jw, now: time.Now, shareDom: strings.ToLower(cfg.ShareDomain)}
+		ab := &autoBan{det: autoban.New(abCfg, time.Now), store: st, compiler: prot.compiler, journal: jw, now: time.Now,
+			shareDom: strings.ToLower(cfg.ShareDomain), dir: filepath.Dir(storePath)}
+		ab.restore()
+		defer ab.save()
 		abp.Store(ab)
+		abCfg = ab.Thresholds()
 		log.Printf("autoban: on (404: %d, names: %d, traps: %d, window: %s)", abCfg.NotFound, abCfg.Names, abCfg.Traps, abCfg.Window)
 		if lookupenv("LOG_DIR", "/data/logs") == "" || lookupenv("LOG_INGEST_ADDR", ":8083") == "" {
 			log.Printf("autoban: no front log ingest, only unknown share names are watched")
 		}
-		autoBanDep = ab
+		autoBanDep, adminAutoBan = ab, ab
 	}
 	srvDeps := server.Deps{Store: st, Headscale: hs, PolicyHook: pol.Hook, Remover: remover,
 		Protect: prot.compiler, Community: prot.engine, Journal: jw, AutoBan: autoBanDep}
@@ -204,7 +210,7 @@ func run() error {
 	var adminH http.Handler
 	stopStreams := make(chan struct{}) // closed by srv.Shutdown: the live journals must not hold it
 	if tok := os.Getenv("ADMIN_TOKEN"); tok != "" {
-		deps := admin.Deps{Store: st, Headscale: hs, Remover: remover, Journal: jw, Shutdown: stopStreams}
+		deps := admin.Deps{Store: st, Headscale: hs, Remover: remover, Journal: jw, Shutdown: stopStreams, AutoBan: adminAutoBan}
 		// Read by /admin/journal: ours and front's (ingested) in /data/logs, share's volume; set empty: off.
 		if dirs := readDirs(lookupenv("LOG_READ_DIRS", "/data/logs,/logs/share")); dirs != nil {
 			deps.JournalReader = &journal.Reader{Dirs: dirs}

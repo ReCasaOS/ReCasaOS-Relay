@@ -1,9 +1,13 @@
 // Package autoban counts what a client address does wrong (probing trap paths, bursts of 404s,
-// guessing share names) and says when its key must be banned. In memory only, safe for concurrent use.
+// guessing share names) and says when its key must be banned. In memory (Save and Load carry it over a
+// restart), safe for concurrent use.
 package autoban
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -54,19 +58,81 @@ type Detector struct {
 
 // New returns a Detector.
 func New(cfg Config, now func() time.Time) *Detector {
-	if cfg.NotFound <= 0 {
-		cfg.NotFound = defaultNotFound
+	return &Detector{cfg: cfg.withDefaults(), now: now, notFound: map[string][]time.Time{}, traps: map[string][]time.Time{}, names: map[string]map[string]time.Time{}, exempt: map[string]time.Time{}}
+}
+
+func (c Config) withDefaults() Config {
+	if c.NotFound <= 0 {
+		c.NotFound = defaultNotFound
 	}
-	if cfg.Names <= 0 {
-		cfg.Names = defaultNames
+	if c.Names <= 0 {
+		c.Names = defaultNames
 	}
-	if cfg.Traps <= 0 {
-		cfg.Traps = defaultTraps
+	if c.Traps <= 0 {
+		c.Traps = defaultTraps
 	}
-	if cfg.Window <= 0 {
-		cfg.Window = defaultWindow
+	if c.Window <= 0 {
+		c.Window = defaultWindow
 	}
-	return &Detector{cfg: cfg, now: now, notFound: map[string][]time.Time{}, traps: map[string][]time.Time{}, names: map[string]map[string]time.Time{}, exempt: map[string]time.Time{}}
+	return c
+}
+
+// Config returns the thresholds in force.
+func (d *Detector) Config() Config {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.cfg
+}
+
+// SetConfig changes the thresholds; the counts already held stay and are judged by the new ones.
+func (d *Detector) SetConfig(cfg Config) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.cfg = cfg.withDefaults()
+}
+
+// state is what Save writes and Load reads.
+type state struct {
+	NotFound, Traps map[string][]time.Time
+	Names           map[string]map[string]time.Time
+	Exempt          map[string]time.Time
+}
+
+// Save writes the counters and exemptions, so a restart does not hand every scanner a clean slate.
+func (d *Detector) Save(w io.Writer) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return json.NewEncoder(w).Encode(state{d.notFound, d.traps, d.names, d.exempt})
+}
+
+// Load replaces the counters and exemptions with what Save wrote. Entries too old to count expire as
+// they would have: each carries its time.
+func (d *Detector) Load(r io.Reader) error {
+	var s state
+	if err := json.NewDecoder(r).Decode(&s); err != nil {
+		return err
+	}
+	if len(s.NotFound) > maxKeys || len(s.Traps) > maxKeys || len(s.Names) > maxKeys || len(s.Exempt) > maxKeys {
+		return errors.New("autoban: saved state over the key cap")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.notFound, d.traps, d.names, d.exempt = map[string][]time.Time{}, map[string][]time.Time{}, map[string]map[string]time.Time{}, map[string]time.Time{}
+	for k, v := range s.NotFound {
+		d.notFound[k] = v
+	}
+	for k, v := range s.Traps {
+		d.traps[k] = v
+	}
+	for k, v := range s.Names {
+		if v != nil { // a null entry would panic on the next write
+			d.names[k] = v
+		}
+	}
+	for k, v := range s.Exempt {
+		d.exempt[k] = v
+	}
+	return nil
 }
 
 // Box exempts key for 24 h: a box authenticated from it.

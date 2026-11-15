@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/ReCasaOS/recasaos-relay/internal/autoban"
 	"github.com/ReCasaOS/recasaos-relay/internal/feeds"
 	"github.com/ReCasaOS/recasaos-relay/internal/journal"
 	"github.com/ReCasaOS/recasaos-relay/internal/store"
@@ -110,6 +111,10 @@ func (h *handler) protection(w http.ResponseWriter, r *http.Request) {
 		"ConnsPerIP": h.cfg.ConnsPerIP, "ConnsPerIPPerBox": h.cfg.ConnsPerIPPerBox,
 	} {
 		data[k] = v
+	}
+	if h.deps.AutoBan != nil {
+		c := h.deps.AutoBan.Thresholds()
+		data["AutoBan"] = map[string]int{"Traps": c.Traps, "NotFound": c.NotFound, "Names": c.Names, "Minutes": int(c.Window / time.Minute)}
 	}
 	if err := protectPage.Execute(w, data); err != nil {
 		log.Printf("admin: render protection: %v", err)
@@ -456,6 +461,35 @@ func (h *handler) addAllow(w http.ResponseWriter, r *http.Request) {
 	}
 	h.event("allow_add", e.Prefix, "", "")
 	h.done(w, r, "#allow")
+}
+
+// setAutoBan changes the thresholds of the automatic bans. Bounded: a threshold of 1 with a typo in the
+// window would ban every crawler, and a huge window would hold every address's history.
+func (h *handler) setAutoBan(w http.ResponseWriter, r *http.Request) {
+	if h.deps.AutoBan == nil {
+		http.NotFound(w, r)
+		return
+	}
+	var v [4]int
+	for i, f := range []struct {
+		name     string
+		min, max int
+	}{{"traps", 1, 1000}, {"notfound", 2, 100000}, {"names", 2, 1000}, {"minutes", 1, 1440}} {
+		n, err := strconv.Atoi(strings.TrimSpace(r.PostFormValue(f.name)))
+		if err != nil || n < f.min || n > f.max {
+			http.Error(w, f.name+": a whole number from "+strconv.Itoa(f.min)+" to "+strconv.Itoa(f.max), http.StatusBadRequest)
+			return
+		}
+		v[i] = n
+	}
+	cfg := autoban.Config{Traps: v[0], NotFound: v[1], Names: v[2], Window: time.Duration(v[3]) * time.Minute}
+	if err := h.deps.AutoBan.SetThresholds(cfg); err != nil {
+		log.Printf("admin: autoban thresholds: %v", err)
+		http.Error(w, "could not save the thresholds", http.StatusInternalServerError)
+		return
+	}
+	h.event("autoban_set", "", "", "traps "+strconv.Itoa(v[0])+" · 404s "+strconv.Itoa(v[1])+" · names "+strconv.Itoa(v[2])+" · "+strconv.Itoa(v[3])+" min")
+	h.done(w, r, "#autoban")
 }
 
 func (h *handler) deleteManual(w http.ResponseWriter, r *http.Request) {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -182,5 +183,53 @@ func TestAutoBanIgnoresSharedAppHosts(t *testing.T) {
 	}
 	if b := e.bans(t); len(b) != 1 {
 		t.Fatalf("bans %+v, want the relay host's trap to ban", b)
+	}
+}
+
+func TestAutoBanKeepsThresholdsAndCountsOverARestart(t *testing.T) {
+	e := newAutoBanEnv(t)
+	dir := t.TempDir()
+	e.ab.dir = dir
+	e.ab.restore() // first start: no file, nothing logged as an error, nothing changed
+	if got := e.ab.Thresholds(); got.Traps != 3 {
+		t.Fatalf("first start: %+v", got)
+	}
+	want := autoban.Config{Traps: 4, NotFound: 30, Names: 12, Window: 15 * time.Minute}
+	if err := e.ab.SetThresholds(want); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ { // 3 of 4 traps, then the service stops
+		e.ab.Front(journal.Entry{IP: "203.0.113.50", Host: "relay.test", Path: "/.env", Status: 404})
+	}
+	e.ab.save()
+	if fi, err := os.Stat(filepath.Join(dir, stateFile)); err != nil || fi.Mode().Perm()&0o077 != 0 && os.PathSeparator == '/' {
+		t.Errorf("state file: %v, mode %v", err, fi)
+	}
+
+	next := newAutoBanEnv(t)
+	next.ab.dir = dir
+	next.ab.restore()
+	if got := next.ab.Thresholds(); got != want {
+		t.Errorf("thresholds after the restart = %+v, want %+v", got, want)
+	}
+	if len(next.bans(t)) != 0 {
+		t.Fatal("banned before the fourth trap")
+	}
+	next.ab.Front(journal.Entry{IP: "203.0.113.50", Host: "relay.test", Path: "/.git/HEAD", Status: 404})
+	if len(next.bans(t)) != 1 {
+		t.Error("the fourth trap after the restart did not ban: the counts were lost")
+	}
+
+	// A broken file never stops the service: environment thresholds, counts from zero.
+	for _, f := range []string{thresholdsFile, stateFile} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("{broken"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	broken := newAutoBanEnv(t)
+	broken.ab.dir = dir
+	broken.ab.restore()
+	if got := broken.ab.Thresholds(); got.Traps != 3 {
+		t.Errorf("broken file: %+v, want the defaults", got)
 	}
 }
