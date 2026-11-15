@@ -132,6 +132,11 @@ type Store interface {
 	AddManual(ctx context.Context, m ManualBan) (int64, error)
 	DeleteManual(ctx context.Context, id int64) error
 	ManualBans(ctx context.Context, now time.Time) ([]ManualBan, error)
+	// AddAutoBan bans key (a community.Key) for a day, or a week when its previous automatic ban ended less
+	// than 30 days before now. ok is false, with nothing written, while a ban of that value is active.
+	AddAutoBan(ctx context.Context, key, note string, now time.Time) (b ManualBan, ok bool, err error)
+	// NameClaimed reports whether a box holds the share name.
+	NameClaimed(ctx context.Context, name string) (bool, error)
 	SuspendName(ctx context.Context, name string, at time.Time) error
 	ResumeName(ctx context.Context, name string) error
 	SuspendedNames(ctx context.Context) ([]string, error)
