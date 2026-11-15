@@ -179,6 +179,10 @@ func TestManualBanValidation(t *testing.T) {
 			t.Errorf("%v: %d", bad, code)
 		}
 	}
+	// the prefix of the relay's own bans is reserved: such a row would be filed as automatic
+	if c := e.do("POST", "/admin/protection/manual", token, form(e, "kind", "address", "value", "203.0.113.50", "hours", "0", "note", "auto · trap · /.env")).Code; c != 400 {
+		t.Errorf("reserved note prefix: %d", c)
+	}
 	for _, ok := range [][3]string{{"country", "XX", "0"}, {"asn", "AS64500", "24"}, {"range", "198.51.100.7/24", "0"}, {"address", "2001:db8::1", "0"}} {
 		if code := ban(ok[0], ok[1], ok[2]); code != 303 {
 			t.Errorf("%v: %d", ok, code)

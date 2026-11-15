@@ -31,6 +31,13 @@ func TestNoBoxSkipsABannedAddress(t *testing.T) {
 	if len(e.unkQ) != 0 {
 		t.Fatalf("unknown = %+v, want none for a banned address", e.unkQ)
 	}
+	var a snapshot // an automatic ban refuses every share name too: nothing to report either
+	a.Version = "v2"
+	a.Auto.Address = []string{"203.0.113.7/32"}
+	noBox(holderWith(snap(t, a)), e, nil, "x.box.relay.test", "x", noBoxConn(t))
+	if len(e.unkQ) != 0 {
+		t.Fatalf("unknown = %+v, want none for an automatically banned address", e.unkQ)
+	}
 	noBox(&filterHolder{}, e, nil, "x.box.relay.test", "x", noBoxConn(t)) // no filter yet: reported
 	noBox(nil, e, nil, "y.box.relay.test", "y", noBoxConn(t))             // nil holder: no panic
 	if len(e.unkQ) != 2 {
