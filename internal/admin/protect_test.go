@@ -540,22 +540,30 @@ func TestAutoBanThresholds(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := env{h, off.hs, off.st}
-	if body := e.do("GET", "/admin/protection", token, nil).Body.String(); !strings.Contains(body, `name="notfound" type="number" min="2" max="100000" value="20"`) {
+	if body := e.do("GET", "/admin/protection", token, nil).Body.String(); !strings.Contains(body, `name="notfound" type="number" min="1" max="1000" value="20"`) {
 		t.Error("the form does not show the thresholds in force")
 	}
 	for _, bad := range [][]string{
 		{"traps", "0", "notfound", "20", "names", "10", "minutes", "10"},
-		{"traps", "3", "notfound", "1", "names", "10", "minutes", "10"},
-		{"traps", "3", "notfound", "20", "names", "x", "minutes", "10"},
-		{"traps", "3", "notfound", "20", "names", "10", "minutes", "1441"},
-		{"traps", "3", "notfound", "20", "names", "10"},
+		{"traps", "4", "notfound", "1001", "names", "10", "minutes", "10"},
+		{"traps", "4", "notfound", "21", "names", "x", "minutes", "10"},
+		{"traps", "4", "notfound", "21", "names", "11", "minutes", "1441"},
+		{"traps", "4", "notfound", "21", "names", "11"},
 	} {
 		if w := e.do("POST", "/admin/protection/autoban", token, form(e, bad...)); w.Code != 400 {
 			t.Errorf("%v: %d, want 400", bad, w.Code)
 		}
 	}
-	if ab.cfg.Traps != 3 {
+	if want := (autoban.Config{Traps: 3, NotFound: 20, Names: 10, Window: 10 * time.Minute}); ab.cfg != want {
 		t.Fatalf("a refused form changed the thresholds: %+v", ab.cfg)
+	}
+	// Environment values outside the form's bounds show inside them, the window rounded up.
+	odd := e.withDeps(t, func(d *Deps) {
+		d.AutoBan = &fakeAutoBan{cfg: autoban.Config{Traps: 3, NotFound: 5000, Names: 10, Window: 90 * time.Second}}
+	})
+	if body := odd.do("GET", "/admin/protection", token, nil).Body.String(); !strings.Contains(body, `name="notfound" type="number" min="1" max="1000" value="1000"`) ||
+		!strings.Contains(body, `name="minutes" type="number" min="1" max="1440" value="2"`) {
+		t.Error("out-of-bounds thresholds are not shown inside the form's bounds")
 	}
 	w := e.do("POST", "/admin/protection/autoban", token, form(e, "traps", "5", "notfound", "30", "names", "12", "minutes", "15"))
 	if w.Code != 303 || w.Header().Get("Location") != "/admin/protection#autoban" {

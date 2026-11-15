@@ -264,9 +264,11 @@ func TestSaveLoadCarriesCountsOverARestart(t *testing.T) {
 	if f, _ := n.Unknown("203.0.113.2/32", "last"); f != "names" {
 		t.Errorf("tenth name after the restart: %q, want names", f)
 	}
-	if err := New(Config{}, c.now).Load(strings.NewReader(`{"Names":{"k":null}}`)); err != nil {
+	null := New(Config{}, c.now)
+	if err := null.Load(strings.NewReader(`{"Names":{"203.0.113.9/32":null}}`)); err != nil {
 		t.Errorf("null entry: %v", err)
 	}
+	null.Unknown("203.0.113.9/32", "a") // a nil map kept by Load would panic here
 	if New(Config{}, c.now).Load(strings.NewReader("not json")) == nil {
 		t.Error("garbage loaded")
 	}

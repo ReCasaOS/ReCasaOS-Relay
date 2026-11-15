@@ -153,8 +153,8 @@ td.wrap { min-width:14rem; }
 <form method="post" action="/admin/protection/autoban" style="display:block"><input type="hidden" name="csrf" value="{{$.CSRF}}">
 <div class="fields">
 <label>Trap paths<input name="traps" type="number" min="1" max="1000" value="{{.Traps}}" required><span class="mut xs">within one hour</span></label>
-<label>Pages not found<input name="notfound" type="number" min="2" max="100000" value="{{.NotFound}}" required><span class="mut xs">within the window</span></label>
-<label>Unknown share names<input name="names" type="number" min="2" max="1000" value="{{.Names}}" required><span class="mut xs">different ones, within the window</span></label>
+<label>Pages not found<input name="notfound" type="number" min="1" max="1000" value="{{.NotFound}}" required><span class="mut xs">within the window</span></label>
+<label>Unknown share names<input name="names" type="number" min="1" max="1000" value="{{.Names}}" required><span class="mut xs">different ones, within the window</span></label>
 <label>Window<input name="minutes" type="number" min="1" max="1440" value="{{.Minutes}}" required><span class="mut xs">minutes</span></label>
 <div class="act"><button class="plain">Save</button></div>
 </div></form>

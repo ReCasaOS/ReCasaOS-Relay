@@ -190,7 +190,7 @@ func TestAutoBanKeepsThresholdsAndCountsOverARestart(t *testing.T) {
 	e := newAutoBanEnv(t)
 	dir := t.TempDir()
 	e.ab.dir = dir
-	e.ab.restore() // first start: no file, nothing logged as an error, nothing changed
+	e.ab.restore() // first start: no file, nothing changed
 	if got := e.ab.Thresholds(); got.Traps != 3 {
 		t.Fatalf("first start: %+v", got)
 	}
@@ -219,8 +219,11 @@ func TestAutoBanKeepsThresholdsAndCountsOverARestart(t *testing.T) {
 	if len(next.bans(t)) != 1 {
 		t.Error("the fourth trap after the restart did not ban: the counts were lost")
 	}
+	if _, err := os.Stat(filepath.Join(dir, stateFile)); !os.IsNotExist(err) {
+		t.Errorf("the state file must be read once, then removed: %v", err)
+	}
 
-	// A broken file never stops the service: environment thresholds, counts from zero.
+	// A broken file never stops the service: it runs on the environment thresholds.
 	for _, f := range []string{thresholdsFile, stateFile} {
 		if err := os.WriteFile(filepath.Join(dir, f), []byte("{broken"), 0o600); err != nil {
 			t.Fatal(err)

@@ -114,7 +114,11 @@ func (h *handler) protection(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.deps.AutoBan != nil {
 		c := h.deps.AutoBan.Thresholds()
-		data["AutoBan"] = map[string]int{"Traps": c.Traps, "NotFound": c.NotFound, "Names": c.Names, "Minutes": int(c.Window / time.Minute)}
+		// Shown inside the form's bounds, the window rounded up: an environment value outside them
+		// (AUTOBAN_WINDOW=90s) must not block Save, nor shrink when another field is saved.
+		minutes := int((c.Window + time.Minute - 1) / time.Minute)
+		data["AutoBan"] = map[string]int{"Traps": min(max(c.Traps, 1), autoBanMax), "NotFound": min(max(c.NotFound, 1), autoBanMax),
+			"Names": min(max(c.Names, 1), autoBanMax), "Minutes": min(max(minutes, 1), autoBanMaxMinutes)}
 	}
 	if err := protectPage.Execute(w, data); err != nil {
 		log.Printf("admin: render protection: %v", err)
@@ -463,8 +467,13 @@ func (h *handler) addAllow(w http.ResponseWriter, r *http.Request) {
 	h.done(w, r, "#allow")
 }
 
-// setAutoBan changes the thresholds of the automatic bans. Bounded: a threshold of 1 with a typo in the
-// window would ban every crawler, and a huge window would hold every address's history.
+// Bounds of the thresholds form: each address keeps up to its threshold of timestamps for the window.
+const (
+	autoBanMax        = 1000
+	autoBanMaxMinutes = 1440
+)
+
+// setAutoBan changes the thresholds of the automatic bans.
 func (h *handler) setAutoBan(w http.ResponseWriter, r *http.Request) {
 	if h.deps.AutoBan == nil {
 		http.NotFound(w, r)
@@ -474,7 +483,7 @@ func (h *handler) setAutoBan(w http.ResponseWriter, r *http.Request) {
 	for i, f := range []struct {
 		name     string
 		min, max int
-	}{{"traps", 1, 1000}, {"notfound", 2, 100000}, {"names", 2, 1000}, {"minutes", 1, 1440}} {
+	}{{"traps", 1, autoBanMax}, {"notfound", 1, autoBanMax}, {"names", 1, autoBanMax}, {"minutes", 1, autoBanMaxMinutes}} {
 		n, err := strconv.Atoi(strings.TrimSpace(r.PostFormValue(f.name)))
 		if err != nil || n < f.min || n > f.max {
 			http.Error(w, f.name+": a whole number from "+strconv.Itoa(f.min)+" to "+strconv.Itoa(f.max), http.StatusBadRequest)
