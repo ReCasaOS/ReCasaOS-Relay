@@ -57,8 +57,13 @@ func (h *internalHandler) events(w http.ResponseWriter, r *http.Request) {
 			Source string    `json:"source"`
 			Count  int64     `json:"count"`
 		} `json:"refusals"`
+		Unknown []struct {
+			Key  string `json:"key"`
+			Name string `json:"name"`
+		} `json:"unknown"`
+		Boxes []string `json:"boxes"`
 	}
-	if json.Unmarshal(b, &in) != nil || len(in.Seen)+len(in.Refusals) > maxEventsItems {
+	if json.Unmarshal(b, &in) != nil || len(in.Seen)+len(in.Refusals)+len(in.Unknown)+len(in.Boxes) > maxEventsItems {
 		writeError(w, http.StatusBadRequest, "invalid request")
 		return
 	}
@@ -92,6 +97,18 @@ func (h *internalHandler) events(w http.ResponseWriter, r *http.Request) {
 		log.Printf("internal: add refusals: %v", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
+	}
+	if a := h.deps.AutoBan; a != nil {
+		for _, u := range in.Unknown {
+			if k, ok := community.Key(u.Key); ok {
+				a.Unknown(ctx, k, u.Name)
+			}
+		}
+		for _, bk := range in.Boxes {
+			if k, ok := community.Key(bk); ok {
+				a.Box(k)
+			}
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

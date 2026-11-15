@@ -235,3 +235,19 @@ func TestJournalProtectionPut(t *testing.T) {
 		t.Fatalf("protection lines: %d", n)
 	}
 }
+
+// A signed box request reaches AutoBan.Box with the client key; with AutoBan nil it still answers.
+func TestBoxAuthFeedsAutoBan(t *testing.T) {
+	fab := &fakeAutoBan{}
+	e := &shareEnv{delEnv: setupDelDeps(t, func(c *Config) {
+		c.ShareDomain = "share.example"
+		c.TrustedProxyHeader = "X-Client-IP"
+	}, func(d *Deps) { d.AutoBan = fab })}
+	b := e.linked(t, "box-a")
+	wantStatus(t, e.as(b, "PUT", "/v1/share/protection", `{"relay_filter":true,"share_bans":false}`), 200, "")
+	if len(fab.boxes) != 1 || fab.boxes[0] != "192.0.2.1" {
+		t.Fatalf("boxes %v (remote %s)", fab.boxes, ip1)
+	}
+	e = setupBoxProtect(t)
+	wantStatus(t, e.as(e.linked(t, "box-a"), "PUT", "/v1/share/protection", `{"relay_filter":true,"share_bans":false}`), 200, "")
+}

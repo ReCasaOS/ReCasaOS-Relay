@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -136,4 +137,43 @@ func TestEventsKeepKeylessRefusalRow(t *testing.T) {
 	if len(rs) != 1 || rs[0].Key != "" || rs[0].Count != 7 {
 		t.Fatalf("%+v, want the keyless row only (a private key is still dropped)", rs)
 	}
+}
+
+type fakeAutoBan struct {
+	mu      sync.Mutex
+	unknown []string
+	boxes   []string
+}
+
+func (f *fakeAutoBan) Unknown(_ context.Context, key, name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.unknown = append(f.unknown, key+" "+name)
+}
+
+func (f *fakeAutoBan) Box(key string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.boxes = append(f.boxes, key)
+}
+
+func TestEventsFeedAutoBan(t *testing.T) {
+	fab := &fakeAutoBan{}
+	e := setup(t, func(c *Config, d *Deps) {
+		c.ShareDomain = "share.example"
+		d.Protect = &protect.Compiler{Store: d.Store, Now: d.Now}
+		d.AutoBan = fab
+	})
+	body := `{"unknown":[{"key":"203.0.113.7","name":"Guess"},{"key":"192.168.1.5","name":"private"}],"boxes":["203.0.113.8","10.0.0.1"]}`
+	wantStatus(t, e.call("POST", "/internal/share/events", body, nil), 204, "")
+	if len(fab.unknown) != 1 || fab.unknown[0] != "203.0.113.7/32 Guess" || len(fab.boxes) != 1 || fab.boxes[0] != "203.0.113.8/32" {
+		t.Fatalf("unknown %v boxes %v", fab.unknown, fab.boxes)
+	}
+	big := `{"unknown":[` + strings.Repeat(`{"key":"203.0.113.7","name":"a"},`, 20000) + `{"key":"203.0.113.7","name":"a"}]}`
+	wantStatus(t, e.call("POST", "/internal/share/events", big, nil), 400, "")
+}
+
+func TestEventsWithoutAutoBanStillAnswer(t *testing.T) {
+	e := setupProtect(t)
+	wantStatus(t, e.call("POST", "/internal/share/events", `{"unknown":[{"key":"203.0.113.7","name":"x"}],"boxes":["203.0.113.8"]}`, nil), 204, "")
 }
