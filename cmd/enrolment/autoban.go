@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/autoban"
@@ -27,6 +31,91 @@ type autoBan struct {
 	journal  *journal.Writer // nil: no journal
 	now      func() time.Time
 	shareDom string // lower case: lines for a shared app are not the relay's own traffic
+	setMu    sync.Mutex
+	dir      string // holds autoban.json (thresholds set on /admin) and autoban-state.json; "": nothing is kept
+}
+
+const (
+	thresholdsFile = "autoban.json"
+	stateFile      = "autoban-state.json"
+)
+
+// Thresholds returns the thresholds in force.
+func (a *autoBan) Thresholds() autoban.Config { return a.det.Config() }
+
+// SetThresholds applies cfg and keeps it over the environment's values at the next starts.
+func (a *autoBan) SetThresholds(cfg autoban.Config) error {
+	a.setMu.Lock() // the file and the detector change together
+	defer a.setMu.Unlock()
+	if a.dir != "" {
+		b, err := json.Marshal(cfg)
+		if err != nil {
+			return err
+		}
+		if err := writeFile(filepath.Join(a.dir, thresholdsFile), b); err != nil {
+			return err
+		}
+	}
+	a.det.SetConfig(cfg)
+	return nil
+}
+
+// restore reads what SetThresholds and save left. A missing file is the normal first start; a broken
+// one is logged and ignored: the detector then runs on the environment's thresholds, from zero.
+func (a *autoBan) restore() {
+	if a.dir == "" {
+		return
+	}
+	if b, err := os.ReadFile(filepath.Join(a.dir, thresholdsFile)); err == nil {
+		var cfg autoban.Config
+		if err := json.Unmarshal(b, &cfg); err != nil {
+			log.Printf("autoban: %s: %v", thresholdsFile, err)
+		} else {
+			a.det.SetConfig(cfg)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		log.Printf("autoban: %v", err)
+	}
+	f, err := os.Open(filepath.Join(a.dir, stateFile))
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Printf("autoban: %v", err)
+		}
+		return
+	}
+	err = a.det.Load(f)
+	f.Close()
+	if err != nil {
+		log.Printf("autoban: %s: %v", stateFile, err)
+	}
+	// Read once: after a crash (no save) the next start must not bring back counts the bans since have cleared.
+	if err := os.Remove(filepath.Join(a.dir, stateFile)); err != nil {
+		log.Printf("autoban: %v", err)
+	}
+}
+
+// save keeps the counters for the next start.
+func (a *autoBan) save() {
+	if a.dir == "" {
+		return
+	}
+	var b bytes.Buffer
+	if err := a.det.Save(&b); err != nil {
+		log.Printf("autoban: save: %v", err)
+		return
+	}
+	if err := writeFile(filepath.Join(a.dir, stateFile), b.Bytes()); err != nil {
+		log.Printf("autoban: save: %v", err)
+	}
+}
+
+// writeFile replaces path in one step: a crash never leaves half a file. 0600: the state holds addresses.
+func writeFile(path string, b []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // Front takes one parsed front access line.

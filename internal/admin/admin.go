@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ReCasaOS/recasaos-relay/internal/autoban"
 	"github.com/ReCasaOS/recasaos-relay/internal/feeds"
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/geo"
@@ -115,6 +116,14 @@ type Deps struct {
 	JournalReader *journal.Reader
 	// Shutdown, closed when the server shuts down, ends the live journals (they would hold Shutdown).
 	Shutdown <-chan struct{}
+	// AutoBan holds the automatic bans' thresholds; a true nil interface when they are off.
+	AutoBan AutoBan
+}
+
+// AutoBan reads and changes the thresholds of the automatic bans.
+type AutoBan interface {
+	Thresholds() autoban.Config
+	SetThresholds(autoban.Config) error
 }
 
 type handler struct {
@@ -156,6 +165,7 @@ func New(cfg Config, deps Deps) (http.Handler, error) {
 	mux.HandleFunc("POST /admin/protection/feeds/{id}/{action}", h.feedAction) // toggle, refresh, delete
 	mux.HandleFunc("POST /admin/protection/manual", h.addManual)
 	mux.HandleFunc("POST /admin/protection/manual/{id}/delete", h.deleteManual)
+	mux.HandleFunc("POST /admin/protection/autoban", h.setAutoBan)
 	mux.HandleFunc("POST /admin/protection/allow", h.addAllow)
 	mux.HandleFunc("POST /admin/protection/allow/{id}/delete", h.deleteAllow)
 	mux.HandleFunc("POST /admin/protection/community/lift", h.liftCommunity)

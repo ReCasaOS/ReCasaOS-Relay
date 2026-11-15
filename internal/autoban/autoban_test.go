@@ -1,6 +1,7 @@
 package autoban
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"testing"
@@ -234,5 +235,53 @@ func TestFullSweptOncePerSecond(t *testing.T) {
 	d.Box("fresh")
 	if _, ok := d.exempt["fresh"]; !ok {
 		t.Fatal("exempt slot not freed")
+	}
+}
+
+func TestSaveLoadCarriesCountsOverARestart(t *testing.T) {
+	d, c := newDet()
+	d.Front("203.0.113.1/32", "/.env", 404) // 2 of 3 traps
+	d.Front("203.0.113.1/32", "/.env", 404)
+	d.Unknown("203.0.113.2/32", "a")
+	d.Box("203.0.113.3/32")
+	var b bytes.Buffer
+	if err := d.Save(&b); err != nil {
+		t.Fatal(err)
+	}
+	n := New(Config{}, c.now)
+	if err := n.Load(&b); err != nil {
+		t.Fatal(err)
+	}
+	if f, _ := n.Front("203.0.113.1/32", "/.git/config", 404); f != "trap" {
+		t.Errorf("third trap after the restart: %q, want trap", f)
+	}
+	if f, _ := hit3(n, "203.0.113.3/32", "/.env", 404); f != "" {
+		t.Errorf("the box exemption was lost: %q", f)
+	}
+	for i := 0; i < 8; i++ {
+		n.Unknown("203.0.113.2/32", fmt.Sprint("n", i))
+	}
+	if f, _ := n.Unknown("203.0.113.2/32", "last"); f != "names" {
+		t.Errorf("tenth name after the restart: %q, want names", f)
+	}
+	null := New(Config{}, c.now)
+	if err := null.Load(strings.NewReader(`{"Names":{"203.0.113.9/32":null}}`)); err != nil {
+		t.Errorf("null entry: %v", err)
+	}
+	null.Unknown("203.0.113.9/32", "a") // a nil map kept by Load would panic here
+	if New(Config{}, c.now).Load(strings.NewReader("not json")) == nil {
+		t.Error("garbage loaded")
+	}
+}
+
+func TestSetConfigAppliesAtOnce(t *testing.T) {
+	d, _ := newDet()
+	d.Front("203.0.113.1/32", "/.env", 404)
+	d.SetConfig(Config{Traps: 2})
+	if got := d.Config(); got.Traps != 2 || got.NotFound != defaultNotFound || got.Window != defaultWindow {
+		t.Fatalf("config = %+v", got)
+	}
+	if f, _ := d.Front("203.0.113.1/32", "/.env", 404); f != "trap" {
+		t.Errorf("second trap under a limit of 2: %q", f)
 	}
 }
