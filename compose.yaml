@@ -16,6 +16,7 @@ services:
     image: headscale/headscale:v0.29.7
     command: serve
     restart: unless-stopped
+    logging: *capped-logs
     volumes:
       - ./headscale/config.yaml:/etc/headscale/config.yaml:ro
       - ./headscale/derp.yaml:/etc/headscale/derp.yaml:ro
@@ -27,6 +28,7 @@ services:
   derper:
     build: ./derper
     restart: unless-stopped
+    logging: *capped-logs
     depends_on:
       - headscale
     command: -a :8090 -http-port -1 -stun-port 3478 -verify-client-url http://headscale:8080/verify -verify-client-url-fail-open=false
@@ -174,7 +176,7 @@ services:
     # ports:
     #   - "80:80"
     #   - "443:443"
-    stop_grace_period: 40s
+    stop_grace_period: 15s # share waits 5 s for open connections, then flushes its journal
     # Capped like front's: its output carries client addresses too.
     logging: *capped-logs
 

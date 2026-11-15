@@ -135,8 +135,8 @@ func run() error {
 	go func() { inflight.Wait(); close(drained) }()
 	select {
 	case <-drained:
-	case <-time.After(30 * time.Second):
-		log.Printf("shutdown: connections still open after 30s")
+	case <-time.After(drainWait):
+		log.Printf("shutdown: connections still open after %s", drainWait)
 	}
 	// Every count still pending, whatever its window, before closeJournal.
 	perIP.cuts.flush(jw, time.Now().Add(cutWindow))
@@ -192,6 +192,11 @@ func accept(l net.Listener, wg *sync.WaitGroup, perIP *connCap, ev *events, jw *
 		go func() { defer wg.Done(); defer perIP.release(k); defer c.Close(); handle(c) }()
 	}
 }
+
+// drainWait is how long a stopping share waits for open connections. Short on purpose: nothing new is
+// accepted meanwhile, so every second of it is a second the relay is unreachable during an update, and
+// a visitor's connection to a shared app is long-lived and would not end by itself anyway.
+const drainWait = 5 * time.Second
 
 func handleTLS(cfg Config, reg *tunnel.Registry, perBox *connCap, fh *filterHolder, ev *events, jw *journal.Writer, c net.Conn) {
 	name, replay, err := sni.PeekServerName(c, cfg.PeekTimeout)
