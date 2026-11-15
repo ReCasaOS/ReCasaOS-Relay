@@ -138,6 +138,9 @@ func (h *shareHandler) boxAuthMax(w http.ResponseWriter, r *http.Request, body a
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return ref, false
 	}
+	if h.deps.AutoBan != nil { // a box lives here: its address is not a scanner
+		h.deps.AutoBan.Box(clientKey(r, h.cfg.TrustedProxyHeader, 64))
+	}
 	if body != nil && len(raw) > 0 && json.Unmarshal(raw, body) != nil {
 		writeError(w, http.StatusBadRequest, "invalid request")
 		return ref, false

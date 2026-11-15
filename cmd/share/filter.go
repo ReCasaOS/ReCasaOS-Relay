@@ -46,6 +46,10 @@ type snapshot struct {
 		ASN     []string `json:"asn"`
 		Country []string `json:"country"`
 	} `json:"manual"`
+	Auto struct {
+		Address []string `json:"address"`
+		Range   []string `json:"range"`
+	} `json:"auto"` // the relay's own bans: they cut share names, never the relay's pages
 	External  map[string][]string `json:"external"`
 	Community struct {
 		Address []string `json:"address"`
@@ -174,6 +178,7 @@ type filter struct {
 	version                          string
 	allow                            prefixSet
 	mAddress, mRange, mASN, mCountry prefixSet
+	aAddress, aRange                 prefixSet // automatic bans
 	ext                              []feedSet // by feed name
 	cAddress, cRange                 prefixSet
 	names                            map[string]nameFilter
@@ -189,6 +194,7 @@ func parseFilter(body []byte) (*filter, error) {
 		version: s.Version, allow: newPrefixSet(s.Allow),
 		mAddress: newPrefixSet(s.Manual.Address), mRange: newPrefixSet(s.Manual.Range),
 		mASN: newPrefixSet(s.Manual.ASN), mCountry: newPrefixSet(s.Manual.Country),
+		aAddress: newPrefixSet(s.Auto.Address), aRange: newPrefixSet(s.Auto.Range),
 		cAddress: newPrefixSet(s.Community.Address), cRange: newPrefixSet(s.Community.Range),
 		names: s.Names, suspended: make(map[string]struct{}, len(s.Suspended)),
 	}
@@ -203,8 +209,8 @@ func parseFilter(body []byte) (*filter, error) {
 }
 
 // decide says why the visitor at a is refused for the share name, and by which source; "" means pass.
-// Order: allow list, operator bans, suspended name, then the box's own choices (feeds, community list).
-// A name absent from the snapshot (a box that never set its protection) only has the first three.
+// Order: allow list, operator bans, the relay's own (automatic) bans, suspended name, then the box's own choices (feeds, community list).
+// A name absent from the snapshot (a box that never set its protection) only has the first four (allow list, operator bans, automatic bans, suspended).
 func (f *filter) decide(a netip.Addr, name string) (reason, source string) {
 	if f.allow.contains(a) {
 		return "", ""
@@ -218,6 +224,8 @@ func (f *filter) decide(a netip.Addr, name string) (reason, source string) {
 		return "manual", "asn"
 	case f.mCountry.contains(a):
 		return "manual", "country"
+	case f.aAddress.contains(a), f.aRange.contains(a): // reason stays "manual" for enrolment's refusal list
+		return "manual", "auto"
 	}
 	if _, ok := f.suspended[name]; ok {
 		return "suspended", ""
@@ -238,6 +246,19 @@ func (f *filter) decide(a netip.Addr, name string) (reason, source string) {
 		case f.cRange.contains(a):
 			return "community", "range"
 		}
+	}
+	return "", ""
+}
+
+// decideFront says why the visitor at a may not reach the relay's own pages: only the allow list and
+// the operator's hand-made address and range bans count; automatic bans never close them. "" means pass.
+func (f *filter) decideFront(a netip.Addr) (reason, source string) {
+	switch {
+	case f.allow.contains(a):
+	case f.mAddress.contains(a):
+		return "manual", "address"
+	case f.mRange.contains(a):
+		return "manual", "range"
 	}
 	return "", ""
 }

@@ -384,3 +384,119 @@ func TestReportsSinceIndexed(t *testing.T) {
 		t.Fatalf("index count %d (%v)", n, err)
 	}
 }
+
+func autoStrikes(t *testing.T, s Store, key string) int {
+	t.Helper()
+	n := -1
+	if err := s.(*sqlStore).db.QueryRow(`SELECT strikes FROM auto_strikes WHERE key = ?`, key).Scan(&n); err != nil && n != -1 {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func TestAddAutoBan(t *testing.T) {
+	ctx := context.Background()
+	s := openTmp(t)
+	const key = "203.0.113.7/32"
+	b, ok, err := s.AddAutoBan(ctx, key, "auto · x · y", pt0)
+	if err != nil || !ok || b.Kind != "address" || b.Value != "203.0.113.7" || !b.Until.Equal(pt0.Add(24*time.Hour)) || b.Note != "auto · x · y" {
+		t.Fatalf("first = %+v ok=%v err=%v", b, ok, err)
+	}
+	if _, ok, err := s.AddAutoBan(ctx, key, "auto · x · y", pt0.Add(time.Hour)); err != nil || ok {
+		t.Fatalf("while active: ok=%v err=%v", ok, err)
+	}
+	if m, _ := s.ManualBans(ctx, pt0.Add(time.Hour)); len(m) != 1 || autoStrikes(t, s, key) != 1 {
+		t.Fatalf("rows = %+v strikes=%d", m, autoStrikes(t, s, key))
+	}
+	b, ok, err = s.AddAutoBan(ctx, key, "auto · x · y", pt0.Add(25*time.Hour+24*time.Hour))
+	if err != nil || !ok || !b.Until.Equal(pt0.Add(49*time.Hour).Add(7*24*time.Hour)) {
+		t.Fatalf("repeat = %+v ok=%v err=%v", b, ok, err)
+	}
+	// 31 days after that ban ended: back to 24 h.
+	at := b.Until.Add(31 * 24 * time.Hour)
+	b, ok, err = s.AddAutoBan(ctx, key, "auto · x · y", at)
+	if err != nil || !ok || !b.Until.Equal(at.Add(24*time.Hour)) {
+		t.Fatalf("forgotten = %+v ok=%v err=%v", b, ok, err)
+	}
+	b, ok, err = s.AddAutoBan(ctx, "2001:db8:1:2::/64", "auto · x · y", pt0)
+	if err != nil || !ok || b.Kind != "range" || b.Value != "2001:db8:1:2::/64" {
+		t.Fatalf("v6 = %+v ok=%v err=%v", b, ok, err)
+	}
+}
+
+func TestDeleteAutoBanForgets(t *testing.T) {
+	ctx := context.Background()
+	s := openTmp(t)
+	const key = "203.0.113.7/32"
+	b, _, err := s.AddAutoBan(ctx, key, "auto · x · y", pt0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteManual(ctx, b.ID); err != nil {
+		t.Fatal(err)
+	}
+	b, ok, err := s.AddAutoBan(ctx, key, "auto · x · y", pt0.Add(time.Hour))
+	if err != nil || !ok || !b.Until.Equal(pt0.Add(25*time.Hour)) {
+		t.Fatalf("after delete = %+v ok=%v err=%v", b, ok, err)
+	}
+}
+
+func TestPruneKeepsStrikes(t *testing.T) {
+	ctx := context.Background()
+	s := openTmp(t)
+	const key = "203.0.113.7/32"
+	if _, _, err := s.AddAutoBan(ctx, key, "auto · x · y", pt0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PruneProtection(ctx, pt0.Add(48*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	var rows int
+	s.(*sqlStore).db.QueryRow(`SELECT COUNT(*) FROM share_manual`).Scan(&rows)
+	if rows != 0 || autoStrikes(t, s, key) != 1 {
+		t.Fatalf("rows=%d strikes=%d", rows, autoStrikes(t, s, key))
+	}
+	if err := s.PruneProtection(ctx, pt0.Add(32*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if autoStrikes(t, s, key) != -1 {
+		t.Fatal("old strike kept")
+	}
+}
+
+func TestNameClaimed(t *testing.T) {
+	ctx := context.Background()
+	s := openTmp(t)
+	box(t, s, "f1", "7", pt0)
+	if err := s.ClaimName(ctx, "7", "mybox", pt0); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.NameClaimed(ctx, "mybox"); err != nil || !ok {
+		t.Fatalf("claimed: %v %v", ok, err)
+	}
+	if ok, err := s.NameClaimed(ctx, "other"); err != nil || ok {
+		t.Fatalf("unclaimed: %v %v", ok, err)
+	}
+}
+
+func TestAddAutoBanIsCapped(t *testing.T) {
+	ctx := context.Background()
+	s := openTmp(t)
+	old := maxAutoBans
+	maxAutoBans = 2
+	t.Cleanup(func() { maxAutoBans = old })
+	for _, k := range []string{"203.0.113.1/32", "203.0.113.2/32"} {
+		if _, ok, err := s.AddAutoBan(ctx, k, "auto · x · y", pt0); err != nil || !ok {
+			t.Fatalf("%s: ok=%v err=%v", k, ok, err)
+		}
+	}
+	if _, ok, err := s.AddAutoBan(ctx, "203.0.113.3/32", "auto · x · y", pt0); err != nil || ok {
+		t.Fatalf("past the cap: ok=%v err=%v", ok, err)
+	}
+	if m, _ := s.ManualBans(ctx, pt0); len(m) != 2 {
+		t.Fatalf("rows = %+v", m)
+	}
+	if _, ok, err := s.AddAutoBan(ctx, "203.0.113.3/32", "auto · x · y", pt0.Add(25*time.Hour)); err != nil || !ok {
+		t.Fatalf("after the first two ended: ok=%v err=%v", ok, err)
+	}
+}

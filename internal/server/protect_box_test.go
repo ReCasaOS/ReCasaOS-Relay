@@ -235,3 +235,32 @@ func TestJournalProtectionPut(t *testing.T) {
 		t.Fatalf("protection lines: %d", n)
 	}
 }
+
+// A signed box request reaches AutoBan.Box with the client key; with AutoBan nil it still answers.
+func TestBoxAuthFeedsAutoBan(t *testing.T) {
+	fab := &fakeAutoBan{}
+	e := &shareEnv{delEnv: setupDelDeps(t, func(c *Config) {
+		c.ShareDomain = "share.example"
+		c.TrustedProxyHeader = "X-Client-IP"
+	}, func(d *Deps) { d.AutoBan = fab })}
+	b := e.linked(t, "box-a")
+	fab.boxes = nil // linking authenticates with the fleet secret, which reports too
+	wantStatus(t, e.as(b, "PUT", "/v1/share/protection", `{"relay_filter":true,"share_bans":false}`), 200, "")
+	if len(fab.boxes) != 1 || fab.boxes[0] != "192.0.2.1" {
+		t.Fatalf("boxes %v (remote %s)", fab.boxes, ip1)
+	}
+	e = setupBoxProtect(t)
+	wantStatus(t, e.as(e.linked(t, "box-a"), "PUT", "/v1/share/protection", `{"relay_filter":true,"share_bans":false}`), 200, "")
+}
+
+// A fleet request signed with the fleet secret exempts its address too; a wrong secret does not.
+func TestFleetAuthFeedsAutoBan(t *testing.T) {
+	fab := &fakeAutoBan{}
+	e := setupKeys(t, func(_ *Config, d *Deps) { d.AutoBan = fab })
+	if e.status("wrong", ip1).Code != 401 || len(fab.boxes) != 0 {
+		t.Fatalf("a wrong secret reported %v", fab.boxes)
+	}
+	if e.status(e.secret, ip1).Code != 200 || len(fab.boxes) != 1 || fab.boxes[0] != "192.0.2.1" {
+		t.Fatalf("boxes %v", fab.boxes)
+	}
+}

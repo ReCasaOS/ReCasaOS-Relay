@@ -91,6 +91,8 @@ func TestDecideOrder(t *testing.T) {
 		"comm": {Community: true}, // community without filter: nothing
 	}
 	s.Suspended = []string{"badname", "on"}
+	s.Auto.Address = []string{"203.0.117.1/32", "198.51.100.9/32"}
+	s.Auto.Range = []string{"203.0.118.0/24"}
 	f := snap(t, s)
 	for _, c := range []struct{ addr, name, reason, source string }{
 		{"198.51.100.5", "both", "", ""}, // allow wins over manual
@@ -98,6 +100,10 @@ func TestDecideOrder(t *testing.T) {
 		{"203.0.114.9", "off", "manual", "range"},
 		{"203.0.115.9", "off", "manual", "asn"},
 		{"203.0.116.9", "off", "manual", "country"},
+		{"203.0.117.1", "off", "manual", "auto"}, // the relay's own bans cut every share name
+		{"203.0.118.9", "gone", "manual", "auto"},
+		{"203.0.117.1", "on", "manual", "auto"},    // before suspended
+		{"198.51.100.9", "both", "", ""},           // allow wins over an automatic ban
 		{"1.1.1.1", "badname", "suspended", ""},    // suspended even for a name with no row
 		{"203.0.113.1", "on", "manual", "address"}, // manual before suspended
 		{"1.1.1.1", "on", "suspended", ""},
@@ -179,7 +185,7 @@ func TestNoSnapshotLetsThrough(t *testing.T) {
 
 func TestRelayHostNeverFiltered(t *testing.T) {
 	var s snapshot
-	s.Manual.Range = []string{"0.0.0.0/0"}
+	s.Manual.Country = []string{"0.0.0.0/0"} // country and network bans never reach the relay host
 	h := holderWith(snap(t, s))
 	_, _, reg, box := rig(t)
 
@@ -364,5 +370,76 @@ func TestUnclaimedNameRecordsNoRefusal(t *testing.T) {
 	p := flushed(t, e)
 	if len(p) != 1 || len(p[0].Refusals) != 1 || p[0].Refusals[0].Name != "alpha" || p[0].Refusals[0].Reason != "manual" {
 		t.Fatalf("posts = %+v, want one manual refusal, for alpha only", p)
+	}
+}
+
+func TestDecideFront(t *testing.T) {
+	var s snapshot
+	s.Allow = []string{"198.51.100.0/24"}
+	s.Manual.Address = []string{"198.51.100.5/32", "203.0.113.1/32"}
+	s.Manual.Range = []string{"203.0.114.0/24"}
+	s.Manual.ASN = []string{"203.0.115.0/24"}
+	s.Manual.Country = []string{"203.0.116.0/24"}
+	s.External = map[string][]string{"feed": {"192.0.2.0/24"}}
+	s.Community.Address = []string{"192.0.3.1/32"}
+	s.Community.Range = []string{"192.0.4.0/24"}
+	s.Auto.Address = []string{"203.0.117.1/32", "198.51.100.9/32"}
+	s.Auto.Range = []string{"203.0.118.0/24"}
+	s.Names = map[string]nameFilter{"n": {Filter: true, Community: true}}
+	f := snap(t, s)
+	for _, c := range []struct{ addr, reason, source string }{
+		{"203.0.113.1", "manual", "address"},
+		{"203.0.114.9", "manual", "range"},
+		{"198.51.100.5", "", ""}, // allow wins
+		{"203.0.117.1", "", ""},  // an automatic ban cuts shares only
+		{"203.0.118.9", "", ""},
+		{"198.51.100.9", "", ""},
+		{"203.0.115.9", "", ""},
+		{"203.0.116.9", "", ""},
+		{"192.0.2.9", "", ""},
+		{"192.0.3.1", "", ""},
+		{"192.0.4.77", "", ""},
+	} {
+		r, src := f.decideFront(netip.MustParseAddr(c.addr))
+		if r != c.reason || src != c.source {
+			t.Errorf("decideFront(%s) = %q/%q, want %q/%q", c.addr, r, src, c.reason, c.source)
+		}
+	}
+}
+
+func TestBannedAddressNeverReachesFront(t *testing.T) {
+	var s snapshot
+	s.Manual.Address = []string{"203.0.113.7/32"}
+	h := holderWith(snap(t, s))
+	_, _, reg, _ := rig(t)
+	e := newEvents()
+	front, got := fakeFront(t)
+	run := func(peer *net.TCPAddr) {
+		v, c := tcpPair(t)
+		defer v.Close()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			defer c.Close()
+			handleTLS(filterCfg(front), reg, newConnCap(5, "t"), h, e, nil, fromAddr{c, peer})
+		}()
+		v.Write(clientHello("relay.test"))
+		v.(*net.TCPConn).CloseWrite()
+		io.Copy(io.Discard, v)
+		<-done
+	}
+	run(testVisitor)
+	select {
+	case b := <-got:
+		t.Fatalf("banned peer reached the front (%d bytes)", len(b))
+	case <-time.After(200 * time.Millisecond):
+	}
+	p := flushed(t, e)
+	if len(p) != 1 || len(p[0].Refusals) != 1 || p[0].Refusals[0].Name != "" || p[0].Refusals[0].Reason != "manual" || p[0].Refusals[0].Source != "address" {
+		t.Fatalf("posts = %+v, want one manual/address refusal", p)
+	}
+	run(&net.TCPAddr{IP: net.ParseIP("203.0.113.8"), Port: 40000})
+	if b := <-got; len(b) == 0 {
+		t.Fatal("unbanned peer was not forwarded")
 	}
 }

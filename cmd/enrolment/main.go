@@ -15,10 +15,12 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/ReCasaOS/recasaos-relay/internal/admin"
+	"github.com/ReCasaOS/recasaos-relay/internal/autoban"
 	"github.com/ReCasaOS/recasaos-relay/internal/dnszone"
 	"github.com/ReCasaOS/recasaos-relay/internal/fleets"
 	"github.com/ReCasaOS/recasaos-relay/internal/gc"
@@ -115,6 +117,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	abCfg, abOn, err := autoBanFromEnv()
+	if err != nil {
+		return err
+	}
+	var abp atomic.Pointer[autoBan] // set once the store is open: front's lines may arrive before
+	observe := func(e journal.Entry) {
+		if a := abp.Load(); a != nil {
+			a.Front(e)
+		}
+	}
 	var jw *journal.Writer // nil with LOG_DIR set empty: every journal call is then a no-op
 	if dir := lookupenv("LOG_DIR", "/data/logs"); dir != "" {
 		keep, size, err := journalLimits()
@@ -133,7 +145,7 @@ func run() error {
 					log.Printf("front access log not kept: %v", err)
 				} else {
 					defer l.Close()
-					go serveIngest(l, fw)
+					go serveIngest(l, fw, observe)
 				}
 			}
 		}
@@ -175,9 +187,19 @@ func run() error {
 	// Relay-side protection of shared apps, only with sharing: the filter routes `share` polls exist
 	// only then, and without them nothing would use the feeds or DB-IP. Its retention runs either
 	// way (nil pointers below: the handlers and the page treat them as absent).
+	var autoBanDep server.AutoBan // never a nil *autoBan in the interface
 	prot := newProtection(st, storePath, cfg.ShareDomain != "", cfg.FilterMaxEntries, cfg.CommunityMinFleetAge, jw)
+	if abOn && cfg.ShareDomain != "" {
+		ab := &autoBan{det: autoban.New(abCfg, time.Now), store: st, compiler: prot.compiler, journal: jw, now: time.Now, shareDom: strings.ToLower(cfg.ShareDomain)}
+		abp.Store(ab)
+		log.Printf("autoban: on (404: %d, names: %d, traps: %d, window: %s)", abCfg.NotFound, abCfg.Names, abCfg.Traps, abCfg.Window)
+		if lookupenv("LOG_DIR", "/data/logs") == "" || lookupenv("LOG_INGEST_ADDR", ":8083") == "" {
+			log.Printf("autoban: no front log ingest, only unknown share names are watched")
+		}
+		autoBanDep = ab
+	}
 	srvDeps := server.Deps{Store: st, Headscale: hs, PolicyHook: pol.Hook, Remover: remover,
-		Protect: prot.compiler, Community: prot.engine, Journal: jw}
+		Protect: prot.compiler, Community: prot.engine, Journal: jw, AutoBan: autoBanDep}
 	// The operator page, under /admin, only when ADMIN_TOKEN is set (404 otherwise).
 	var adminH http.Handler
 	stopStreams := make(chan struct{}) // closed by srv.Shutdown: the live journals must not hold it

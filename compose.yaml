@@ -103,6 +103,12 @@ services:
       FILTER_MAX_ENTRIES: ${FILTER_MAX_ENTRIES:-1000000}
       # Age a fleet needs before its ban reports count. For tests only: keep the default in production.
       COMMUNITY_MIN_FLEET_AGE: ${COMMUNITY_MIN_FLEET_AGE:-168h}
+      # Automatic bans (only with SHARE_DOMAIN): "off" disables them; thresholds, and the window of the 404 and unknown-name counters. Empty: the default.
+      AUTOBAN: ${AUTOBAN:-}
+      AUTOBAN_404: ${AUTOBAN_404:-}
+      AUTOBAN_NAMES: ${AUTOBAN_NAMES:-}
+      AUTOBAN_TRAPS: ${AUTOBAN_TRAPS:-}
+      AUTOBAN_WINDOW: ${AUTOBAN_WINDOW:-}
       # The caps `share` enforces, read here only to show them on /admin: keep them equal to share's below.
       CONNS_PER_IP: ${CONNS_PER_IP:-256}
       CONNS_PER_IP_PER_BOX: ${CONNS_PER_IP_PER_BOX:-64}

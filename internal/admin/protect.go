@@ -422,6 +422,10 @@ func (h *handler) addManual(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
+	if strings.HasPrefix(m.Note, store.AutoNote) { // the compiler would file it as an automatic ban
+		http.Error(w, "note: must not start with \"auto ·\", which is reserved for the relay's own bans", http.StatusBadRequest)
+		return
+	}
 	ctx, cancel := writeCtx(r)
 	defer cancel()
 	if _, err := h.deps.Store.AddManual(ctx, m); err != nil {

@@ -16,8 +16,8 @@ const (
 
 // serveIngest takes front's access log (Caddy's `output net`, one JSON line per request) on l and writes
 // each line to jw as a front entry, so the journal's daily files and LOG_KEEP apply to it. It returns when
-// l is closed. Only the compose network reaches l: the port is never published nor routed by front.
-func serveIngest(l net.Listener, jw *journal.Writer) {
+// l is closed. observe, when not nil, sees every parsed line before it is written. Only the compose network reaches l: the port is never published nor routed by front.
+func serveIngest(l net.Listener, jw *journal.Writer, observe func(journal.Entry)) {
 	slots := make(chan struct{}, maxIngestConns)
 	for {
 		c, err := l.Accept()
@@ -32,7 +32,7 @@ func serveIngest(l net.Listener, jw *journal.Writer) {
 		case slots <- struct{}{}:
 			go func() {
 				defer func() { <-slots }()
-				ingest(c, jw)
+				ingest(c, jw, observe)
 			}()
 		default:
 			c.Close()
@@ -42,7 +42,7 @@ func serveIngest(l net.Listener, jw *journal.Writer) {
 
 // ingest reads one connection; unparsable and over-long lines are dropped, Write never blocks. No idle
 // deadline: front may stay quiet for hours, and the listener's TCP keepalive (Go's default) ends a dead peer.
-func ingest(c net.Conn, jw *journal.Writer) {
+func ingest(c net.Conn, jw *journal.Writer, observe func(journal.Entry)) {
 	defer c.Close()
 	r := bufio.NewReaderSize(c, maxIngestLine)
 	for {
@@ -55,6 +55,9 @@ func ingest(c net.Conn, jw *journal.Writer) {
 			return // closed, idle, or a last line without its newline
 		}
 		if e, ok := journal.ParseCaddy(line); ok {
+			if observe != nil {
+				observe(e)
+			}
 			jw.Write(e)
 		}
 	}

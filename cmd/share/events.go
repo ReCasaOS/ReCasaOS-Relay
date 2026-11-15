@@ -24,6 +24,12 @@ type seenItem struct {
 	NodeID string `json:"node_id"`
 }
 
+// unknownItem is a try of a share name no box holds (name is the box label, or a cut malformed name).
+type unknownItem struct {
+	Key  string `json:"key"`
+	Name string `json:"name"`
+}
+
 type refKey struct{ Hour, Name, Key, Reason, Source string }
 
 type refItem struct {
@@ -36,8 +42,10 @@ type refItem struct {
 }
 
 type eventsBody struct {
-	Seen     []seenItem `json:"seen"`
-	Refusals []refItem  `json:"refusals"`
+	Seen     []seenItem    `json:"seen"`
+	Refusals []refItem     `json:"refusals"`
+	Unknown  []unknownItem `json:"unknown"`
+	Boxes    []string      `json:"boxes"` // addresses a box connected from: exempt from automatic bans
 }
 
 // events tells enrolment which visitor reached which box (it needs that to accept ban reports) and how
@@ -48,13 +56,17 @@ type events struct {
 	mu       sync.Mutex
 	seenAt   map[seenItem]time.Time // last recorded, pruned on flush
 	seenQ    []seenItem             // oldest first
+	unkAt    map[unknownItem]time.Time
+	unkQ     []unknownItem // oldest first
+	boxAt    map[string]time.Time
+	boxQ     []string // oldest first
 	refs     map[refKey]*refItem
 	refOrder []refKey                          // oldest first
 	rows     map[[2]string]map[refKey]struct{} // rows recorded per (hour, name), kept across flushes
 }
 
 func newEvents() *events {
-	return &events{now: time.Now, seenAt: map[seenItem]time.Time{}, refs: map[refKey]*refItem{}, rows: map[[2]string]map[refKey]struct{}{}}
+	return &events{now: time.Now, seenAt: map[seenItem]time.Time{}, unkAt: map[unknownItem]time.Time{}, boxAt: map[string]time.Time{}, refs: map[refKey]*refItem{}, rows: map[[2]string]map[refKey]struct{}{}}
 }
 
 // eventKey is the address key of the contract: IPv4 as a.b.c.d/32, IPv6 as its /64. Addresses that are
@@ -69,6 +81,18 @@ func eventKey(a netip.Addr) string {
 		return netip.PrefixFrom(a, 32).String()
 	}
 	return netip.PrefixFrom(a, 64).Masked().String()
+}
+
+// clientEventKey is eventKey of a tunnel's Client ("a.b.c.d", an IPv6 /64 prefix, or "unknown" -> "").
+func clientEventKey(s string) string {
+	if p, err := netip.ParsePrefix(s); err == nil {
+		return eventKey(p.Addr())
+	}
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return ""
+	}
+	return eventKey(a)
 }
 
 // connKey is eventKey of c's peer.
@@ -95,6 +119,43 @@ func (e *events) seen(key, nodeID string) {
 		e.seenAt[k] = now
 	}
 	e.seenQ = append(e.seenQ, k)
+	e.trim()
+}
+
+// unknown records a try of a share name no box holds, unless the same pair was recorded less than 10
+// minutes ago.
+func (e *events) unknown(key, name string) {
+	if e == nil || key == "" {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	k, now := unknownItem{key, name}, e.now()
+	if t, ok := e.unkAt[k]; ok && now.Sub(t) < seenEvery {
+		return
+	}
+	if len(e.unkAt) < maxEvents { // shortcut: as in seen, a flood sends but does not remember
+		e.unkAt[k] = now
+	}
+	e.unkQ = append(e.unkQ, k)
+	e.trim()
+}
+
+// box records the address a box connected from, unless it was recorded less than 10 minutes ago.
+func (e *events) box(key string) {
+	if e == nil || key == "" {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	now := e.now()
+	if t, ok := e.boxAt[key]; ok && now.Sub(t) < seenEvery {
+		return
+	}
+	if len(e.boxAt) < maxEvents {
+		e.boxAt[key] = now
+	}
+	e.boxQ = append(e.boxQ, key)
 	e.trim()
 }
 
@@ -154,13 +215,21 @@ func (e *events) putBack(rows []refItem) {
 	e.refOrder = order
 }
 
-// trim drops the oldest pending items past maxEvents (seen first: a refusal count cannot be rebuilt).
+// trim drops the oldest pending items past maxEvents (unknown, seen, boxes first: a refusal count cannot
+// be rebuilt).
 func (e *events) trim() {
-	for over := len(e.seenQ) + len(e.refOrder) - maxEvents; over > 0; over-- {
-		if len(e.seenQ) > 0 {
-			delete(e.seenAt, e.seenQ[0]) // never sent: a later sighting must be queued again
+	for over := len(e.seenQ) + len(e.unkQ) + len(e.boxQ) + len(e.refOrder) - maxEvents; over > 0; over-- {
+		switch { // never sent: a later sighting must be queued again
+		case len(e.unkQ) > 0: // the visitor chose these names: they go first
+			delete(e.unkAt, e.unkQ[0])
+			e.unkQ = e.unkQ[1:]
+		case len(e.seenQ) > 0:
+			delete(e.seenAt, e.seenQ[0])
 			e.seenQ = e.seenQ[1:]
-		} else {
+		case len(e.boxQ) > 0:
+			delete(e.boxAt, e.boxQ[0])
+			e.boxQ = e.boxQ[1:]
+		default:
 			delete(e.refs, e.refOrder[0])
 			e.refOrder = e.refOrder[1:]
 		}
@@ -181,35 +250,51 @@ func (e *events) flush(ctx context.Context, url string) {
 			delete(e.seenAt, k)
 		}
 	}
+	for k, t := range e.unkAt {
+		if t.Before(cut) {
+			delete(e.unkAt, k)
+		}
+	}
+	for k, t := range e.boxAt {
+		if t.Before(cut) {
+			delete(e.boxAt, k)
+		}
+	}
 	hour := e.now().UTC().Truncate(time.Hour).Format(time.RFC3339)
 	for hn := range e.rows {
 		if hn[0] != hour {
 			delete(e.rows, hn)
 		}
 	}
-	seen, refs := e.seenQ, make([]refItem, 0, len(e.refOrder))
+	seen, unk, boxes, refs := e.seenQ, e.unkQ, e.boxQ, make([]refItem, 0, len(e.refOrder))
 	for _, k := range e.refOrder {
 		refs = append(refs, *e.refs[k])
 	}
-	e.seenQ, e.refs, e.refOrder = nil, map[refKey]*refItem{}, nil
+	e.seenQ, e.unkQ, e.boxQ, e.refs, e.refOrder = nil, nil, nil, map[refKey]*refItem{}, nil
 	e.mu.Unlock()
 
-	for len(seen)+len(refs) > 0 {
+	for len(seen)+len(unk)+len(boxes)+len(refs) > 0 {
 		var b eventsBody
 		n := min(len(seen), eventsPerPost)
 		b.Seen, seen = seen[:n], seen[n:]
-		m := min(len(refs), eventsPerPost-n)
+		u := min(len(unk), eventsPerPost-n)
+		b.Unknown, unk = unk[:u], unk[u:]
+		x := min(len(boxes), eventsPerPost-n-u)
+		b.Boxes, boxes = boxes[:x], boxes[x:]
+		m := min(len(refs), eventsPerPost-n-u-x)
 		b.Refusals, refs = refs[:m], refs[m:]
 		code := e.post(ctx, url, b)
 		if code == http.StatusNoContent {
 			continue
 		}
 		if code >= 400 && code < 500 && code != http.StatusRequestTimeout && code != http.StatusTooManyRequests {
-			log.Printf("share: events: HTTP %d, dropping %d items", code, n+m)
+			log.Printf("share: events: HTTP %d, dropping %d items", code, n+u+x+m)
 			continue
 		}
 		e.mu.Lock() // put back: this chunk and the rest, before anything newer
 		e.seenQ = append(append(b.Seen, seen...), e.seenQ...)
+		e.unkQ = append(append(b.Unknown, unk...), e.unkQ...)
+		e.boxQ = append(append(b.Boxes, boxes...), e.boxQ...)
 		e.putBack(append(append([]refItem{}, b.Refusals...), refs...))
 		e.trim()
 		e.mu.Unlock()

@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -59,6 +60,12 @@ type Config struct {
 // all, across its /64s (IPv4: the same address, so the per-address limit is the one that binds).
 const prefix48Factor = 10
 
+// AutoBan is what the routes tell the automatic ban detector.
+type AutoBan interface {
+	Unknown(ctx context.Context, key, name string) // one try of a share name without a tunnel
+	Box(key string)                                // a box authenticated from key
+}
+
 // Deps carries the collaborators of the handlers. Store and Headscale are required for /v1/fleets.
 type Deps struct {
 	Store     store.Store
@@ -79,6 +86,8 @@ type Deps struct {
 	Community *community.Engine
 	// Journal receives the relay events of the box routes; nil: none are written.
 	Journal *journal.Writer
+	// AutoBan counts unknown share names and exempts box addresses from automatic bans; nil: nothing is counted.
+	AutoBan AutoBan
 }
 
 // New returns the service's HTTP handler.

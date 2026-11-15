@@ -87,6 +87,7 @@ func Handler(reg *Registry, resolve Resolver, limit *ratelimit.Limiter, now func
 			}
 		}()
 		t := newTunnel(box, key, ws, sess)
+		t.Client = clientKey(r)
 		if old := reg.Put(box.Name, t); old != nil {
 			old.Close(StatusReplaced, "replaced")
 		}

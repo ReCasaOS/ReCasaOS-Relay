@@ -36,6 +36,7 @@ var ErrFull = errors.New("tunnel: too many open streams")
 type Tunnel struct {
 	Name, NodeID, FleetID string
 	Key                   string
+	Client                string // address the box connected from, as clientKey spells it
 
 	ws   *websocket.Conn
 	sess *yamux.Session

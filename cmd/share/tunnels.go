@@ -77,15 +77,18 @@ func resolver(enrolmentURL string) tunnel.Resolver {
 // toTunnel sends the visitor connection c (replay holds its peeked ClientHello) into box's tunnel,
 // unless fh's filter refuses c's address for that box, or c's address already holds perBox's max
 // streams of that box: one address alone must not fill the tunnel's tunnel.MaxStreams and lock every
-// other visitor out. A name no tunnel serves closes silently, before the filter: nothing is recorded.
+// other visitor out. A name no tunnel serves closes before the filter, with no refusal row: it is
+// reported as an unknown name (for automatic bans) and gets one rate-limited "nobox" journal line.
 func toTunnel(reg *tunnel.Registry, perBox *connCap, fh *filterHolder, ev *events, jw *journal.Writer, host, box string, c, replay net.Conn) {
 	start := time.Now()
 	t, ok := reg.Get(box)
 	if !ok {
+		noBox(fh, ev, jw, host, box, c)
 		return
 	}
-	// Only share names are filtered: the relay host (enrolment, Headscale, /admin) must stay
-	// reachable from any country. A refused visitor gets a plain close.
+	// Country, network, feed and community bans only apply to share names: the relay host (enrolment,
+	// Headscale, /admin) must stay reachable from any country. Hand-made address and range bans also close it
+	// (frontRefused); automatic bans do not. A refused visitor gets a plain close.
 	if f := fh.get(); f != nil {
 		if a, ok := remoteAddr(c); ok {
 			if reason, source := f.decide(a, box); reason != "" {
@@ -126,6 +129,46 @@ func toTunnel(reg *tunnel.Registry, perBox *connCap, fh *filterHolder, ev *event
 	vc := &idleConn{Conn: replay, t: idle}
 	sni.Forward(vc, stream) // the stream counts the bytes into t
 	jw.Write(journal.Entry{Src: "share", IP: peerIP(c), Host: host, Act: "close", Ms: time.Since(start).Milliseconds(), In: vc.in.Load(), Out: vc.out.Load()})
+}
+
+// frontRefused closes nothing itself: it records and reports true when an operator's hand-made address or range
+// ban covers c, which must then not reach the relay's own pages. No filter yet, or no readable peer: pass.
+func frontRefused(fh *filterHolder, ev *events, jw *journal.Writer, c net.Conn, host string) bool {
+	f := fh.get()
+	if f == nil {
+		return false
+	}
+	a, ok := remoteAddr(c)
+	if !ok {
+		return false
+	}
+	reason, source := f.decideFront(a)
+	if reason == "" {
+		return false
+	}
+	ev.refused("", eventKey(a), reason, source)
+	fh.cuts.log(jw, cmp.Or(eventKey(a), a.String()), a.String(), host, reason, source, time.Now())
+	return true
+}
+
+// noBox reports a try of a share name no box holds. The label and host are cut: they are the
+// visitor's, and a long one would grow the queue and make enrolment refuse whole batches. An address
+// the filter already refuses for the front, or for every share name (automatic ban), reports nothing (each report costs enrolment a query).
+func noBox(fh *filterHolder, ev *events, jw *journal.Writer, host, name string, c net.Conn) {
+	name, host = name[:min(len(name), 64)], host[:min(len(host), 64)]
+	if f := fh.get(); f != nil {
+		if a, ok := remoteAddr(c); ok {
+			if r, _ := f.decideFront(a); r != "" || f.aAddress.contains(a) || f.aRange.contains(a) {
+				return
+			}
+		}
+	}
+	ev.unknown(connKey(c), name)
+	if fh == nil {
+		return
+	}
+	key := cmp.Or(connKey(c), peerIP(c))
+	fh.cuts.log(jw, key, peerIP(c), host, "nobox", "", time.Now())
 }
 
 // peerIP is the visitor's plain address (not the /64 key); private ones too: it is the operator's own log.

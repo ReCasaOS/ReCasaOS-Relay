@@ -125,6 +125,7 @@ td.wrap { min-width:14rem; }
 <section class="card" id="manual">
 <div class="hd"><h2>Manual bans</h2><span class="chip">{{len .Manual}}</span>{{if not .Geo}}<span class="chip warn">country and ASN bans wait for the DB-IP files</span>{{end}}</div>
 <div class="bd">
+<p class="mut">Bans noted "auto" were set by the relay itself and only cut shared apps; your own address and range bans also close the relay's own pages.</p>
 {{if .Manual}}<table>
 <tr><th>Kind</th><th>Value</th><th>Note</th><th>Since</th><th>Until</th><th></th></tr>
 {{range .Manual}}<tr><td class="mut">{{.Kind}}</td><td class="n"><code>{{if eq .Kind "asn"}}AS{{end}}{{.Value}}</code></td><td class="mut wrap">{{.Note}}</td>

@@ -148,7 +148,12 @@ func viewLine(e journal.Entry) journalLine {
 	case "log":
 		add(e.Svc)
 	}
-	add(map[string]string{"pass": "passed", "cut": "cut", "close": "closed"}[e.Act], e.Reason, e.Source)
+	noBox := e.Act == "cut" && e.Reason == "nobox"
+	if noBox {
+		add("no box behind this name")
+	} else {
+		add(map[string]string{"pass": "passed", "cut": "cut", "close": "closed"}[e.Act], e.Reason, e.Source)
+	}
 	if e.Act == "close" {
 		add(millis(e.Ms), "↓ "+humanBytes(float64(e.Out))+" ↑ "+humanBytes(float64(e.In)))
 	}
@@ -158,7 +163,9 @@ func viewLine(e journal.Entry) journalLine {
 	}
 	l.Text = strings.Join(p, " · ")
 	switch {
-	case e.Act == "cut" || e.Status >= 500:
+	case noBox: // a guessed name, not a refusal of a known visitor
+		l.Class = "warn"
+	case e.Act == "cut" || e.Status >= 500 || e.Event == "ban_auto":
 		l.Class = "bad"
 	case e.Status >= 400 || e.Src == "log":
 		l.Class = "warn"

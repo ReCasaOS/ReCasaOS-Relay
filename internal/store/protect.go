@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS community_bans (
 	until INTEGER NOT NULL, reasons TEXT NOT NULL, fleets INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS community_strikes (key TEXT PRIMARY KEY, strikes INTEGER NOT NULL, last_end INTEGER NOT NULL);
+-- until: the end of the key's last automatic ban; the memory that makes the next one a repeat.
+CREATE TABLE IF NOT EXISTS auto_strikes (key TEXT PRIMARY KEY, strikes INTEGER NOT NULL, until INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS community_openers (
 	key TEXT NOT NULL, since INTEGER NOT NULL, fleet_id TEXT NOT NULL,
 	PRIMARY KEY (key, since, fleet_id)
@@ -450,8 +452,105 @@ func (s *sqlStore) AddManual(ctx context.Context, m ManualBan) (int64, error) {
 		m.Kind, m.Value, m.Note, ts(m.Since), tz(m.Until))
 }
 
-func (s *sqlStore) DeleteManual(ctx context.Context, id int64) error {
-	return s.exec(ctx, "delete manual", `DELETE FROM share_manual WHERE id = ?`, id)
+// DeleteManual removes a ban; deleting an automatic one also forgets its key's strikes (the
+// operator judged it wrong), while PruneProtection's expiry delete keeps them.
+func (s *sqlStore) DeleteManual(ctx context.Context, id int64) (err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: delete manual: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+	var kind, value, note string
+	switch err = tx.QueryRowContext(ctx, `SELECT kind, value, note FROM share_manual WHERE id = ?`, id).Scan(&kind, &value, &note); err {
+	case nil:
+		if strings.HasPrefix(note, AutoNote) {
+			if kind == "address" {
+				value += "/32"
+			}
+			if _, err = tx.ExecContext(ctx, `DELETE FROM auto_strikes WHERE key = ?`, value); err != nil {
+				return fmt.Errorf("store: delete manual: %w", err)
+			}
+		}
+	case sql.ErrNoRows:
+	default:
+		return fmt.Errorf("store: delete manual: %w", err)
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM share_manual WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("store: delete manual: %w", err)
+	}
+	return tx.Commit()
+}
+
+// AutoNote starts the note of every ban the relay set itself; it tells those rows from the operator's.
+const AutoNote = "auto · "
+
+// maxAutoBans bounds the active automatic rows: rotating addresses would otherwise grow share_manual without limit.
+var maxAutoBans = 5000
+
+func (s *sqlStore) AddAutoBan(ctx context.Context, key, note string, now time.Time) (b ManualBan, ok bool, err error) {
+	b = ManualBan{Kind: "range", Value: key, Note: note, Since: now}
+	if v, found := strings.CutSuffix(key, "/32"); found {
+		b.Kind, b.Value = "address", v
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return b, false, fmt.Errorf("store: auto ban: %w", err)
+	}
+	defer func() {
+		if err != nil || !ok {
+			tx.Rollback()
+		}
+	}()
+	var n int
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM share_manual WHERE kind = ? AND value = ? AND (until = 0 OR until > ?)`, b.Kind, b.Value, ts(now)).Scan(&n); err != nil || n > 0 {
+		return b, false, wrap("auto ban", err)
+	}
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM share_manual WHERE note LIKE ? AND (until = 0 OR until > ?)`, AutoNote+"%", ts(now)).Scan(&n); err != nil || n >= maxAutoBans {
+		return b, false, wrap("auto ban", err)
+	}
+	d := 24 * time.Hour
+	var last int64
+	switch err = tx.QueryRowContext(ctx, `SELECT until FROM auto_strikes WHERE key = ?`, key).Scan(&last); err {
+	case nil:
+		if now.Sub(fromTs(last)) < 30*24*time.Hour {
+			d = 7 * 24 * time.Hour
+		}
+	case sql.ErrNoRows:
+	default:
+		return b, false, wrap("auto ban", err)
+	}
+	b.Until = now.Add(d)
+	res, err := tx.ExecContext(ctx, `INSERT INTO share_manual (kind, value, note, since, until) VALUES (?, ?, ?, ?, ?)`, b.Kind, b.Value, b.Note, ts(b.Since), ts(b.Until))
+	if err == nil {
+		b.ID, err = res.LastInsertId()
+	}
+	if err == nil {
+		_, err = tx.ExecContext(ctx, `INSERT INTO auto_strikes (key, strikes, until) VALUES (?, 1, ?) ON CONFLICT(key) DO UPDATE SET strikes = strikes + 1, until = excluded.until`, key, ts(b.Until))
+	}
+	if err != nil {
+		return b, false, wrap("auto ban", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return b, false, wrap("auto ban", err)
+	}
+	return b, true, nil
+}
+
+func wrap(what string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("store: %s: %w", what, err)
+}
+
+func (s *sqlStore) NameClaimed(ctx context.Context, name string) (bool, error) {
+	var ok bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM share_names WHERE name = ?)`, name).Scan(&ok)
+	return ok, wrap("name claimed", err)
 }
 
 // ManualBans returns the bans in force at now.
@@ -578,6 +677,7 @@ func (s *sqlStore) PruneProtection(ctx context.Context, now time.Time) error {
 		{`DELETE FROM share_reports WHERE received < ?`, now.Add(-30 * day)},
 		{`DELETE FROM share_refusals WHERE hour < ?`, now.Add(-7 * day)},
 		{`DELETE FROM community_strikes WHERE last_end <> 0 AND last_end < ?`, now.Add(-30 * day)},
+		{`DELETE FROM auto_strikes WHERE until <= ?`, now.Add(-30 * day)},
 		{`DELETE FROM community_openers WHERE since < ?`, now.Add(-32 * day)},
 		{`DELETE FROM share_manual WHERE until <> 0 AND until <= ?`, now},
 	} {

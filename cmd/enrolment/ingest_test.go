@@ -33,7 +33,7 @@ func TestIngestWritesCaddyLinesAsFrontEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer l.Close()
-	go serveIngest(l, jw)
+	go serveIngest(l, jw, nil)
 
 	c, err := net.Dial("tcp", l.Addr().String())
 	if err != nil {
@@ -81,7 +81,7 @@ func TestIngestLimitsConnections(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer l.Close()
-	go serveIngest(l, jw)
+	go serveIngest(l, jw, nil)
 	for i := 0; i < maxIngestConns; i++ {
 		c, err := net.Dial("tcp", l.Addr().String())
 		if err != nil {
