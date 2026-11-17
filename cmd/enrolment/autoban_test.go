@@ -166,7 +166,7 @@ func claimAll(t *testing.T, st store.Store, names []string) {
 func TestAutoBanIgnoresSharedAppHosts(t *testing.T) {
 	e := newAutoBanEnv(t)
 	e.ab.shareDom = "box.example.org"
-	for _, h := range []string{"app.box.example.org", "APP.box.example.org:80", "box.example.org"} {
+	for _, h := range []string{"app.nas.box.example.org", "APP.nas.box.example.org:80", "app.nas.box.example.org.:80", "box.example.org"} {
 		for i := 0; i < 3; i++ {
 			l := trap("203.0.113.7")
 			l.Path, l.Host = "/wp-admin", h
@@ -234,5 +234,18 @@ func TestAutoBanKeepsThresholdsAndCountsOverARestart(t *testing.T) {
 	broken.ab.restore()
 	if got := broken.ab.Thresholds(); got.Traps != 3 {
 		t.Errorf("broken file: %+v, want the defaults", got)
+	}
+}
+
+func TestAutoBanCountsTrapsOnABareBoxName(t *testing.T) {
+	e := newAutoBanEnv(t)
+	e.ab.shareDom = "box.example.org"
+	for i := 0; i < 3; i++ {
+		l := trap("203.0.113.8")
+		l.Path, l.Host, l.Status = "/.env", "NAS.box.example.org:80", 301
+		e.ab.Front(l)
+	}
+	if b := e.bans(t); len(b) != 1 {
+		t.Fatalf("bans %+v, want one: a box's bare name serves no app", b)
 	}
 }
