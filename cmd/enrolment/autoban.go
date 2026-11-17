@@ -121,7 +121,7 @@ func writeFile(path string, b []byte) error {
 // Front takes one parsed front access line.
 func (a *autoBan) Front(e journal.Entry) {
 	key, ok := community.Key(e.IP)
-	if !ok || a.sharedHost(e.Host) {
+	if !ok || a.appHost(e.Host) {
 		return
 	}
 	if fault, detail := a.det.Front(key, e.Path, e.Status); fault != "" {
@@ -129,8 +129,10 @@ func (a *autoBan) Front(e journal.Entry) {
 	}
 }
 
-// sharedHost: share sends all of port 80 to front, so a plain-HTTP request to a shared app is a line too.
-func (a *autoBan) sharedHost(host string) bool {
+// appHost: share sends all of port 80 to front, so a plain-HTTP request to a shared app is a line too,
+// and an app may well serve /wp-login.php. A box's bare name (<box>.<share domain>) serves nothing:
+// crawlers take it from the wildcard certificates, so its lines count like the relay's own.
+func (a *autoBan) appHost(host string) bool {
 	if a.shareDom == "" {
 		return false
 	}
@@ -138,7 +140,8 @@ func (a *autoBan) sharedHost(host string) bool {
 	if i := strings.LastIndexByte(h, ':'); i >= 0 && !strings.Contains(h[i:], "]") {
 		h = h[:i]
 	}
-	return h == a.shareDom || strings.HasSuffix(h, "."+a.shareDom)
+	box, ok := strings.CutSuffix(h, "."+a.shareDom)
+	return h == a.shareDom || ok && strings.Contains(box, ".")
 }
 
 // Unknown takes one try of a share name that has no tunnel; a held name is not a guess.
