@@ -166,7 +166,7 @@ func claimAll(t *testing.T, st store.Store, names []string) {
 func TestAutoBanIgnoresSharedAppHosts(t *testing.T) {
 	e := newAutoBanEnv(t)
 	e.ab.shareDom = "box.example.org"
-	for _, h := range []string{"app.nas.box.example.org", "APP.nas.box.example.org:80", "box.example.org"} {
+	for _, h := range []string{"app.nas.box.example.org", "APP.nas.box.example.org:80", "app.nas.box.example.org.:80", "box.example.org"} {
 		for i := 0; i < 3; i++ {
 			l := trap("203.0.113.7")
 			l.Path, l.Host = "/wp-admin", h

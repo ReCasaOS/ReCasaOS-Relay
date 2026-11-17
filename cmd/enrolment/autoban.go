@@ -140,6 +140,7 @@ func (a *autoBan) appHost(host string) bool {
 	if i := strings.LastIndexByte(h, ':'); i >= 0 && !strings.Contains(h[i:], "]") {
 		h = h[:i]
 	}
+	h = strings.TrimSuffix(h, ".") // a fully qualified Host is the same name
 	box, ok := strings.CutSuffix(h, "."+a.shareDom)
 	return h == a.shareDom || ok && strings.Contains(box, ".")
 }
